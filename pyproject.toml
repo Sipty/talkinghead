@@ -1,0 +1,67 @@
+# talkinghead: turn a talking-head recording into a finished cut in one command.
+# Pipeline: align (phone picture + separate audio -> master) -> transcribe ->
+#           structure/retakes/content/pauses stages -> edge finalization ->
+#           one ffmpeg render -> machine verification -> visuals overlays.
+[project]
+name = "talkinghead"
+version = "1.0.0"
+description = "Deterministic talking-head editor: one plan, one render, machine-verified."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Chavdar" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+]
+dependencies = [
+    "jsonschema>=4.26.0",
+    # Apple-native Whisper: fastest on M-series, supports word_timestamps.
+    "mlx-whisper>=0.4.0; sys_platform == 'darwin'",
+    # Envelopes, edge placement and the crossfaded audio join all run on numpy.
+    "numpy>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Sipty/talkinghead"
+Repository = "https://github.com/Sipty/talkinghead"
+
+[project.optional-dependencies]
+# Silero VAD gates the mouth-noise pass (noise.py). Optional because it drags
+# in torch: without it the pass falls back to envelope-only gap detection.
+vad = ["silero-vad>=5.1", "onnxruntime>=1.17"]
+
+[project.scripts]
+talkinghead = "talkinghead.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/talkinghead"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "judge: needs a live judge; set TALKINGHEAD_JUDGE_TESTS=1 to run",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# Bug-catching rules only: pyflakes, syntax/statement errors, import order, blind excepts.
+# Pinned explicitly so a newer ruff's default set cannot turn style opinions into lint failures.
+select = ["E4", "E7", "E9", "F", "I", "BLE"]

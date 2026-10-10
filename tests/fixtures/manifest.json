@@ -1,0 +1,6198 @@
+{
+ "note": "Short clips (16 kHz mono 16-bit PCM WAV) cut from one recorded talking-head source. Times in 'events' and 'words' are REBASED to the clip: clip_t = source_t - source_start. The source itself is not committed; tests skip when a clip is missing.",
+ "source": "<SOURCE_VIDEO>",
+ "source_duration": 1894.602667,
+ "source_floor_5ms_dbfs": -54.276,
+ "source_floor_note": "talkinghead.audio.noise_floor (25th percentile of the 5 ms dBFS envelope) over the whole source. On a 6-20 s clip the same percentile is NOT a noise floor: it lands on speech in speech-dense clips (-43.5 dBFS on word-boundary-216.0) and on dead air in silence-heavy ones (-68.8 dBFS on outro-1882.0). Tests that snap word bounds pass this source floor explicitly.",
+ "source_vad_floor_rms": 33.51,
+ "source_vad_threshold_dbfs": -53.8,
+ "source_vad_note": "detect_silences over the whole source: 15th-percentile 20 ms RMS floor 33.5 (-59.8 dBFS), speech threshold 2x = -53.8 dBFS. A clip-local run has its own threshold (e.g. -50.5 dBFS on voiced-gap-253.0), so clip-local silences can appear where the full-file run found none; the per-event 'silences_inside' are the full-file result.",
+ "cut_command": "ffmpeg -y -v error -ss START -to END -i SRC -vn -ar 16000 -ac 1 -c:a pcm_s16le -f wav -fflags +bitexact -flags:a +bitexact OUT",
+ "clips": [
+  {
+   "file": "word-boundary-13.0.wav",
+   "category": "word-boundary",
+   "source_start": 13.0,
+   "source_end": 27.0,
+   "why": "folded 'Hello.' 15.12-20.80: Parakeet end 20.80, acoustic end 15.80",
+   "words": [
+    {
+     "w": "Hello.",
+     "s": 2.12,
+     "e": 7.8,
+     "p": 1.0
+    },
+    {
+     "w": "Let's",
+     "s": 7.8,
+     "e": 8.28,
+     "p": 1.0
+    },
+    {
+     "w": "try",
+     "s": 8.28,
+     "e": 8.52,
+     "p": 1.0
+    },
+    {
+     "w": "one",
+     "s": 8.68,
+     "e": 8.92,
+     "p": 1.0
+    },
+    {
+     "w": "once",
+     "s": 8.92,
+     "e": 9.4,
+     "p": 1.0
+    },
+    {
+     "w": "again.",
+     "s": 9.4,
+     "e": 12.36,
+     "p": 1.0
+    },
+    {
+     "w": "Hello.",
+     "s": 12.36,
+     "e": 13.8,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "word_boundaries",
+     "start": 2.12,
+     "end": 7.8,
+     "why": "Parakeet end-stamp of 'Hello.' is 20.80 s but the 10 ms RMS envelope first stays below floor+6 dB (-47.9 dBFS) for >=40 ms at 15.80 s: acoustic end is 5000 ms earlier than ASR end.",
+     "words": [
+      {
+       "w": "Hello.",
+       "s": 2.12,
+       "e": 7.8
+      },
+      {
+       "w": "Let's",
+       "s": 7.8,
+       "e": 8.28
+      },
+      {
+       "w": "try",
+       "s": 8.28,
+       "e": 8.52
+      },
+      {
+       "w": "one",
+       "s": 8.68,
+       "e": 8.92
+      },
+      {
+       "w": "once",
+       "s": 8.92,
+       "e": 9.4
+      },
+      {
+       "w": "again.",
+       "s": 9.4,
+       "e": 12.36
+      }
+     ],
+     "detector": "rms10ms_envelope",
+     "detector_output": {
+      "asr_start": 2.12,
+      "asr_end": 7.8,
+      "acoustic_onset": 2.46,
+      "acoustic_end": 2.8,
+      "acoustic_minus_asr_s": -5.0,
+      "threshold_dbfs": -47.915,
+      "floor10_dbfs": -53.915,
+      "next_word": {
+       "w": "Let's",
+       "s": 7.8,
+       "e": 8.28
+      }
+     },
+     "whisper_words": [
+      {
+       "w": "Hello.",
+       "s": 1.72,
+       "e": 2.68
+      },
+      {
+       "w": "Hello.",
+       "s": 3.18,
+       "e": 3.44
+      },
+      {
+       "w": "Let's",
+       "s": 7.46,
+       "e": 8.42
+      },
+      {
+       "w": "try",
+       "s": 8.42,
+       "e": 8.54
+      },
+      {
+       "w": "one",
+       "s": 8.54,
+       "e": 8.8
+      },
+      {
+       "w": "once",
+       "s": 8.8,
+       "e": 9.26
+      },
+      {
+       "w": "again.",
+       "s": 9.26,
+       "e": 9.54
+      }
+     ],
+     "source_start": 15.12,
+     "source_end": 20.8
+    }
+   ]
+  },
+  {
+   "file": "cold-open-26.0.wav",
+   "category": "cold-open",
+   "source_start": 26.0,
+   "source_end": 46.0,
+   "why": "abandoned first take 30.8-43.44",
+   "words": [
+    {
+     "w": "Have",
+     "s": 0.8,
+     "e": 1.12,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 1.12,
+     "e": 1.28,
+     "p": 1.0
+    },
+    {
+     "w": "heard",
+     "s": 1.28,
+     "e": 1.68,
+     "p": 1.0
+    },
+    {
+     "w": "hm",
+     "s": 2.32,
+     "e": 2.64,
+     "p": 1.0
+    },
+    {
+     "w": "hello",
+     "s": 3.6,
+     "e": 4.24,
+     "p": 1.0
+    },
+    {
+     "w": "are",
+     "s": 4.8,
+     "e": 5.04,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 5.2,
+     "e": 5.52,
+     "p": 1.0
+    },
+    {
+     "w": "tired",
+     "s": 5.52,
+     "e": 6.16,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 6.16,
+     "e": 6.48,
+     "p": 1.0
+    },
+    {
+     "w": "Anthropic",
+     "s": 6.48,
+     "e": 7.52,
+     "p": 1.0
+    },
+    {
+     "w": "telling",
+     "s": 7.52,
+     "e": 7.92,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 7.92,
+     "e": 8.08,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 8.08,
+     "e": 8.32,
+     "p": 1.0
+    },
+    {
+     "w": "fan",
+     "s": 8.32,
+     "e": 8.8,
+     "p": 1.0
+    },
+    {
+     "w": "out",
+     "s": 8.8,
+     "e": 8.96,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 8.96,
+     "e": 9.2,
+     "p": 1.0
+    },
+    {
+     "w": "agents",
+     "s": 9.2,
+     "e": 9.68,
+     "p": 1.0
+    },
+    {
+     "w": "in",
+     "s": 9.68,
+     "e": 9.84,
+     "p": 1.0
+    },
+    {
+     "w": "Claude",
+     "s": 9.84,
+     "e": 10.32,
+     "p": 1.0
+    },
+    {
+     "w": "Code",
+     "s": 10.48,
+     "e": 10.96,
+     "p": 1.0
+    },
+    {
+     "w": "or",
+     "s": 10.96,
+     "e": 11.28,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 11.28,
+     "e": 11.52,
+     "p": 1.0
+    },
+    {
+     "w": "tech",
+     "s": 11.52,
+     "e": 11.84,
+     "p": 1.0
+    },
+    {
+     "w": "bros",
+     "s": 11.84,
+     "e": 12.32,
+     "p": 1.0
+    },
+    {
+     "w": "on",
+     "s": 12.32,
+     "e": 12.4,
+     "p": 1.0
+    },
+    {
+     "w": "Twitter",
+     "s": 12.4,
+     "e": 12.8,
+     "p": 1.0
+    },
+    {
+     "w": "telling",
+     "s": 12.8,
+     "e": 13.04,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 13.04,
+     "e": 13.2,
+     "p": 1.0
+    },
+    {
+     "w": "how",
+     "s": 13.2,
+     "e": 13.44,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 13.44,
+     "e": 13.52,
+     "p": 1.0
+    },
+    {
+     "w": "need",
+     "s": 13.52,
+     "e": 13.68,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 13.68,
+     "e": 13.76,
+     "p": 1.0
+    },
+    {
+     "w": "do",
+     "s": 13.76,
+     "e": 13.92,
+     "p": 1.0
+    },
+    {
+     "w": "loop",
+     "s": 14.48,
+     "e": 14.88,
+     "p": 1.0
+    },
+    {
+     "w": "engineering",
+     "s": 14.88,
+     "e": 15.52,
+     "p": 1.0
+    },
+    {
+     "w": "bro",
+     "s": 15.84,
+     "e": 16.16,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 16.64,
+     "e": 16.88,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 17.12,
+     "e": 17.44,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "cold_open",
+     "start": 4.8,
+     "end": 17.44,
+     "why": "Abandoned first take ('are you tired of Anthropic ... loop engineering bro it and'), abandoned before a 10.48 s pause; the fragment 'Well, here is and no' at 53.92-59.76 s is its tail.",
+     "words": [
+      {
+       "w": "hm",
+       "s": 2.32,
+       "e": 2.64
+      },
+      {
+       "w": "hello",
+       "s": 3.6,
+       "e": 4.24
+      },
+      {
+       "w": "are",
+       "s": 4.8,
+       "e": 5.04
+      },
+      {
+       "w": "you",
+       "s": 5.2,
+       "e": 5.52
+      },
+      {
+       "w": "tired",
+       "s": 5.52,
+       "e": 6.16
+      },
+      {
+       "w": "of",
+       "s": 6.16,
+       "e": 6.48
+      },
+      {
+       "w": "Anthropic",
+       "s": 6.48,
+       "e": 7.52
+      },
+      {
+       "w": "telling",
+       "s": 7.52,
+       "e": 7.92
+      },
+      {
+       "w": "you",
+       "s": 7.92,
+       "e": 8.08
+      },
+      {
+       "w": "to",
+       "s": 8.08,
+       "e": 8.32
+      },
+      {
+       "w": "fan",
+       "s": 8.32,
+       "e": 8.8
+      },
+      {
+       "w": "out",
+       "s": 8.8,
+       "e": 8.96
+      },
+      {
+       "w": "the",
+       "s": 8.96,
+       "e": 9.2
+      },
+      {
+       "w": "agents",
+       "s": 9.2,
+       "e": 9.68
+      },
+      {
+       "w": "in",
+       "s": 9.68,
+       "e": 9.84
+      },
+      {
+       "w": "Claude",
+       "s": 9.84,
+       "e": 10.32
+      },
+      {
+       "w": "Code",
+       "s": 10.48,
+       "e": 10.96
+      },
+      {
+       "w": "or",
+       "s": 10.96,
+       "e": 11.28
+      },
+      {
+       "w": "the",
+       "s": 11.28,
+       "e": 11.52
+      },
+      {
+       "w": "tech",
+       "s": 11.52,
+       "e": 11.84
+      },
+      {
+       "w": "bros",
+       "s": 11.84,
+       "e": 12.32
+      },
+      {
+       "w": "on",
+       "s": 12.32,
+       "e": 12.4
+      },
+      {
+       "w": "Twitter",
+       "s": 12.4,
+       "e": 12.8
+      },
+      {
+       "w": "telling",
+       "s": 12.8,
+       "e": 13.04
+      },
+      {
+       "w": "you",
+       "s": 13.04,
+       "e": 13.2
+      },
+      {
+       "w": "how",
+       "s": 13.2,
+       "e": 13.44
+      },
+      {
+       "w": "you",
+       "s": 13.44,
+       "e": 13.52
+      },
+      {
+       "w": "need",
+       "s": 13.52,
+       "e": 13.68
+      },
+      {
+       "w": "to",
+       "s": 13.68,
+       "e": 13.76
+      },
+      {
+       "w": "do",
+       "s": 13.76,
+       "e": 13.92
+      },
+      {
+       "w": "loop",
+       "s": 14.48,
+       "e": 14.88
+      },
+      {
+       "w": "engineering",
+       "s": 14.88,
+       "e": 15.52
+      },
+      {
+       "w": "bro",
+       "s": 15.84,
+       "e": 16.16
+      },
+      {
+       "w": "it",
+       "s": 16.64,
+       "e": 16.88
+      },
+      {
+       "w": "and",
+       "s": 17.12,
+       "e": 17.44
+      }
+     ],
+     "detector": null,
+     "detector_output": {
+      "first_word": {
+       "w": "are",
+       "s": 4.8,
+       "e": 5.04
+      },
+      "last_word": {
+       "w": "and",
+       "s": 17.12,
+       "e": 17.44
+      }
+     },
+     "whisper_words": [
+      {
+       "w": "heard?",
+       "s": 1.38,
+       "e": 1.82
+      },
+      {
+       "w": "Hmm.",
+       "s": 1.82,
+       "e": 2.58
+      },
+      {
+       "w": "Hello.",
+       "s": 3.5,
+       "e": 4.04
+      },
+      {
+       "w": "Are",
+       "s": 4.56,
+       "e": 5.24
+      },
+      {
+       "w": "you",
+       "s": 5.24,
+       "e": 5.38
+      },
+      {
+       "w": "tired",
+       "s": 5.38,
+       "e": 5.8
+      },
+      {
+       "w": "of",
+       "s": 5.8,
+       "e": 6.56
+      },
+      {
+       "w": "Anthropic",
+       "s": 6.56,
+       "e": 7.2
+      },
+      {
+       "w": "telling",
+       "s": 7.2,
+       "e": 7.86
+      },
+      {
+       "w": "you",
+       "s": 7.86,
+       "e": 8.08
+      },
+      {
+       "w": "to",
+       "s": 8.08,
+       "e": 8.26
+      },
+      {
+       "w": "fan",
+       "s": 8.26,
+       "e": 8.62
+      },
+      {
+       "w": "out",
+       "s": 8.62,
+       "e": 8.94
+      },
+      {
+       "w": "the",
+       "s": 8.94,
+       "e": 9.22
+      },
+      {
+       "w": "agents",
+       "s": 9.22,
+       "e": 9.7
+      },
+      {
+       "w": "in",
+       "s": 9.7,
+       "e": 10.02
+      },
+      {
+       "w": "Cloud",
+       "s": 10.02,
+       "e": 10.3
+      },
+      {
+       "w": "Code",
+       "s": 10.3,
+       "e": 10.66
+      },
+      {
+       "w": "or",
+       "s": 10.66,
+       "e": 11.16
+      },
+      {
+       "w": "the",
+       "s": 11.16,
+       "e": 11.64
+      },
+      {
+       "w": "tech",
+       "s": 11.64,
+       "e": 11.98
+      },
+      {
+       "w": "bros",
+       "s": 11.98,
+       "e": 12.3
+      },
+      {
+       "w": "on",
+       "s": 12.3,
+       "e": 12.46
+      },
+      {
+       "w": "Twitter",
+       "s": 12.46,
+       "e": 12.68
+      },
+      {
+       "w": "telling",
+       "s": 12.68,
+       "e": 13.0
+      },
+      {
+       "w": "you",
+       "s": 13.0,
+       "e": 13.22
+      },
+      {
+       "w": "how",
+       "s": 13.22,
+       "e": 13.46
+      },
+      {
+       "w": "you",
+       "s": 13.46,
+       "e": 13.68
+      },
+      {
+       "w": "need",
+       "s": 13.68,
+       "e": 13.88
+      },
+      {
+       "w": "to",
+       "s": 13.88,
+       "e": 14.04
+      },
+      {
+       "w": "do",
+       "s": 14.04,
+       "e": 14.26
+      },
+      {
+       "w": "loop",
+       "s": 14.26,
+       "e": 14.76
+      },
+      {
+       "w": "engineering,",
+       "s": 14.76,
+       "e": 15.42
+      },
+      {
+       "w": "bro?",
+       "s": 15.74,
+       "e": 15.98
+      },
+      {
+       "w": "And.",
+       "s": 16.8,
+       "e": 17.42
+      },
+      {
+       "w": "And.",
+       "s": 19.42,
+       "e": 20.82
+      }
+     ],
+     "source_start": 30.8,
+     "source_end": 43.44
+    }
+   ]
+  },
+  {
+   "file": "cold-open-100.0.wav",
+   "category": "cold-open",
+   "source_start": 100.0,
+   "source_end": 110.0,
+   "why": "true hook start: 'Hello.' 103.60 then 'Are' 104.72; 'tired' acoustic end +0.68",
+   "words": [
+    {
+     "w": "Hello.",
+     "s": 3.6,
+     "e": 4.72,
+     "p": 1.0
+    },
+    {
+     "w": "Are",
+     "s": 4.72,
+     "e": 4.96,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 4.96,
+     "e": 5.2,
+     "p": 1.0
+    },
+    {
+     "w": "tired",
+     "s": 5.2,
+     "e": 5.36,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 6.08,
+     "e": 6.4,
+     "p": 1.0
+    },
+    {
+     "w": "Anthropic",
+     "s": 6.4,
+     "e": 7.2,
+     "p": 1.0
+    },
+    {
+     "w": "telling",
+     "s": 7.36,
+     "e": 7.84,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 7.84,
+     "e": 8.08,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 8.08,
+     "e": 8.32,
+     "p": 1.0
+    },
+    {
+     "w": "fan",
+     "s": 8.32,
+     "e": 8.72,
+     "p": 1.0
+    },
+    {
+     "w": "out",
+     "s": 8.72,
+     "e": 8.88,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 8.88,
+     "e": 9.04,
+     "p": 1.0
+    },
+    {
+     "w": "sub",
+     "s": 9.04,
+     "e": 9.2,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "cold_open",
+     "start": 4.72,
+     "end": 4.96,
+     "why": "True start: first word of the second 'Are you tired of Anthropic...' take (Parakeet); everything before is a false start.",
+     "words": [
+      {
+       "w": "Hello.",
+       "s": 3.6,
+       "e": 4.72
+      },
+      {
+       "w": "Are",
+       "s": 4.72,
+       "e": 4.96
+      },
+      {
+       "w": "you",
+       "s": 4.96,
+       "e": 5.2
+      },
+      {
+       "w": "tired",
+       "s": 5.2,
+       "e": 5.36
+      },
+      {
+       "w": "of",
+       "s": 6.08,
+       "e": 6.4
+      },
+      {
+       "w": "Anthropic",
+       "s": 6.4,
+       "e": 7.2
+      },
+      {
+       "w": "telling",
+       "s": 7.36,
+       "e": 7.84
+      },
+      {
+       "w": "you",
+       "s": 7.84,
+       "e": 8.08
+      }
+     ],
+     "detector": null,
+     "detector_output": {
+      "prev_word": {
+       "w": "Hello.",
+       "s": 3.6,
+       "e": 4.72
+      },
+      "gap_before_s": 0.0
+     },
+     "whisper_words": [
+      {
+       "w": "you.",
+       "s": -7.8,
+       "e": -7.8
+      },
+      {
+       "w": "Well,",
+       "s": 23.12,
+       "e": 23.72
+      }
+     ],
+     "whisper_note": "whisper emits NO words within +-3 s of this span; nearest whisper words are 'you.' ending 92.20 and 'Well,' starting 123.12",
+     "source_start": 104.72,
+     "source_end": 104.96
+    },
+    {
+     "category": "word_boundaries",
+     "start": 5.2,
+     "end": 6.04,
+     "why": "Parakeet end-stamp of 'tired' is 105.36 s but the 10 ms RMS envelope first stays below floor+6 dB (-47.9 dBFS) for >=40 ms at 106.04 s: acoustic end is 680 ms later than ASR end.",
+     "words": [
+      {
+       "w": "Hello.",
+       "s": 3.6,
+       "e": 4.72
+      },
+      {
+       "w": "Are",
+       "s": 4.72,
+       "e": 4.96
+      },
+      {
+       "w": "you",
+       "s": 4.96,
+       "e": 5.2
+      },
+      {
+       "w": "tired",
+       "s": 5.2,
+       "e": 5.36
+      },
+      {
+       "w": "of",
+       "s": 6.08,
+       "e": 6.4
+      },
+      {
+       "w": "Anthropic",
+       "s": 6.4,
+       "e": 7.2
+      },
+      {
+       "w": "telling",
+       "s": 7.36,
+       "e": 7.84
+      },
+      {
+       "w": "you",
+       "s": 7.84,
+       "e": 8.08
+      },
+      {
+       "w": "to",
+       "s": 8.08,
+       "e": 8.32
+      },
+      {
+       "w": "fan",
+       "s": 8.32,
+       "e": 8.72
+      },
+      {
+       "w": "out",
+       "s": 8.72,
+       "e": 8.88
+      },
+      {
+       "w": "the",
+       "s": 8.88,
+       "e": 9.04
+      },
+      {
+       "w": "sub",
+       "s": 9.04,
+       "e": 9.2
+      }
+     ],
+     "detector": "rms10ms_envelope",
+     "detector_output": {
+      "asr_start": 5.2,
+      "asr_end": 5.36,
+      "acoustic_onset": 5.2,
+      "acoustic_end": 6.04,
+      "acoustic_minus_asr_s": 0.68,
+      "threshold_dbfs": -47.915,
+      "floor10_dbfs": -53.915,
+      "next_word": {
+       "w": "of",
+       "s": 6.08,
+       "e": 6.4
+      }
+     },
+     "source_start": 105.2,
+     "source_end": 106.04
+    }
+   ]
+  },
+  {
+   "file": "retake-114.0.wav",
+   "category": "retake",
+   "source_start": 114.0,
+   "source_end": 130.0,
+   "why": "triple live retake 116.96/123.20 and the moan absorbed in 'experimenting.' 119.6",
+   "words": [
+    {
+     "w": "it",
+     "s": 0.0,
+     "e": 0.16,
+     "p": 1.0
+    },
+    {
+     "w": "wrong",
+     "s": 0.16,
+     "e": 0.4,
+     "p": 1.0
+    },
+    {
+     "w": "bro",
+     "s": 0.56,
+     "e": 0.8,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 0.88,
+     "e": 0.96,
+     "p": 1.0
+    },
+    {
+     "w": "need",
+     "s": 0.96,
+     "e": 1.12,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 1.12,
+     "e": 1.2,
+     "p": 1.0
+    },
+    {
+     "w": "do",
+     "s": 1.2,
+     "e": 1.44,
+     "p": 1.0
+    },
+    {
+     "w": "loop",
+     "s": 1.44,
+     "e": 1.84,
+     "p": 1.0
+    },
+    {
+     "w": "engineering?",
+     "s": 1.84,
+     "e": 2.96,
+     "p": 1.0
+    },
+    {
+     "w": "Well,",
+     "s": 2.96,
+     "e": 3.6,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 3.6,
+     "e": 3.92,
+     "p": 1.0
+    },
+    {
+     "w": "have",
+     "s": 3.92,
+     "e": 4.08,
+     "p": 1.0
+    },
+    {
+     "w": "been",
+     "s": 4.08,
+     "e": 4.24,
+     "p": 1.0
+    },
+    {
+     "w": "trying",
+     "s": 4.72,
+     "e": 5.28,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 5.28,
+     "e": 5.44,
+     "p": 1.0
+    },
+    {
+     "w": "experimenting.",
+     "s": 5.44,
+     "e": 9.2,
+     "p": 1.0
+    },
+    {
+     "w": "Well,",
+     "s": 9.2,
+     "e": 9.76,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 9.76,
+     "e": 10.0,
+     "p": 1.0
+    },
+    {
+     "w": "have",
+     "s": 10.0,
+     "e": 10.24,
+     "p": 1.0
+    },
+    {
+     "w": "been",
+     "s": 10.24,
+     "e": 10.48,
+     "p": 1.0
+    },
+    {
+     "w": "hey",
+     "s": 10.64,
+     "e": 10.88,
+     "p": 1.0
+    },
+    {
+     "w": "hold",
+     "s": 11.04,
+     "e": 11.44,
+     "p": 1.0
+    },
+    {
+     "w": "on",
+     "s": 11.44,
+     "e": 11.68,
+     "p": 1.0
+    },
+    {
+     "w": "my",
+     "s": 11.68,
+     "e": 11.76,
+     "p": 1.0
+    },
+    {
+     "w": "my",
+     "s": 12.0,
+     "e": 12.24,
+     "p": 1.0
+    },
+    {
+     "w": "throat",
+     "s": 12.24,
+     "e": 12.72,
+     "p": 1.0
+    },
+    {
+     "w": "one",
+     "s": 12.88,
+     "e": 13.12,
+     "p": 1.0
+    },
+    {
+     "w": "second",
+     "s": 13.28,
+     "e": 13.92,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "moans",
+     "start": 5.625,
+     "end": 6.035,
+     "why": "Voiced burst (hum/moan) absorbed into Parakeet span of 'experimenting.' (119.44-123.20), sitting before the word core; peak 33.3 dB over floor. Join-steering fixture: must never be cut.",
+     "words": [
+      {
+       "w": "engineering?",
+       "s": 1.84,
+       "e": 2.96
+      },
+      {
+       "w": "Well,",
+       "s": 2.96,
+       "e": 3.6
+      },
+      {
+       "w": "I",
+       "s": 3.6,
+       "e": 3.92
+      },
+      {
+       "w": "have",
+       "s": 3.92,
+       "e": 4.08
+      },
+      {
+       "w": "been",
+       "s": 4.08,
+       "e": 4.24
+      },
+      {
+       "w": "trying",
+       "s": 4.72,
+       "e": 5.28
+      },
+      {
+       "w": "and",
+       "s": 5.28,
+       "e": 5.44
+      },
+      {
+       "w": "experimenting.",
+       "s": 5.44,
+       "e": 9.2
+      }
+     ],
+     "detector": "bursts.detect_voiced_bursts",
+     "detector_output": {
+      "cut": {
+       "start": 5.625,
+       "end": 6.035,
+       "reason": "noise",
+       "text": "voiced burst: absorbed in 'experimenting.'"
+      },
+      "peak_dbfs": -20.98,
+      "peak_over_floor_db": 33.296,
+      "floor_dbfs": -54.276,
+      "host_word": {
+       "w": "experimenting.",
+       "s": 5.44,
+       "e": 9.2
+      },
+      "kind": "absorbed_span"
+     },
+     "whisper_words": [
+      {
+       "w": "you.",
+       "s": -21.8,
+       "e": -21.8
+      },
+      {
+       "w": "Well,",
+       "s": 9.12,
+       "e": 9.72
+      }
+     ],
+     "whisper_note": "whisper emits NO words within +-3 s of this span; nearest whisper words are 'you.' ending 92.20 and 'Well,' starting 123.12",
+     "source_start": 119.625,
+     "source_end": 120.035
+    },
+    {
+     "category": "restarts",
+     "start": 2.96,
+     "end": 13.92,
+     "why": "Triple live retake: 'Well, I have been trying and experimenting.' (116.96) restarted as 'Well, I have been [been] hey hold on my my throat one second' (123.20), then the kept take 'Well, I have been trying and experimenting for the past...' at 136.48 after an 8.56 s pause. derive_cuts flags no restart here.",
+     "words": [
+      {
+       "w": "doing",
+       "s": -0.24,
+       "e": 0.0
+      },
+      {
+       "w": "it",
+       "s": 0.0,
+       "e": 0.16
+      },
+      {
+       "w": "wrong",
+       "s": 0.16,
+       "e": 0.4
+      },
+      {
+       "w": "bro",
+       "s": 0.56,
+       "e": 0.8
+      },
+      {
+       "w": "you",
+       "s": 0.88,
+       "e": 0.96
+      },
+      {
+       "w": "need",
+       "s": 0.96,
+       "e": 1.12
+      },
+      {
+       "w": "to",
+       "s": 1.12,
+       "e": 1.2
+      },
+      {
+       "w": "do",
+       "s": 1.2,
+       "e": 1.44
+      },
+      {
+       "w": "loop",
+       "s": 1.44,
+       "e": 1.84
+      },
+      {
+       "w": "engineering?",
+       "s": 1.84,
+       "e": 2.96
+      },
+      {
+       "w": "Well,",
+       "s": 2.96,
+       "e": 3.6
+      },
+      {
+       "w": "I",
+       "s": 3.6,
+       "e": 3.92
+      },
+      {
+       "w": "have",
+       "s": 3.92,
+       "e": 4.08
+      },
+      {
+       "w": "been",
+       "s": 4.08,
+       "e": 4.24
+      },
+      {
+       "w": "trying",
+       "s": 4.72,
+       "e": 5.28
+      },
+      {
+       "w": "and",
+       "s": 5.28,
+       "e": 5.44
+      },
+      {
+       "w": "experimenting.",
+       "s": 5.44,
+       "e": 9.2
+      },
+      {
+       "w": "Well,",
+       "s": 9.2,
+       "e": 9.76
+      },
+      {
+       "w": "I",
+       "s": 9.76,
+       "e": 10.0
+      },
+      {
+       "w": "have",
+       "s": 10.0,
+       "e": 10.24
+      },
+      {
+       "w": "been",
+       "s": 10.24,
+       "e": 10.48
+      },
+      {
+       "w": "hey",
+       "s": 10.64,
+       "e": 10.88
+      },
+      {
+       "w": "hold",
+       "s": 11.04,
+       "e": 11.44
+      },
+      {
+       "w": "on",
+       "s": 11.44,
+       "e": 11.68
+      },
+      {
+       "w": "my",
+       "s": 11.68,
+       "e": 11.76
+      },
+      {
+       "w": "my",
+       "s": 12.0,
+       "e": 12.24
+      },
+      {
+       "w": "throat",
+       "s": 12.24,
+       "e": 12.72
+      },
+      {
+       "w": "one",
+       "s": 12.88,
+       "e": 13.12
+      },
+      {
+       "w": "second",
+       "s": 13.28,
+       "e": 13.92
+      }
+     ],
+     "detector": null,
+     "detector_output": {
+      "derive_cuts_overlapping": [],
+      "derive_restart_flag": false
+     },
+     "source_start": 116.96,
+     "source_end": 127.92
+    }
+   ]
+  },
+  {
+   "file": "word-boundary-216.0.wav",
+   "category": "word-boundary",
+   "source_start": 216.0,
+   "source_end": 224.0,
+   "why": "'for' 219.60-219.76, acoustic end 220.42 (+0.66)",
+   "words": [
+    {
+     "w": "uh",
+     "s": 0.0,
+     "e": 0.16,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 0.24,
+     "e": 0.56,
+     "p": 1.0
+    },
+    {
+     "w": "think",
+     "s": 0.56,
+     "e": 0.72,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 0.72,
+     "e": 0.96,
+     "p": 1.0
+    },
+    {
+     "w": "have",
+     "s": 0.96,
+     "e": 1.12,
+     "p": 1.0
+    },
+    {
+     "w": "managed",
+     "s": 1.12,
+     "e": 1.92,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 1.92,
+     "e": 2.24,
+     "p": 1.0
+    },
+    {
+     "w": "crack",
+     "s": 2.24,
+     "e": 2.88,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 2.88,
+     "e": 3.12,
+     "p": 1.0
+    },
+    {
+     "w": "formula",
+     "s": 3.12,
+     "e": 3.52,
+     "p": 1.0
+    },
+    {
+     "w": "for",
+     "s": 3.6,
+     "e": 3.76,
+     "p": 1.0
+    },
+    {
+     "w": "multigentic",
+     "s": 4.56,
+     "e": 5.6,
+     "p": 1.0
+    },
+    {
+     "w": "workflows.",
+     "s": 5.68,
+     "e": 6.24,
+     "p": 1.0
+    },
+    {
+     "w": "And",
+     "s": 6.24,
+     "e": 6.4,
+     "p": 1.0
+    },
+    {
+     "w": "in",
+     "s": 6.4,
+     "e": 6.56,
+     "p": 1.0
+    },
+    {
+     "w": "this",
+     "s": 6.56,
+     "e": 6.72,
+     "p": 1.0
+    },
+    {
+     "w": "video",
+     "s": 6.72,
+     "e": 6.88,
+     "p": 1.0
+    },
+    {
+     "w": "I'm",
+     "s": 6.96,
+     "e": 7.2,
+     "p": 1.0
+    },
+    {
+     "w": "gonna",
+     "s": 7.2,
+     "e": 7.52,
+     "p": 1.0
+    },
+    {
+     "w": "present",
+     "s": 7.52,
+     "e": 7.84,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "word_boundaries",
+     "start": 3.6,
+     "end": 4.42,
+     "why": "Parakeet end-stamp of 'for' is 219.76 s but the 10 ms RMS envelope first stays below floor+6 dB (-47.9 dBFS) for >=40 ms at 220.42 s: acoustic end is 660 ms later than ASR end.",
+     "words": [
+      {
+       "w": "think",
+       "s": 0.56,
+       "e": 0.72
+      },
+      {
+       "w": "I",
+       "s": 0.72,
+       "e": 0.96
+      },
+      {
+       "w": "have",
+       "s": 0.96,
+       "e": 1.12
+      },
+      {
+       "w": "managed",
+       "s": 1.12,
+       "e": 1.92
+      },
+      {
+       "w": "to",
+       "s": 1.92,
+       "e": 2.24
+      },
+      {
+       "w": "crack",
+       "s": 2.24,
+       "e": 2.88
+      },
+      {
+       "w": "the",
+       "s": 2.88,
+       "e": 3.12
+      },
+      {
+       "w": "formula",
+       "s": 3.12,
+       "e": 3.52
+      },
+      {
+       "w": "for",
+       "s": 3.6,
+       "e": 3.76
+      },
+      {
+       "w": "multigentic",
+       "s": 4.56,
+       "e": 5.6
+      },
+      {
+       "w": "workflows.",
+       "s": 5.68,
+       "e": 6.24
+      },
+      {
+       "w": "And",
+       "s": 6.24,
+       "e": 6.4
+      },
+      {
+       "w": "in",
+       "s": 6.4,
+       "e": 6.56
+      },
+      {
+       "w": "this",
+       "s": 6.56,
+       "e": 6.72
+      },
+      {
+       "w": "video",
+       "s": 6.72,
+       "e": 6.88
+      },
+      {
+       "w": "I'm",
+       "s": 6.96,
+       "e": 7.2
+      },
+      {
+       "w": "gonna",
+       "s": 7.2,
+       "e": 7.52
+      }
+     ],
+     "detector": "rms10ms_envelope",
+     "detector_output": {
+      "asr_start": 3.6,
+      "asr_end": 3.76,
+      "acoustic_onset": 3.6,
+      "acoustic_end": 4.42,
+      "acoustic_minus_asr_s": 0.66,
+      "threshold_dbfs": -47.915,
+      "floor10_dbfs": -53.915,
+      "next_word": {
+       "w": "multigentic",
+       "s": 4.56,
+       "e": 5.6
+      }
+     },
+     "source_start": 219.6,
+     "source_end": 220.42
+    }
+   ]
+  },
+  {
+   "file": "voiced-gap-253.0.wav",
+   "category": "voiced-gap",
+   "source_start": 253.0,
+   "source_end": 263.0,
+   "why": "voiced 2.48 s gap 256.88-259.36 with no detect_silences range",
+   "words": [
+    {
+     "w": "moment",
+     "s": 0.28,
+     "e": 0.6,
+     "p": 1.0
+    },
+    {
+     "w": "in",
+     "s": 0.6,
+     "e": 0.84,
+     "p": 1.0
+    },
+    {
+     "w": "an",
+     "s": 0.84,
+     "e": 1.16,
+     "p": 1.0
+    },
+    {
+     "w": "in",
+     "s": 1.72,
+     "e": 1.96,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 1.96,
+     "e": 2.28,
+     "p": 1.0
+    },
+    {
+     "w": "point",
+     "s": 2.28,
+     "e": 2.6,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 2.6,
+     "e": 2.92,
+     "p": 1.0
+    },
+    {
+     "w": "time",
+     "s": 2.92,
+     "e": 3.24,
+     "p": 1.0
+    },
+    {
+     "w": "where",
+     "s": 3.56,
+     "e": 3.88,
+     "p": 1.0
+    },
+    {
+     "w": "everybody's",
+     "s": 6.36,
+     "e": 7.08,
+     "p": 1.0
+    },
+    {
+     "w": "kind",
+     "s": 7.08,
+     "e": 7.24,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 7.24,
+     "e": 7.4,
+     "p": 1.0
+    },
+    {
+     "w": "making",
+     "s": 7.4,
+     "e": 7.72,
+     "p": 1.0
+    },
+    {
+     "w": "shit",
+     "s": 7.72,
+     "e": 7.96,
+     "p": 1.0
+    },
+    {
+     "w": "up,",
+     "s": 7.96,
+     "e": 8.2,
+     "p": 1.0
+    },
+    {
+     "w": "especially",
+     "s": 8.2,
+     "e": 8.52,
+     "p": 1.0
+    },
+    {
+     "w": "with",
+     "s": 9.08,
+     "e": 9.4,
+     "p": 1.0
+    },
+    {
+     "w": "these",
+     "s": 9.4,
+     "e": 9.64,
+     "p": 1.0
+    },
+    {
+     "w": "uh",
+     "s": 9.64,
+     "e": 9.8,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "pauses",
+     "start": 3.88,
+     "end": 6.36,
+     "why": "Voiced gap: 2.48 s between 'where' and 'everybody's' with NO detect_silences range inside (peak 11.9 dB over floor) - untranscribed audible material, not a pause.",
+     "words": [
+      {
+       "w": "an",
+       "s": 0.84,
+       "e": 1.16
+      },
+      {
+       "w": "in",
+       "s": 1.72,
+       "e": 1.96
+      },
+      {
+       "w": "a",
+       "s": 1.96,
+       "e": 2.28
+      },
+      {
+       "w": "point",
+       "s": 2.28,
+       "e": 2.6
+      },
+      {
+       "w": "of",
+       "s": 2.6,
+       "e": 2.92
+      },
+      {
+       "w": "time",
+       "s": 2.92,
+       "e": 3.24
+      },
+      {
+       "w": "where",
+       "s": 3.56,
+       "e": 3.88
+      },
+      {
+       "w": "everybody's",
+       "s": 6.36,
+       "e": 7.08
+      },
+      {
+       "w": "kind",
+       "s": 7.08,
+       "e": 7.24
+      },
+      {
+       "w": "of",
+       "s": 7.24,
+       "e": 7.4
+      },
+      {
+       "w": "making",
+       "s": 7.4,
+       "e": 7.72
+      },
+      {
+       "w": "shit",
+       "s": 7.72,
+       "e": 7.96
+      },
+      {
+       "w": "up,",
+       "s": 7.96,
+       "e": 8.2
+      },
+      {
+       "w": "especially",
+       "s": 8.2,
+       "e": 8.52
+      },
+      {
+       "w": "with",
+       "s": 9.08,
+       "e": 9.4
+      }
+     ],
+     "detector": "transcribe.detect_silences",
+     "detector_output": {
+      "gap_s": 2.48,
+      "silences_inside": [],
+      "peak_dbfs_in_gap": -42.35,
+      "peak_over_floor_db": 11.926,
+      "floor_dbfs": -54.276
+     },
+     "whisper_words": [
+      {
+       "w": "a",
+       "s": 0.78,
+       "e": 1.62
+      },
+      {
+       "w": "point",
+       "s": 1.62,
+       "e": 2.48
+      },
+      {
+       "w": "of",
+       "s": 2.48,
+       "e": 2.72
+      },
+      {
+       "w": "time",
+       "s": 2.72,
+       "e": 3.14
+      },
+      {
+       "w": "where",
+       "s": 3.14,
+       "e": 3.76
+      },
+      {
+       "w": "everybody",
+       "s": 3.76,
+       "e": 6.98
+      },
+      {
+       "w": "is",
+       "s": 6.98,
+       "e": 7.18
+      },
+      {
+       "w": "kind",
+       "s": 7.18,
+       "e": 7.3
+      },
+      {
+       "w": "of",
+       "s": 7.3,
+       "e": 7.42
+      },
+      {
+       "w": "making",
+       "s": 7.42,
+       "e": 7.66
+      },
+      {
+       "w": "shit",
+       "s": 7.66,
+       "e": 7.96
+      },
+      {
+       "w": "up,",
+       "s": 7.96,
+       "e": 8.26
+      },
+      {
+       "w": "especially",
+       "s": 8.44,
+       "e": 8.98
+      },
+      {
+       "w": "with",
+       "s": 8.98,
+       "e": 9.3
+      },
+      {
+       "w": "these",
+       "s": 9.3,
+       "e": 9.72
+      }
+     ],
+     "source_start": 256.88,
+     "source_end": 259.36
+    }
+   ]
+  },
+  {
+   "file": "voiced-gap-362.0.wav",
+   "category": "voiced-gap",
+   "source_start": 362.0,
+   "source_end": 374.0,
+   "why": "voiced 3.28 s gap 366.88-370.16 with no detect_silences range",
+   "words": [
+    {
+     "w": "that",
+     "s": 0.4,
+     "e": 0.72,
+     "p": 1.0
+    },
+    {
+     "w": "uh",
+     "s": 1.2,
+     "e": 1.44,
+     "p": 1.0
+    },
+    {
+     "w": "details",
+     "s": 1.6,
+     "e": 2.4,
+     "p": 1.0
+    },
+    {
+     "w": "all",
+     "s": 2.4,
+     "e": 2.72,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 2.72,
+     "e": 3.04,
+     "p": 1.0
+    },
+    {
+     "w": "this.",
+     "s": 3.04,
+     "e": 3.6,
+     "p": 1.0
+    },
+    {
+     "w": "Um",
+     "s": 3.6,
+     "e": 3.92,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 4.56,
+     "e": 4.88,
+     "p": 1.0
+    },
+    {
+     "w": "I'm",
+     "s": 8.16,
+     "e": 8.56,
+     "p": 1.0
+    },
+    {
+     "w": "not",
+     "s": 8.56,
+     "e": 8.72,
+     "p": 1.0
+    },
+    {
+     "w": "gonna",
+     "s": 8.72,
+     "e": 8.96,
+     "p": 1.0
+    },
+    {
+     "w": "be",
+     "s": 8.96,
+     "e": 9.12,
+     "p": 1.0
+    },
+    {
+     "w": "sharing",
+     "s": 9.12,
+     "e": 9.44,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 9.44,
+     "e": 9.68,
+     "p": 1.0
+    },
+    {
+     "w": "skill",
+     "s": 9.68,
+     "e": 10.08,
+     "p": 1.0
+    },
+    {
+     "w": "with",
+     "s": 10.08,
+     "e": 10.32,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 10.32,
+     "e": 10.48,
+     "p": 1.0
+    },
+    {
+     "w": "because",
+     "s": 10.72,
+     "e": 11.04,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 11.04,
+     "e": 11.36,
+     "p": 1.0
+    },
+    {
+     "w": "is",
+     "s": 11.36,
+     "e": 11.68,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "pauses",
+     "start": 4.88,
+     "end": 8.16,
+     "why": "Voiced gap: 3.28 s between 'and' and 'I'm' with NO detect_silences range inside (peak 22.3 dB over floor) - untranscribed audible material, not a pause.",
+     "words": [
+      {
+       "w": "details",
+       "s": 1.6,
+       "e": 2.4
+      },
+      {
+       "w": "all",
+       "s": 2.4,
+       "e": 2.72
+      },
+      {
+       "w": "of",
+       "s": 2.72,
+       "e": 3.04
+      },
+      {
+       "w": "this.",
+       "s": 3.04,
+       "e": 3.6
+      },
+      {
+       "w": "Um",
+       "s": 3.6,
+       "e": 3.92
+      },
+      {
+       "w": "and",
+       "s": 4.56,
+       "e": 4.88
+      },
+      {
+       "w": "I'm",
+       "s": 8.16,
+       "e": 8.56
+      },
+      {
+       "w": "not",
+       "s": 8.56,
+       "e": 8.72
+      },
+      {
+       "w": "gonna",
+       "s": 8.72,
+       "e": 8.96
+      },
+      {
+       "w": "be",
+       "s": 8.96,
+       "e": 9.12
+      },
+      {
+       "w": "sharing",
+       "s": 9.12,
+       "e": 9.44
+      },
+      {
+       "w": "the",
+       "s": 9.44,
+       "e": 9.68
+      },
+      {
+       "w": "skill",
+       "s": 9.68,
+       "e": 10.08
+      },
+      {
+       "w": "with",
+       "s": 10.08,
+       "e": 10.32
+      },
+      {
+       "w": "you",
+       "s": 10.32,
+       "e": 10.48
+      },
+      {
+       "w": "because",
+       "s": 10.72,
+       "e": 11.04
+      },
+      {
+       "w": "it",
+       "s": 11.04,
+       "e": 11.36
+      }
+     ],
+     "detector": "transcribe.detect_silences",
+     "detector_output": {
+      "gap_s": 3.28,
+      "silences_inside": [],
+      "peak_dbfs_in_gap": -32.0,
+      "peak_over_floor_db": 22.276,
+      "floor_dbfs": -54.276
+     },
+     "whisper_words": [
+      {
+       "w": "details",
+       "s": 0.68,
+       "e": 2.16
+      },
+      {
+       "w": "all",
+       "s": 2.16,
+       "e": 2.6
+      },
+      {
+       "w": "of",
+       "s": 2.6,
+       "e": 2.74
+      },
+      {
+       "w": "this.",
+       "s": 2.74,
+       "e": 3.1
+      },
+      {
+       "w": "And",
+       "s": 7.62,
+       "e": 8.16
+      },
+      {
+       "w": "I'm",
+       "s": 8.16,
+       "e": 8.7
+      },
+      {
+       "w": "not",
+       "s": 8.7,
+       "e": 8.8
+      },
+      {
+       "w": "going",
+       "s": 8.8,
+       "e": 8.92
+      },
+      {
+       "w": "to",
+       "s": 8.92,
+       "e": 9.0
+      },
+      {
+       "w": "be",
+       "s": 9.0,
+       "e": 9.12
+      },
+      {
+       "w": "sharing",
+       "s": 9.12,
+       "e": 9.42
+      },
+      {
+       "w": "the",
+       "s": 9.42,
+       "e": 9.66
+      },
+      {
+       "w": "skill",
+       "s": 9.66,
+       "e": 9.92
+      },
+      {
+       "w": "with",
+       "s": 9.92,
+       "e": 10.26
+      },
+      {
+       "w": "you",
+       "s": 10.26,
+       "e": 10.4
+      },
+      {
+       "w": "because",
+       "s": 10.4,
+       "e": 10.72
+      },
+      {
+       "w": "it",
+       "s": 10.72,
+       "e": 11.3
+      }
+     ],
+     "source_start": 366.88,
+     "source_end": 370.16
+    }
+   ]
+  },
+  {
+   "file": "restart-394.0.wav",
+   "category": "restart",
+   "source_start": 394.0,
+   "source_end": 404.0,
+   "why": "explicit spoken correction 'which agents um sorry which agentic' 398.24",
+   "words": [
+    {
+     "w": "agent",
+     "s": 1.12,
+     "e": 1.76,
+     "p": 1.0
+    },
+    {
+     "w": "setups",
+     "s": 2.0,
+     "e": 2.8,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 3.04,
+     "e": 3.28,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 3.28,
+     "e": 3.6,
+     "p": 1.0
+    },
+    {
+     "w": "will",
+     "s": 3.6,
+     "e": 3.76,
+     "p": 1.0
+    },
+    {
+     "w": "tell",
+     "s": 3.76,
+     "e": 4.08,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 4.08,
+     "e": 4.24,
+     "p": 1.0
+    },
+    {
+     "w": "which",
+     "s": 4.24,
+     "e": 4.56,
+     "p": 1.0
+    },
+    {
+     "w": "agents",
+     "s": 4.56,
+     "e": 5.12,
+     "p": 1.0
+    },
+    {
+     "w": "um",
+     "s": 5.2,
+     "e": 5.36,
+     "p": 1.0
+    },
+    {
+     "w": "sorry",
+     "s": 5.6,
+     "e": 5.84,
+     "p": 1.0
+    },
+    {
+     "w": "which",
+     "s": 5.92,
+     "e": 6.16,
+     "p": 1.0
+    },
+    {
+     "w": "agentic",
+     "s": 6.16,
+     "e": 6.64,
+     "p": 1.0
+    },
+    {
+     "w": "harnesses",
+     "s": 6.64,
+     "e": 6.96,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 7.04,
+     "e": 7.12,
+     "p": 1.0
+    },
+    {
+     "w": "have",
+     "s": 7.12,
+     "e": 7.2,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 7.28,
+     "e": 7.44,
+     "p": 1.0
+    },
+    {
+     "w": "have",
+     "s": 7.44,
+     "e": 7.68,
+     "p": 1.0
+    },
+    {
+     "w": "also",
+     "s": 7.68,
+     "e": 8.0,
+     "p": 1.0
+    },
+    {
+     "w": "tried",
+     "s": 8.16,
+     "e": 8.72,
+     "p": 1.0
+    },
+    {
+     "w": "with",
+     "s": 8.72,
+     "e": 9.04,
+     "p": 1.0
+    },
+    {
+     "w": "this",
+     "s": 9.04,
+     "e": 9.2,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 9.52,
+     "e": 9.84,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "restarts",
+     "start": 4.24,
+     "end": 6.16,
+     "why": "Explicit spoken correction: 'which agents um sorry which agentic harnesses' - phrase 'which' restarted within 2 s with a 'sorry'; derive_cuts only sees the 'um' as a filler. derive_cuts flags no restart here.",
+     "words": [
+      {
+       "w": "agent",
+       "s": 1.12,
+       "e": 1.76
+      },
+      {
+       "w": "setups",
+       "s": 2.0,
+       "e": 2.8
+      },
+      {
+       "w": "and",
+       "s": 3.04,
+       "e": 3.28
+      },
+      {
+       "w": "I",
+       "s": 3.28,
+       "e": 3.6
+      },
+      {
+       "w": "will",
+       "s": 3.6,
+       "e": 3.76
+      },
+      {
+       "w": "tell",
+       "s": 3.76,
+       "e": 4.08
+      },
+      {
+       "w": "you",
+       "s": 4.08,
+       "e": 4.24
+      },
+      {
+       "w": "which",
+       "s": 4.24,
+       "e": 4.56
+      },
+      {
+       "w": "agents",
+       "s": 4.56,
+       "e": 5.12
+      },
+      {
+       "w": "um",
+       "s": 5.2,
+       "e": 5.36
+      },
+      {
+       "w": "sorry",
+       "s": 5.6,
+       "e": 5.84
+      },
+      {
+       "w": "which",
+       "s": 5.92,
+       "e": 6.16
+      },
+      {
+       "w": "agentic",
+       "s": 6.16,
+       "e": 6.64
+      },
+      {
+       "w": "harnesses",
+       "s": 6.64,
+       "e": 6.96
+      },
+      {
+       "w": "I",
+       "s": 7.04,
+       "e": 7.12
+      },
+      {
+       "w": "have",
+       "s": 7.12,
+       "e": 7.2
+      },
+      {
+       "w": "I",
+       "s": 7.28,
+       "e": 7.44
+      },
+      {
+       "w": "have",
+       "s": 7.44,
+       "e": 7.68
+      },
+      {
+       "w": "also",
+       "s": 7.68,
+       "e": 8.0
+      },
+      {
+       "w": "tried",
+       "s": 8.16,
+       "e": 8.72
+      },
+      {
+       "w": "with",
+       "s": 8.72,
+       "e": 9.04
+      },
+      {
+       "w": "this",
+       "s": 9.04,
+       "e": 9.2
+      }
+     ],
+     "detector": null,
+     "detector_output": {
+      "derive_cuts_overlapping": [
+       {
+        "start": 5.14,
+        "end": 5.42,
+        "reason": "filler",
+        "text": "um"
+       }
+      ],
+      "derive_restart_flag": false
+     },
+     "source_start": 398.24,
+     "source_end": 400.16
+    }
+   ]
+  },
+  {
+   "file": "smack-434.0.wav",
+   "category": "smack",
+   "source_start": 434.0,
+   "source_end": 449.0,
+   "why": "smack 438.875 (production hit), restart 436.6-440.44, filler 'Um,' 443.68",
+   "words": [
+    {
+     "w": "brilliant",
+     "s": 0.4,
+     "e": 0.88,
+     "p": 1.0
+    },
+    {
+     "w": "tool.",
+     "s": 0.88,
+     "e": 1.36,
+     "p": 1.0
+    },
+    {
+     "w": "It",
+     "s": 1.36,
+     "e": 1.52,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 1.6,
+     "e": 1.76,
+     "p": 1.0
+    },
+    {
+     "w": "will",
+     "s": 1.76,
+     "e": 2.0,
+     "p": 1.0
+    },
+    {
+     "w": "love",
+     "s": 2.0,
+     "e": 2.24,
+     "p": 1.0
+    },
+    {
+     "w": "it.",
+     "s": 2.24,
+     "e": 2.64,
+     "p": 1.0
+    },
+    {
+     "w": "It",
+     "s": 2.64,
+     "e": 2.88,
+     "p": 1.0
+    },
+    {
+     "w": "it's",
+     "s": 2.88,
+     "e": 3.28,
+     "p": 1.0
+    },
+    {
+     "w": "genuinely",
+     "s": 3.28,
+     "e": 4.4,
+     "p": 1.0
+    },
+    {
+     "w": "it's",
+     "s": 4.88,
+     "e": 5.36,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 5.36,
+     "e": 5.6,
+     "p": 1.0
+    },
+    {
+     "w": "best.",
+     "s": 5.6,
+     "e": 6.4,
+     "p": 1.0
+    },
+    {
+     "w": "It's",
+     "s": 6.4,
+     "e": 6.88,
+     "p": 1.0
+    },
+    {
+     "w": "absolutely",
+     "s": 6.88,
+     "e": 7.44,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 7.44,
+     "e": 7.68,
+     "p": 1.0
+    },
+    {
+     "w": "best.",
+     "s": 7.68,
+     "e": 8.0,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 8.0,
+     "e": 8.24,
+     "p": 1.0
+    },
+    {
+     "w": "love",
+     "s": 8.24,
+     "e": 8.48,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 8.48,
+     "e": 8.8,
+     "p": 1.0
+    },
+    {
+     "w": "so",
+     "s": 8.8,
+     "e": 9.12,
+     "p": 1.0
+    },
+    {
+     "w": "much.",
+     "s": 9.12,
+     "e": 9.68,
+     "p": 1.0
+    },
+    {
+     "w": "Um,",
+     "s": 9.68,
+     "e": 10.16,
+     "p": 1.0
+    },
+    {
+     "w": "but",
+     "s": 10.4,
+     "e": 10.64,
+     "p": 1.0
+    },
+    {
+     "w": "that's",
+     "s": 10.64,
+     "e": 10.96,
+     "p": 1.0
+    },
+    {
+     "w": "what",
+     "s": 10.96,
+     "e": 11.12,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 11.12,
+     "e": 11.28,
+     "p": 1.0
+    },
+    {
+     "w": "said",
+     "s": 11.28,
+     "e": 11.44,
+     "p": 1.0
+    },
+    {
+     "w": "about",
+     "s": 11.44,
+     "e": 11.68,
+     "p": 1.0
+    },
+    {
+     "w": "pie",
+     "s": 11.68,
+     "e": 11.84,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 12.08,
+     "e": 12.16,
+     "p": 1.0
+    },
+    {
+     "w": "couple",
+     "s": 12.16,
+     "e": 12.4,
+     "p": 1.0
+    },
+    {
+     "w": "weeks",
+     "s": 12.48,
+     "e": 12.64,
+     "p": 1.0
+    },
+    {
+     "w": "ago,",
+     "s": 12.64,
+     "e": 12.96,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 12.96,
+     "e": 13.12,
+     "p": 1.0
+    },
+    {
+     "w": "then",
+     "s": 13.12,
+     "e": 13.28,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 13.28,
+     "e": 13.36,
+     "p": 1.0
+    },
+    {
+     "w": "moved",
+     "s": 13.36,
+     "e": 13.6,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 13.6,
+     "e": 13.76,
+     "p": 1.0
+    },
+    {
+     "w": "Oh",
+     "s": 13.76,
+     "e": 14.0,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "mouth_noises",
+     "start": 4.875,
+     "end": 4.9,
+     "why": "Smack in the gap between 'genuinely' and 'it's' (0.48 s gap): 25 ms, mean ZCR 0.51, peak 22.3 dB over floor, quiet 0.24/0.26 s before/after (also a production detect_mouth_noises hit).",
+     "words": [
+      {
+       "w": "will",
+       "s": 1.76,
+       "e": 2.0
+      },
+      {
+       "w": "love",
+       "s": 2.0,
+       "e": 2.24
+      },
+      {
+       "w": "it.",
+       "s": 2.24,
+       "e": 2.64
+      },
+      {
+       "w": "It",
+       "s": 2.64,
+       "e": 2.88
+      },
+      {
+       "w": "it's",
+       "s": 2.88,
+       "e": 3.28
+      },
+      {
+       "w": "genuinely",
+       "s": 3.28,
+       "e": 4.4
+      },
+      {
+       "w": "it's",
+       "s": 4.88,
+       "e": 5.36
+      },
+      {
+       "w": "the",
+       "s": 5.36,
+       "e": 5.6
+      },
+      {
+       "w": "best.",
+       "s": 5.6,
+       "e": 6.4
+      },
+      {
+       "w": "It's",
+       "s": 6.4,
+       "e": 6.88
+      },
+      {
+       "w": "absolutely",
+       "s": 6.88,
+       "e": 7.44
+      },
+      {
+       "w": "the",
+       "s": 7.44,
+       "e": 7.68
+      },
+      {
+       "w": "best.",
+       "s": 7.68,
+       "e": 8.0
+      }
+     ],
+     "detector": "noise.detect_mouth_noises",
+     "detector_output": {
+      "kind": "smack",
+      "burst_start": 4.875,
+      "burst_end": 4.9,
+      "duration_s": 0.025,
+      "mean_zcr": 0.514,
+      "peak_over_floor_db": 22.346,
+      "floor_dbfs": -54.276,
+      "quiet_before_s": 0.235,
+      "quiet_after_s": 0.26,
+      "passes_production_quiet_gate": true,
+      "production_cut": {
+       "start": 4.855,
+       "end": 4.92,
+       "reason": "noise",
+       "text": "mouth noise: smack"
+      },
+      "silences_touching": []
+     },
+     "source_start": 438.875,
+     "source_end": 438.9
+    },
+    {
+     "category": "fillers",
+     "start": 9.68,
+     "end": 10.16,
+     "why": "Parakeet filler token 'Um,' of 0.48 s (longest filler in quintile 1 of the content region 104.72-1888.16 s); derive_cuts filler cut in detector_output.",
+     "words": [
+      {
+       "w": "It's",
+       "s": 6.4,
+       "e": 6.88
+      },
+      {
+       "w": "absolutely",
+       "s": 6.88,
+       "e": 7.44
+      },
+      {
+       "w": "the",
+       "s": 7.44,
+       "e": 7.68
+      },
+      {
+       "w": "best.",
+       "s": 7.68,
+       "e": 8.0
+      },
+      {
+       "w": "I",
+       "s": 8.0,
+       "e": 8.24
+      },
+      {
+       "w": "love",
+       "s": 8.24,
+       "e": 8.48
+      },
+      {
+       "w": "it",
+       "s": 8.48,
+       "e": 8.8
+      },
+      {
+       "w": "so",
+       "s": 8.8,
+       "e": 9.12
+      },
+      {
+       "w": "much.",
+       "s": 9.12,
+       "e": 9.68
+      },
+      {
+       "w": "Um,",
+       "s": 9.68,
+       "e": 10.16
+      },
+      {
+       "w": "but",
+       "s": 10.4,
+       "e": 10.64
+      },
+      {
+       "w": "that's",
+       "s": 10.64,
+       "e": 10.96
+      },
+      {
+       "w": "what",
+       "s": 10.96,
+       "e": 11.12
+      },
+      {
+       "w": "I",
+       "s": 11.12,
+       "e": 11.28
+      },
+      {
+       "w": "said",
+       "s": 11.28,
+       "e": 11.44
+      },
+      {
+       "w": "about",
+       "s": 11.44,
+       "e": 11.68
+      },
+      {
+       "w": "pie",
+       "s": 11.68,
+       "e": 11.84
+      },
+      {
+       "w": "a",
+       "s": 12.08,
+       "e": 12.16
+      },
+      {
+       "w": "couple",
+       "s": 12.16,
+       "e": 12.4
+      },
+      {
+       "w": "weeks",
+       "s": 12.48,
+       "e": 12.64
+      },
+      {
+       "w": "ago,",
+       "s": 12.64,
+       "e": 12.96
+      },
+      {
+       "w": "and",
+       "s": 12.96,
+       "e": 13.12
+      },
+      {
+       "w": "then",
+       "s": 13.12,
+       "e": 13.28
+      }
+     ],
+     "detector": "derive.derive_cuts",
+     "detector_output": {
+      "token": {
+       "w": "Um,",
+       "s": 9.68,
+       "e": 10.16
+      },
+      "prob": 1.0,
+      "filler_cut": {
+       "start": 9.62,
+       "end": 10.22,
+       "reason": "filler",
+       "text": "um"
+      },
+      "silences_touching": []
+     },
+     "source_start": 443.68,
+     "source_end": 444.16
+    },
+    {
+     "category": "restarts",
+     "start": 2.6,
+     "end": 6.44,
+     "why": "derive_cuts 'restart' (abandoned sentence restated by the next, similarity 0.600); NOT produced at the default threshold 0.8 (default run yields 0 restarts), produced with similarity_threshold=0.3 (0.6/0.5 give 1, 0.4 gives 2; 788.24-790.68 'Uh it's cheap, it's fast.' and 1298.22-1305.28 'So the the second reviewer...' also match but are merged into neighbouring silence cuts by derive._merge). Next sentence: 'It's absolutely the best.'.",
+     "words": [
+      {
+       "w": "OMYPie.",
+       "s": -1.84,
+       "e": -0.32
+      },
+      {
+       "w": "Absolutely",
+       "s": -0.32,
+       "e": 0.24
+      },
+      {
+       "w": "brilliant",
+       "s": 0.4,
+       "e": 0.88
+      },
+      {
+       "w": "tool.",
+       "s": 0.88,
+       "e": 1.36
+      },
+      {
+       "w": "It",
+       "s": 1.36,
+       "e": 1.52
+      },
+      {
+       "w": "you",
+       "s": 1.6,
+       "e": 1.76
+      },
+      {
+       "w": "will",
+       "s": 1.76,
+       "e": 2.0
+      },
+      {
+       "w": "love",
+       "s": 2.0,
+       "e": 2.24
+      },
+      {
+       "w": "it.",
+       "s": 2.24,
+       "e": 2.64
+      },
+      {
+       "w": "It",
+       "s": 2.64,
+       "e": 2.88
+      },
+      {
+       "w": "it's",
+       "s": 2.88,
+       "e": 3.28
+      },
+      {
+       "w": "genuinely",
+       "s": 3.28,
+       "e": 4.4
+      },
+      {
+       "w": "it's",
+       "s": 4.88,
+       "e": 5.36
+      },
+      {
+       "w": "the",
+       "s": 5.36,
+       "e": 5.6
+      },
+      {
+       "w": "best.",
+       "s": 5.6,
+       "e": 6.4
+      },
+      {
+       "w": "It's",
+       "s": 6.4,
+       "e": 6.88
+      },
+      {
+       "w": "absolutely",
+       "s": 6.88,
+       "e": 7.44
+      },
+      {
+       "w": "the",
+       "s": 7.44,
+       "e": 7.68
+      },
+      {
+       "w": "best.",
+       "s": 7.68,
+       "e": 8.0
+      },
+      {
+       "w": "I",
+       "s": 8.0,
+       "e": 8.24
+      },
+      {
+       "w": "love",
+       "s": 8.24,
+       "e": 8.48
+      },
+      {
+       "w": "it",
+       "s": 8.48,
+       "e": 8.8
+      },
+      {
+       "w": "so",
+       "s": 8.8,
+       "e": 9.12
+      },
+      {
+       "w": "much.",
+       "s": 9.12,
+       "e": 9.68
+      }
+     ],
+     "detector": "derive.derive_cuts(similarity_threshold=0.3)",
+     "detector_output": {
+      "cut": {
+       "start": 2.6,
+       "end": 6.44,
+       "reason": "restart",
+       "text": "It it's genuinely it's the best."
+      },
+      "similarity": 0.6,
+      "next_sentence": "It's absolutely the best.",
+      "default_threshold_restarts": 0
+     },
+     "source_start": 436.6,
+     "source_end": 440.44
+    }
+   ]
+  },
+  {
+   "file": "filler-514.0.wav",
+   "category": "filler",
+   "source_start": 514.0,
+   "source_end": 522.0,
+   "why": "filler 'um' 517.52-517.84 (followed by 'uh' 517.92-518.16)",
+   "words": [
+    {
+     "w": "task,",
+     "s": 0.08,
+     "e": 0.8,
+     "p": 1.0
+    },
+    {
+     "w": "right?",
+     "s": 0.8,
+     "e": 1.28,
+     "p": 1.0
+    },
+    {
+     "w": "You",
+     "s": 1.52,
+     "e": 1.84,
+     "p": 1.0
+    },
+    {
+     "w": "need",
+     "s": 1.84,
+     "e": 2.0,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 2.0,
+     "e": 2.08,
+     "p": 1.0
+    },
+    {
+     "w": "ask",
+     "s": 2.08,
+     "e": 2.4,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 2.4,
+     "e": 2.56,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 2.64,
+     "e": 2.88,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 2.88,
+     "e": 3.2,
+     "p": 1.0
+    },
+    {
+     "w": "use",
+     "s": 3.2,
+     "e": 3.52,
+     "p": 1.0
+    },
+    {
+     "w": "um",
+     "s": 3.52,
+     "e": 3.84,
+     "p": 1.0
+    },
+    {
+     "w": "uh",
+     "s": 3.92,
+     "e": 4.16,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 4.08,
+     "e": 4.4,
+     "p": 1.0
+    },
+    {
+     "w": "grill",
+     "s": 4.4,
+     "e": 4.72,
+     "p": 1.0
+    },
+    {
+     "w": "me",
+     "s": 4.88,
+     "e": 5.04,
+     "p": 1.0
+    },
+    {
+     "w": "skill",
+     "s": 5.2,
+     "e": 5.44,
+     "p": 1.0
+    },
+    {
+     "w": "which",
+     "s": 6.4,
+     "e": 6.72,
+     "p": 1.0
+    },
+    {
+     "w": "is",
+     "s": 6.72,
+     "e": 7.04,
+     "p": 1.0
+    },
+    {
+     "w": "absolutely",
+     "s": 7.28,
+     "e": 7.92,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "fillers",
+     "start": 3.52,
+     "end": 3.84,
+     "why": "Parakeet filler token 'um' of 0.32 s (longest filler in quintile 2 of the content region 104.72-1888.16 s); derive_cuts filler cut in detector_output.",
+     "words": [
+      {
+       "w": "task,",
+       "s": 0.08,
+       "e": 0.8
+      },
+      {
+       "w": "right?",
+       "s": 0.8,
+       "e": 1.28
+      },
+      {
+       "w": "You",
+       "s": 1.52,
+       "e": 1.84
+      },
+      {
+       "w": "need",
+       "s": 1.84,
+       "e": 2.0
+      },
+      {
+       "w": "to",
+       "s": 2.0,
+       "e": 2.08
+      },
+      {
+       "w": "ask",
+       "s": 2.08,
+       "e": 2.4
+      },
+      {
+       "w": "it",
+       "s": 2.4,
+       "e": 2.56
+      },
+      {
+       "w": "to",
+       "s": 2.64,
+       "e": 2.88
+      },
+      {
+       "w": "I",
+       "s": 2.88,
+       "e": 3.2
+      },
+      {
+       "w": "use",
+       "s": 3.2,
+       "e": 3.52
+      },
+      {
+       "w": "um",
+       "s": 3.52,
+       "e": 3.84
+      },
+      {
+       "w": "uh",
+       "s": 3.92,
+       "e": 4.16
+      },
+      {
+       "w": "the",
+       "s": 4.08,
+       "e": 4.4
+      },
+      {
+       "w": "grill",
+       "s": 4.4,
+       "e": 4.72
+      },
+      {
+       "w": "me",
+       "s": 4.88,
+       "e": 5.04
+      },
+      {
+       "w": "skill",
+       "s": 5.2,
+       "e": 5.44
+      },
+      {
+       "w": "which",
+       "s": 6.4,
+       "e": 6.72
+      },
+      {
+       "w": "is",
+       "s": 6.72,
+       "e": 7.04
+      }
+     ],
+     "detector": "derive.derive_cuts",
+     "detector_output": {
+      "token": {
+       "w": "um",
+       "s": 3.52,
+       "e": 3.84
+      },
+      "prob": 1.0,
+      "filler_cut": {
+       "start": 3.46,
+       "end": 4.22,
+       "reason": "filler",
+       "text": "um uh"
+      },
+      "silences_touching": []
+     },
+     "source_start": 517.52,
+     "source_end": 517.84
+    }
+   ]
+  },
+  {
+   "file": "pause-588.0.wav",
+   "category": "pause",
+   "source_start": 588.0,
+   "source_end": 596.0,
+   "why": "silent 1.28 s gap 591.52-592.80",
+   "words": [
+    {
+     "w": "create",
+     "s": 0.0,
+     "e": 0.32,
+     "p": 1.0
+    },
+    {
+     "w": "some",
+     "s": 0.32,
+     "e": 0.48,
+     "p": 1.0
+    },
+    {
+     "w": "kind",
+     "s": 0.48,
+     "e": 0.72,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 0.72,
+     "e": 0.8,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 0.8,
+     "e": 1.04,
+     "p": 1.0
+    },
+    {
+     "w": "plan,",
+     "s": 1.04,
+     "e": 1.28,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 1.28,
+     "e": 1.52,
+     "p": 1.0
+    },
+    {
+     "w": "this",
+     "s": 1.52,
+     "e": 1.84,
+     "p": 1.0
+    },
+    {
+     "w": "is",
+     "s": 1.84,
+     "e": 2.16,
+     "p": 1.0
+    },
+    {
+     "w": "my",
+     "s": 2.16,
+     "e": 2.48,
+     "p": 1.0
+    },
+    {
+     "w": "high",
+     "s": 2.48,
+     "e": 2.72,
+     "p": 1.0
+    },
+    {
+     "w": "level",
+     "s": 2.88,
+     "e": 3.52,
+     "p": 1.0
+    },
+    {
+     "w": "agent.",
+     "s": 4.8,
+     "e": 5.76,
+     "p": 1.0
+    },
+    {
+     "w": "You",
+     "s": 5.76,
+     "e": 5.92,
+     "p": 1.0
+    },
+    {
+     "w": "could",
+     "s": 5.92,
+     "e": 6.08,
+     "p": 1.0
+    },
+    {
+     "w": "call",
+     "s": 6.08,
+     "e": 6.24,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 6.24,
+     "e": 6.4,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 6.4,
+     "e": 6.56,
+     "p": 1.0
+    },
+    {
+     "w": "manager,",
+     "s": 6.56,
+     "e": 6.96,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 6.96,
+     "e": 7.04,
+     "p": 1.0
+    },
+    {
+     "w": "could",
+     "s": 7.04,
+     "e": 7.2,
+     "p": 1.0
+    },
+    {
+     "w": "call",
+     "s": 7.2,
+     "e": 7.36,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 7.28,
+     "e": 7.44,
+     "p": 1.0
+    },
+    {
+     "w": "whatever",
+     "s": 7.44,
+     "e": 7.68,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 7.68,
+     "e": 7.76,
+     "p": 1.0
+    },
+    {
+     "w": "want.",
+     "s": 7.76,
+     "e": 7.92,
+     "p": 1.0
+    },
+    {
+     "w": "But",
+     "s": 7.92,
+     "e": 8.0,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "pauses",
+     "start": 3.52,
+     "end": 4.8,
+     "why": "Silent inter-word gap of 1.28 s between 'level' and 'agent.' (pick 1/5, evenly spaced through the 31 silent 0.4-1.5 s gaps in the content region); detect_silences covers 100% of it.",
+     "words": [
+      {
+       "w": "kind",
+       "s": 0.48,
+       "e": 0.72
+      },
+      {
+       "w": "of",
+       "s": 0.72,
+       "e": 0.8
+      },
+      {
+       "w": "a",
+       "s": 0.8,
+       "e": 1.04
+      },
+      {
+       "w": "plan,",
+       "s": 1.04,
+       "e": 1.28
+      },
+      {
+       "w": "and",
+       "s": 1.28,
+       "e": 1.52
+      },
+      {
+       "w": "this",
+       "s": 1.52,
+       "e": 1.84
+      },
+      {
+       "w": "is",
+       "s": 1.84,
+       "e": 2.16
+      },
+      {
+       "w": "my",
+       "s": 2.16,
+       "e": 2.48
+      },
+      {
+       "w": "high",
+       "s": 2.48,
+       "e": 2.72
+      },
+      {
+       "w": "level",
+       "s": 2.88,
+       "e": 3.52
+      },
+      {
+       "w": "agent.",
+       "s": 4.8,
+       "e": 5.76
+      },
+      {
+       "w": "You",
+       "s": 5.76,
+       "e": 5.92
+      },
+      {
+       "w": "could",
+       "s": 5.92,
+       "e": 6.08
+      },
+      {
+       "w": "call",
+       "s": 6.08,
+       "e": 6.24
+      },
+      {
+       "w": "it",
+       "s": 6.24,
+       "e": 6.4
+      },
+      {
+       "w": "a",
+       "s": 6.4,
+       "e": 6.56
+      },
+      {
+       "w": "manager,",
+       "s": 6.56,
+       "e": 6.96
+      },
+      {
+       "w": "you",
+       "s": 6.96,
+       "e": 7.04
+      },
+      {
+       "w": "could",
+       "s": 7.04,
+       "e": 7.2
+      },
+      {
+       "w": "call",
+       "s": 7.2,
+       "e": 7.36
+      },
+      {
+       "w": "it",
+       "s": 7.28,
+       "e": 7.44
+      },
+      {
+       "w": "whatever",
+       "s": 7.44,
+       "e": 7.68
+      },
+      {
+       "w": "you",
+       "s": 7.68,
+       "e": 7.76
+      },
+      {
+       "w": "want.",
+       "s": 7.76,
+       "e": 7.92
+      }
+     ],
+     "detector": "transcribe.detect_silences",
+     "detector_output": {
+      "gap_s": 1.28,
+      "silences_inside": [
+       [
+        3.5,
+        5.14
+       ]
+      ],
+      "silent_fraction": 1.0,
+      "peak_dbfs_in_gap": -53.35,
+      "silence_cut": null
+     },
+     "source_start": 591.52,
+     "source_end": 592.8
+    }
+   ]
+  },
+  {
+   "file": "word-boundary-814.0.wav",
+   "category": "word-boundary",
+   "source_start": 814.0,
+   "source_end": 826.0,
+   "why": "'separate.' 817.60-822.40: acoustic end 817.93 (-4.47)",
+   "words": [
+    {
+     "w": "main",
+     "s": 0.16,
+     "e": 0.48,
+     "p": 1.0
+    },
+    {
+     "w": "context",
+     "s": 0.48,
+     "e": 1.04,
+     "p": 1.0
+    },
+    {
+     "w": "with",
+     "s": 1.12,
+     "e": 1.28,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 1.28,
+     "e": 1.52,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 1.52,
+     "e": 1.68,
+     "p": 1.0
+    },
+    {
+     "w": "one",
+     "s": 1.68,
+     "e": 1.92,
+     "p": 1.0
+    },
+    {
+     "w": "with",
+     "s": 1.92,
+     "e": 2.08,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 2.08,
+     "e": 2.4,
+     "p": 1.0
+    },
+    {
+     "w": "plan,",
+     "s": 2.4,
+     "e": 3.2,
+     "p": 1.0
+    },
+    {
+     "w": "uh",
+     "s": 3.2,
+     "e": 3.36,
+     "p": 1.0
+    },
+    {
+     "w": "separate.",
+     "s": 3.6,
+     "e": 8.4,
+     "p": 1.0
+    },
+    {
+     "w": "And",
+     "s": 8.4,
+     "e": 8.72,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 8.96,
+     "e": 9.12,
+     "p": 1.0
+    },
+    {
+     "w": "will",
+     "s": 9.12,
+     "e": 9.2,
+     "p": 1.0
+    },
+    {
+     "w": "understand",
+     "s": 9.36,
+     "e": 9.76,
+     "p": 1.0
+    },
+    {
+     "w": "why",
+     "s": 9.76,
+     "e": 10.0,
+     "p": 1.0
+    },
+    {
+     "w": "this",
+     "s": 10.0,
+     "e": 10.16,
+     "p": 1.0
+    },
+    {
+     "w": "matters",
+     "s": 10.16,
+     "e": 10.56,
+     "p": 1.0
+    },
+    {
+     "w": "in",
+     "s": 10.56,
+     "e": 10.72,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 10.72,
+     "e": 10.88,
+     "p": 1.0
+    },
+    {
+     "w": "little",
+     "s": 10.88,
+     "e": 11.2,
+     "p": 1.0
+    },
+    {
+     "w": "bit.",
+     "s": 11.2,
+     "e": 11.68,
+     "p": 1.0
+    },
+    {
+     "w": "But",
+     "s": 11.68,
+     "e": 12.0,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "word_boundaries",
+     "start": 3.6,
+     "end": 8.4,
+     "why": "Parakeet end-stamp of 'separate.' is 822.40 s but the 10 ms RMS envelope first stays below floor+6 dB (-47.9 dBFS) for >=40 ms at 817.93 s: acoustic end is 4470 ms earlier than ASR end.",
+     "words": [
+      {
+       "w": "context",
+       "s": 0.48,
+       "e": 1.04
+      },
+      {
+       "w": "with",
+       "s": 1.12,
+       "e": 1.28
+      },
+      {
+       "w": "the",
+       "s": 1.28,
+       "e": 1.52
+      },
+      {
+       "w": "the",
+       "s": 1.52,
+       "e": 1.68
+      },
+      {
+       "w": "one",
+       "s": 1.68,
+       "e": 1.92
+      },
+      {
+       "w": "with",
+       "s": 1.92,
+       "e": 2.08
+      },
+      {
+       "w": "the",
+       "s": 2.08,
+       "e": 2.4
+      },
+      {
+       "w": "plan,",
+       "s": 2.4,
+       "e": 3.2
+      },
+      {
+       "w": "uh",
+       "s": 3.2,
+       "e": 3.36
+      },
+      {
+       "w": "separate.",
+       "s": 3.6,
+       "e": 8.4
+      },
+      {
+       "w": "And",
+       "s": 8.4,
+       "e": 8.72
+      },
+      {
+       "w": "you",
+       "s": 8.96,
+       "e": 9.12
+      },
+      {
+       "w": "will",
+       "s": 9.12,
+       "e": 9.2
+      },
+      {
+       "w": "understand",
+       "s": 9.36,
+       "e": 9.76
+      },
+      {
+       "w": "why",
+       "s": 9.76,
+       "e": 10.0
+      },
+      {
+       "w": "this",
+       "s": 10.0,
+       "e": 10.16
+      },
+      {
+       "w": "matters",
+       "s": 10.16,
+       "e": 10.56
+      },
+      {
+       "w": "in",
+       "s": 10.56,
+       "e": 10.72
+      },
+      {
+       "w": "a",
+       "s": 10.72,
+       "e": 10.88
+      },
+      {
+       "w": "little",
+       "s": 10.88,
+       "e": 11.2
+      },
+      {
+       "w": "bit.",
+       "s": 11.2,
+       "e": 11.68
+      }
+     ],
+     "detector": "rms10ms_envelope",
+     "detector_output": {
+      "asr_start": 3.6,
+      "asr_end": 8.4,
+      "acoustic_onset": 3.6,
+      "acoustic_end": 3.93,
+      "acoustic_minus_asr_s": -4.47,
+      "threshold_dbfs": -47.915,
+      "floor10_dbfs": -53.915,
+      "next_word": {
+       "w": "And",
+       "s": 8.4,
+       "e": 8.72
+      }
+     },
+     "source_start": 817.6,
+     "source_end": 822.4
+    }
+   ]
+  },
+  {
+   "file": "smack-958.0.wav",
+   "category": "smack",
+   "source_start": 958.0,
+   "source_end": 968.0,
+   "why": "smack 963.565 and filler 'uh,' 962.56",
+   "words": [
+    {
+     "w": "insights",
+     "s": 0.0,
+     "e": 0.64,
+     "p": 1.0
+    },
+    {
+     "w": "essentially.",
+     "s": 0.72,
+     "e": 3.04,
+     "p": 1.0
+    },
+    {
+     "w": "And",
+     "s": 3.04,
+     "e": 3.28,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 3.28,
+     "e": 3.44,
+     "p": 1.0
+    },
+    {
+     "w": "grilling",
+     "s": 3.44,
+     "e": 4.0,
+     "p": 1.0
+    },
+    {
+     "w": "itself,",
+     "s": 4.0,
+     "e": 4.56,
+     "p": 1.0
+    },
+    {
+     "w": "uh,",
+     "s": 4.56,
+     "e": 5.04,
+     "p": 1.0
+    },
+    {
+     "w": "just",
+     "s": 5.04,
+     "e": 5.36,
+     "p": 1.0
+    },
+    {
+     "w": "this",
+     "s": 5.6,
+     "e": 5.84,
+     "p": 1.0
+    },
+    {
+     "w": "is",
+     "s": 5.84,
+     "e": 6.08,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 6.08,
+     "e": 6.16,
+     "p": 1.0
+    },
+    {
+     "w": "bit",
+     "s": 6.16,
+     "e": 6.32,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 6.32,
+     "e": 6.4,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 6.4,
+     "e": 6.56,
+     "p": 1.0
+    },
+    {
+     "w": "side",
+     "s": 6.56,
+     "e": 6.8,
+     "p": 1.0
+    },
+    {
+     "w": "note,",
+     "s": 6.8,
+     "e": 7.12,
+     "p": 1.0
+    },
+    {
+     "w": "but",
+     "s": 7.12,
+     "e": 7.28,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 7.28,
+     "e": 7.44,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 7.44,
+     "e": 7.6,
+     "p": 1.0
+    },
+    {
+     "w": "grilling",
+     "s": 7.6,
+     "e": 8.08,
+     "p": 1.0
+    },
+    {
+     "w": "itself,",
+     "s": 8.08,
+     "e": 9.68,
+     "p": 1.0
+    },
+    {
+     "w": "what",
+     "s": 9.68,
+     "e": 10.0,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "mouth_noises",
+     "start": 5.565,
+     "end": 5.63,
+     "why": "Smack in the gap between 'just' and 'this' (0.24 s gap): 65 ms, mean ZCR 0.50, peak 21.1 dB over floor, quiet 0.14/0.35 s before/after.",
+     "words": [
+      {
+       "w": "essentially.",
+       "s": 0.72,
+       "e": 3.04
+      },
+      {
+       "w": "And",
+       "s": 3.04,
+       "e": 3.28
+      },
+      {
+       "w": "the",
+       "s": 3.28,
+       "e": 3.44
+      },
+      {
+       "w": "grilling",
+       "s": 3.44,
+       "e": 4.0
+      },
+      {
+       "w": "itself,",
+       "s": 4.0,
+       "e": 4.56
+      },
+      {
+       "w": "uh,",
+       "s": 4.56,
+       "e": 5.04
+      },
+      {
+       "w": "just",
+       "s": 5.04,
+       "e": 5.36
+      },
+      {
+       "w": "this",
+       "s": 5.6,
+       "e": 5.84
+      },
+      {
+       "w": "is",
+       "s": 5.84,
+       "e": 6.08
+      },
+      {
+       "w": "a",
+       "s": 6.08,
+       "e": 6.16
+      },
+      {
+       "w": "bit",
+       "s": 6.16,
+       "e": 6.32
+      },
+      {
+       "w": "of",
+       "s": 6.32,
+       "e": 6.4
+      },
+      {
+       "w": "a",
+       "s": 6.4,
+       "e": 6.56
+      },
+      {
+       "w": "side",
+       "s": 6.56,
+       "e": 6.8
+      },
+      {
+       "w": "note,",
+       "s": 6.8,
+       "e": 7.12
+      },
+      {
+       "w": "but",
+       "s": 7.12,
+       "e": 7.28
+      },
+      {
+       "w": "the",
+       "s": 7.28,
+       "e": 7.44
+      },
+      {
+       "w": "the",
+       "s": 7.44,
+       "e": 7.6
+      },
+      {
+       "w": "grilling",
+       "s": 7.6,
+       "e": 8.08
+      },
+      {
+       "w": "itself,",
+       "s": 8.08,
+       "e": 9.68
+      }
+     ],
+     "detector": "noise._bursts+_classify (gate: burst inside a Parakeet inter-word gap with <=50 ms stamp overlap; Silero/min_quiet production gate not applied)",
+     "detector_output": {
+      "kind": "smack",
+      "burst_start": 5.565,
+      "burst_end": 5.63,
+      "duration_s": 0.065,
+      "mean_zcr": 0.498,
+      "peak_over_floor_db": 21.096,
+      "floor_dbfs": -54.276,
+      "quiet_before_s": 0.145,
+      "quiet_after_s": 0.35,
+      "passes_production_quiet_gate": false,
+      "production_cut": null,
+      "silences_touching": [
+       [
+        5.64,
+        5.96
+       ]
+      ]
+     },
+     "source_start": 963.565,
+     "source_end": 963.63
+    },
+    {
+     "category": "fillers",
+     "start": 4.56,
+     "end": 5.04,
+     "why": "Parakeet filler token 'uh,' of 0.48 s (longest filler in quintile 3 of the content region 104.72-1888.16 s); derive_cuts filler cut in detector_output.",
+     "words": [
+      {
+       "w": "essentially.",
+       "s": 0.72,
+       "e": 3.04
+      },
+      {
+       "w": "And",
+       "s": 3.04,
+       "e": 3.28
+      },
+      {
+       "w": "the",
+       "s": 3.28,
+       "e": 3.44
+      },
+      {
+       "w": "grilling",
+       "s": 3.44,
+       "e": 4.0
+      },
+      {
+       "w": "itself,",
+       "s": 4.0,
+       "e": 4.56
+      },
+      {
+       "w": "uh,",
+       "s": 4.56,
+       "e": 5.04
+      },
+      {
+       "w": "just",
+       "s": 5.04,
+       "e": 5.36
+      },
+      {
+       "w": "this",
+       "s": 5.6,
+       "e": 5.84
+      },
+      {
+       "w": "is",
+       "s": 5.84,
+       "e": 6.08
+      },
+      {
+       "w": "a",
+       "s": 6.08,
+       "e": 6.16
+      },
+      {
+       "w": "bit",
+       "s": 6.16,
+       "e": 6.32
+      },
+      {
+       "w": "of",
+       "s": 6.32,
+       "e": 6.4
+      },
+      {
+       "w": "a",
+       "s": 6.4,
+       "e": 6.56
+      },
+      {
+       "w": "side",
+       "s": 6.56,
+       "e": 6.8
+      },
+      {
+       "w": "note,",
+       "s": 6.8,
+       "e": 7.12
+      },
+      {
+       "w": "but",
+       "s": 7.12,
+       "e": 7.28
+      },
+      {
+       "w": "the",
+       "s": 7.28,
+       "e": 7.44
+      },
+      {
+       "w": "the",
+       "s": 7.44,
+       "e": 7.6
+      },
+      {
+       "w": "grilling",
+       "s": 7.6,
+       "e": 8.08
+      }
+     ],
+     "detector": "derive.derive_cuts",
+     "detector_output": {
+      "token": {
+       "w": "uh,",
+       "s": 4.56,
+       "e": 5.04
+      },
+      "prob": 1.0,
+      "filler_cut": {
+       "start": 4.5,
+       "end": 5.1,
+       "reason": "filler",
+       "text": "uh"
+      },
+      "silences_touching": []
+     },
+     "source_start": 962.56,
+     "source_end": 963.04
+    }
+   ]
+  },
+  {
+   "file": "pause-1366.0.wav",
+   "category": "pause",
+   "source_start": 1366.0,
+   "source_end": 1374.0,
+   "why": "silent 1.12 s gap 1369.20-1370.32",
+   "words": [
+    {
+     "w": "valuable",
+     "s": 0.08,
+     "e": 0.64,
+     "p": 1.0
+    },
+    {
+     "w": "thing",
+     "s": 0.64,
+     "e": 0.96,
+     "p": 1.0
+    },
+    {
+     "w": "we",
+     "s": 0.96,
+     "e": 1.28,
+     "p": 1.0
+    },
+    {
+     "w": "have",
+     "s": 1.28,
+     "e": 1.36,
+     "p": 1.0
+    },
+    {
+     "w": "going",
+     "s": 1.52,
+     "e": 1.84,
+     "p": 1.0
+    },
+    {
+     "w": "for",
+     "s": 1.84,
+     "e": 2.16,
+     "p": 1.0
+    },
+    {
+     "w": "us.",
+     "s": 2.16,
+     "e": 2.88,
+     "p": 1.0
+    },
+    {
+     "w": "So",
+     "s": 2.88,
+     "e": 3.2,
+     "p": 1.0
+    },
+    {
+     "w": "being",
+     "s": 4.32,
+     "e": 4.72,
+     "p": 1.0
+    },
+    {
+     "w": "able",
+     "s": 4.72,
+     "e": 4.96,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 4.96,
+     "e": 5.12,
+     "p": 1.0
+    },
+    {
+     "w": "save",
+     "s": 5.12,
+     "e": 5.52,
+     "p": 1.0
+    },
+    {
+     "w": "attention",
+     "s": 5.52,
+     "e": 6.0,
+     "p": 1.0
+    },
+    {
+     "w": "on",
+     "s": 6.0,
+     "e": 6.32,
+     "p": 1.0
+    },
+    {
+     "w": "individual",
+     "s": 6.48,
+     "e": 6.96,
+     "p": 1.0
+    },
+    {
+     "w": "tickets",
+     "s": 6.96,
+     "e": 7.28,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 7.36,
+     "e": 7.52,
+     "p": 1.0
+    },
+    {
+     "w": "context",
+     "s": 7.52,
+     "e": 8.0,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "pauses",
+     "start": 3.2,
+     "end": 4.32,
+     "why": "Silent inter-word gap of 1.12 s between 'So' and 'being' (pick 3/5, evenly spaced through the 31 silent 0.4-1.5 s gaps in the content region); detect_silences covers 95% of it.",
+     "words": [
+      {
+       "w": "valuable",
+       "s": 0.08,
+       "e": 0.64
+      },
+      {
+       "w": "thing",
+       "s": 0.64,
+       "e": 0.96
+      },
+      {
+       "w": "we",
+       "s": 0.96,
+       "e": 1.28
+      },
+      {
+       "w": "have",
+       "s": 1.28,
+       "e": 1.36
+      },
+      {
+       "w": "going",
+       "s": 1.52,
+       "e": 1.84
+      },
+      {
+       "w": "for",
+       "s": 1.84,
+       "e": 2.16
+      },
+      {
+       "w": "us.",
+       "s": 2.16,
+       "e": 2.88
+      },
+      {
+       "w": "So",
+       "s": 2.88,
+       "e": 3.2
+      },
+      {
+       "w": "being",
+       "s": 4.32,
+       "e": 4.72
+      },
+      {
+       "w": "able",
+       "s": 4.72,
+       "e": 4.96
+      },
+      {
+       "w": "to",
+       "s": 4.96,
+       "e": 5.12
+      },
+      {
+       "w": "save",
+       "s": 5.12,
+       "e": 5.52
+      },
+      {
+       "w": "attention",
+       "s": 5.52,
+       "e": 6.0
+      },
+      {
+       "w": "on",
+       "s": 6.0,
+       "e": 6.32
+      },
+      {
+       "w": "individual",
+       "s": 6.48,
+       "e": 6.96
+      },
+      {
+       "w": "tickets",
+       "s": 6.96,
+       "e": 7.28
+      }
+     ],
+     "detector": "transcribe.detect_silences",
+     "detector_output": {
+      "gap_s": 1.12,
+      "silences_inside": [
+       [
+        3.26,
+        4.42
+       ]
+      ],
+      "silent_fraction": 0.946,
+      "peak_dbfs_in_gap": -39.28,
+      "silence_cut": {
+       "start": 3.36,
+       "end": 4.32,
+       "reason": "silence",
+       "text": ""
+      }
+     },
+     "source_start": 1369.2,
+     "source_end": 1370.32
+    }
+   ]
+  },
+  {
+   "file": "throat-1485.0.wav",
+   "category": "throat",
+   "source_start": 1485.0,
+   "source_end": 1500.0,
+   "why": "throat-class burst 1495.155 and silent 0.56 s gap 1488.40-1488.96",
+   "words": [
+    {
+     "w": "final",
+     "s": 0.12,
+     "e": 0.44,
+     "p": 1.0
+    },
+    {
+     "w": "big",
+     "s": 0.52,
+     "e": 0.84,
+     "p": 1.0
+    },
+    {
+     "w": "picture",
+     "s": 0.84,
+     "e": 1.24,
+     "p": 1.0
+    },
+    {
+     "w": "one,",
+     "s": 1.24,
+     "e": 1.64,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 1.64,
+     "e": 1.8,
+     "p": 1.0
+    },
+    {
+     "w": "would",
+     "s": 1.8,
+     "e": 1.96,
+     "p": 1.0
+    },
+    {
+     "w": "spin",
+     "s": 1.96,
+     "e": 2.36,
+     "p": 1.0
+    },
+    {
+     "w": "up",
+     "s": 2.36,
+     "e": 2.52,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 2.52,
+     "e": 2.76,
+     "p": 1.0
+    },
+    {
+     "w": "new",
+     "s": 2.76,
+     "e": 3.4,
+     "p": 1.0
+    },
+    {
+     "w": "engineering",
+     "s": 3.96,
+     "e": 4.84,
+     "p": 1.0
+    },
+    {
+     "w": "agent.",
+     "s": 4.84,
+     "e": 5.88,
+     "p": 1.0
+    },
+    {
+     "w": "And",
+     "s": 5.88,
+     "e": 6.2,
+     "p": 1.0
+    },
+    {
+     "w": "that's",
+     "s": 6.2,
+     "e": 6.52,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 6.52,
+     "e": 6.68,
+     "p": 1.0
+    },
+    {
+     "w": "workflow.",
+     "s": 6.68,
+     "e": 7.48,
+     "p": 1.0
+    },
+    {
+     "w": "It",
+     "s": 7.48,
+     "e": 7.64,
+     "p": 1.0
+    },
+    {
+     "w": "works",
+     "s": 7.64,
+     "e": 7.96,
+     "p": 1.0
+    },
+    {
+     "w": "really",
+     "s": 7.96,
+     "e": 8.12,
+     "p": 1.0
+    },
+    {
+     "w": "nicely.",
+     "s": 8.12,
+     "e": 8.68,
+     "p": 1.0
+    },
+    {
+     "w": "There's",
+     "s": 8.68,
+     "e": 9.08,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 9.08,
+     "e": 9.32,
+     "p": 1.0
+    },
+    {
+     "w": "lot",
+     "s": 9.32,
+     "e": 9.64,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 9.64,
+     "e": 9.96,
+     "p": 1.0
+    },
+    {
+     "w": "space",
+     "s": 10.52,
+     "e": 11.16,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 11.16,
+     "e": 11.4,
+     "p": 1.0
+    },
+    {
+     "w": "expand",
+     "s": 11.4,
+     "e": 12.2,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 12.52,
+     "e": 12.84,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 13.32,
+     "e": 13.64,
+     "p": 1.0
+    },
+    {
+     "w": "repeat",
+     "s": 13.64,
+     "e": 14.12,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 14.12,
+     "e": 14.2,
+     "p": 1.0
+    },
+    {
+     "w": "lot",
+     "s": 14.2,
+     "e": 14.44,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 14.44,
+     "e": 14.52,
+     "p": 1.0
+    },
+    {
+     "w": "this,",
+     "s": 14.52,
+     "e": 14.84,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "mouth_noises",
+     "start": 10.155,
+     "end": 10.35,
+     "why": "Throat in the gap between 'of' and 'space' (0.56 s gap): 195 ms, mean ZCR 0.02, peak 21.6 dB over floor, quiet 0.48/0.26 s before/after.",
+     "words": [
+      {
+       "w": "workflow.",
+       "s": 6.68,
+       "e": 7.48
+      },
+      {
+       "w": "It",
+       "s": 7.48,
+       "e": 7.64
+      },
+      {
+       "w": "works",
+       "s": 7.64,
+       "e": 7.96
+      },
+      {
+       "w": "really",
+       "s": 7.96,
+       "e": 8.12
+      },
+      {
+       "w": "nicely.",
+       "s": 8.12,
+       "e": 8.68
+      },
+      {
+       "w": "There's",
+       "s": 8.68,
+       "e": 9.08
+      },
+      {
+       "w": "a",
+       "s": 9.08,
+       "e": 9.32
+      },
+      {
+       "w": "lot",
+       "s": 9.32,
+       "e": 9.64
+      },
+      {
+       "w": "of",
+       "s": 9.64,
+       "e": 9.96
+      },
+      {
+       "w": "space",
+       "s": 10.52,
+       "e": 11.16
+      },
+      {
+       "w": "to",
+       "s": 11.16,
+       "e": 11.4
+      },
+      {
+       "w": "expand",
+       "s": 11.4,
+       "e": 12.2
+      },
+      {
+       "w": "and",
+       "s": 12.52,
+       "e": 12.84
+      },
+      {
+       "w": "to",
+       "s": 13.32,
+       "e": 13.64
+      }
+     ],
+     "detector": "noise._bursts+_classify (gate: burst inside a Parakeet inter-word gap with <=50 ms stamp overlap; Silero/min_quiet production gate not applied)",
+     "detector_output": {
+      "kind": "throat",
+      "burst_start": 10.155,
+      "burst_end": 10.35,
+      "duration_s": 0.195,
+      "mean_zcr": 0.022,
+      "peak_over_floor_db": 21.646,
+      "floor_dbfs": -54.276,
+      "quiet_before_s": 0.485,
+      "quiet_after_s": 0.265,
+      "passes_production_quiet_gate": true,
+      "production_cut": null,
+      "silences_touching": [
+       [
+        9.7,
+        10.16
+       ]
+      ]
+     },
+     "source_start": 1495.155,
+     "source_end": 1495.35
+    },
+    {
+     "category": "pauses",
+     "start": 3.4,
+     "end": 3.96,
+     "why": "Silent inter-word gap of 0.56 s between 'new' and 'engineering' (pick 4/5, evenly spaced through the 31 silent 0.4-1.5 s gaps in the content region); detect_silences covers 100% of it.",
+     "words": [
+      {
+       "w": "final",
+       "s": 0.12,
+       "e": 0.44
+      },
+      {
+       "w": "big",
+       "s": 0.52,
+       "e": 0.84
+      },
+      {
+       "w": "picture",
+       "s": 0.84,
+       "e": 1.24
+      },
+      {
+       "w": "one,",
+       "s": 1.24,
+       "e": 1.64
+      },
+      {
+       "w": "you",
+       "s": 1.64,
+       "e": 1.8
+      },
+      {
+       "w": "would",
+       "s": 1.8,
+       "e": 1.96
+      },
+      {
+       "w": "spin",
+       "s": 1.96,
+       "e": 2.36
+      },
+      {
+       "w": "up",
+       "s": 2.36,
+       "e": 2.52
+      },
+      {
+       "w": "a",
+       "s": 2.52,
+       "e": 2.76
+      },
+      {
+       "w": "new",
+       "s": 2.76,
+       "e": 3.4
+      },
+      {
+       "w": "engineering",
+       "s": 3.96,
+       "e": 4.84
+      },
+      {
+       "w": "agent.",
+       "s": 4.84,
+       "e": 5.88
+      },
+      {
+       "w": "And",
+       "s": 5.88,
+       "e": 6.2
+      },
+      {
+       "w": "that's",
+       "s": 6.2,
+       "e": 6.52
+      },
+      {
+       "w": "the",
+       "s": 6.52,
+       "e": 6.68
+      },
+      {
+       "w": "workflow.",
+       "s": 6.68,
+       "e": 7.48
+      }
+     ],
+     "detector": "transcribe.detect_silences",
+     "detector_output": {
+      "gap_s": 0.56,
+      "silences_inside": [
+       [
+        2.96,
+        4.2
+       ]
+      ],
+      "silent_fraction": 1.0,
+      "peak_dbfs_in_gap": -57.11,
+      "silence_cut": null
+     },
+     "source_start": 1488.4,
+     "source_end": 1488.96
+    }
+   ]
+  },
+  {
+   "file": "moan-1662.0.wav",
+   "category": "moan",
+   "source_start": 1662.0,
+   "source_end": 1682.0,
+   "why": "moan absorbed in 'retrospectives,' 1665.12 and filler 'Um,' 1679.6",
+   "words": [
+    {
+     "w": "Now,",
+     "s": 0.08,
+     "e": 0.88,
+     "p": 1.0
+    },
+    {
+     "w": "with",
+     "s": 0.88,
+     "e": 1.2,
+     "p": 1.0
+    },
+    {
+     "w": "time",
+     "s": 1.2,
+     "e": 1.52,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 1.68,
+     "e": 1.84,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 1.84,
+     "e": 2.08,
+     "p": 1.0
+    },
+    {
+     "w": "benefit",
+     "s": 2.08,
+     "e": 2.64,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 2.64,
+     "e": 2.8,
+     "p": 1.0
+    },
+    {
+     "w": "uh",
+     "s": 2.8,
+     "e": 3.12,
+     "p": 1.0
+    },
+    {
+     "w": "retrospectives,",
+     "s": 3.12,
+     "e": 4.64,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 4.64,
+     "e": 4.96,
+     "p": 1.0
+    },
+    {
+     "w": "realized",
+     "s": 4.96,
+     "e": 5.52,
+     "p": 1.0
+    },
+    {
+     "w": "that",
+     "s": 5.76,
+     "e": 6.08,
+     "p": 1.0
+    },
+    {
+     "w": "pie",
+     "s": 6.4,
+     "e": 6.64,
+     "p": 1.0
+    },
+    {
+     "w": "itself,",
+     "s": 6.88,
+     "e": 7.76,
+     "p": 1.0
+    },
+    {
+     "w": "first",
+     "s": 7.76,
+     "e": 8.08,
+     "p": 1.0
+    },
+    {
+     "w": "off,",
+     "s": 8.08,
+     "e": 8.56,
+     "p": 1.0
+    },
+    {
+     "w": "amazing",
+     "s": 8.72,
+     "e": 9.28,
+     "p": 1.0
+    },
+    {
+     "w": "harness.",
+     "s": 9.28,
+     "e": 9.84,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 9.84,
+     "e": 10.0,
+     "p": 1.0
+    },
+    {
+     "w": "love",
+     "s": 10.0,
+     "e": 10.16,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 10.16,
+     "e": 10.32,
+     "p": 1.0
+    },
+    {
+     "w": "so",
+     "s": 10.32,
+     "e": 10.4,
+     "p": 1.0
+    },
+    {
+     "w": "much.",
+     "s": 10.4,
+     "e": 10.64,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 10.64,
+     "e": 10.72,
+     "p": 1.0
+    },
+    {
+     "w": "love",
+     "s": 10.72,
+     "e": 10.88,
+     "p": 1.0
+    },
+    {
+     "w": "what",
+     "s": 10.88,
+     "e": 11.04,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 11.04,
+     "e": 11.2,
+     "p": 1.0
+    },
+    {
+     "w": "stands",
+     "s": 11.2,
+     "e": 11.36,
+     "p": 1.0
+    },
+    {
+     "w": "for,",
+     "s": 11.44,
+     "e": 12.4,
+     "p": 1.0
+    },
+    {
+     "w": "but",
+     "s": 12.4,
+     "e": 12.56,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 12.56,
+     "e": 12.72,
+     "p": 1.0
+    },
+    {
+     "w": "is",
+     "s": 12.72,
+     "e": 12.88,
+     "p": 1.0
+    },
+    {
+     "w": "such",
+     "s": 12.88,
+     "e": 13.12,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 13.12,
+     "e": 13.28,
+     "p": 1.0
+    },
+    {
+     "w": "pain",
+     "s": 13.28,
+     "e": 13.52,
+     "p": 1.0
+    },
+    {
+     "w": "in",
+     "s": 13.52,
+     "e": 13.6,
+     "p": 1.0
+    },
+    {
+     "w": "the",
+     "s": 13.6,
+     "e": 13.76,
+     "p": 1.0
+    },
+    {
+     "w": "ass",
+     "s": 13.76,
+     "e": 14.0,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 14.0,
+     "e": 14.24,
+     "p": 1.0
+    },
+    {
+     "w": "set",
+     "s": 14.24,
+     "e": 14.4,
+     "p": 1.0
+    },
+    {
+     "w": "up",
+     "s": 14.4,
+     "e": 14.56,
+     "p": 1.0
+    },
+    {
+     "w": "correctly",
+     "s": 14.56,
+     "e": 15.04,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 15.04,
+     "e": 15.28,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 15.28,
+     "e": 15.44,
+     "p": 1.0
+    },
+    {
+     "w": "make",
+     "s": 15.44,
+     "e": 15.68,
+     "p": 1.0
+    },
+    {
+     "w": "it",
+     "s": 15.68,
+     "e": 15.92,
+     "p": 1.0
+    },
+    {
+     "w": "work",
+     "s": 15.92,
+     "e": 16.16,
+     "p": 1.0
+    },
+    {
+     "w": "properly",
+     "s": 16.16,
+     "e": 16.72,
+     "p": 1.0
+    },
+    {
+     "w": "for",
+     "s": 16.72,
+     "e": 17.04,
+     "p": 1.0
+    },
+    {
+     "w": "you.",
+     "s": 17.04,
+     "e": 17.6,
+     "p": 1.0
+    },
+    {
+     "w": "Um,",
+     "s": 17.6,
+     "e": 18.08,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 18.08,
+     "e": 18.4,
+     "p": 1.0
+    },
+    {
+     "w": "think",
+     "s": 18.4,
+     "e": 18.56,
+     "p": 1.0
+    },
+    {
+     "w": "that",
+     "s": 18.56,
+     "e": 18.72,
+     "p": 1.0
+    },
+    {
+     "w": "I",
+     "s": 18.72,
+     "e": 18.88,
+     "p": 1.0
+    },
+    {
+     "w": "managed",
+     "s": 18.88,
+     "e": 19.36,
+     "p": 1.0
+    },
+    {
+     "w": "to",
+     "s": 19.36,
+     "e": 19.52,
+     "p": 1.0
+    },
+    {
+     "w": "kind",
+     "s": 19.52,
+     "e": 19.68,
+     "p": 1.0
+    },
+    {
+     "w": "of",
+     "s": 19.68,
+     "e": 19.92,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "moans",
+     "start": 3.12,
+     "end": 3.405,
+     "why": "Voiced burst (hum/moan) absorbed into Parakeet span of 'retrospectives,' (1665.12-1666.64), sitting before the word core; peak 32.5 dB over floor. Join-steering fixture: must never be cut.",
+     "words": [
+      {
+       "w": "Now,",
+       "s": 0.08,
+       "e": 0.88
+      },
+      {
+       "w": "with",
+       "s": 0.88,
+       "e": 1.2
+      },
+      {
+       "w": "time",
+       "s": 1.2,
+       "e": 1.52
+      },
+      {
+       "w": "and",
+       "s": 1.68,
+       "e": 1.84
+      },
+      {
+       "w": "the",
+       "s": 1.84,
+       "e": 2.08
+      },
+      {
+       "w": "benefit",
+       "s": 2.08,
+       "e": 2.64
+      },
+      {
+       "w": "of",
+       "s": 2.64,
+       "e": 2.8
+      },
+      {
+       "w": "uh",
+       "s": 2.8,
+       "e": 3.12
+      },
+      {
+       "w": "retrospectives,",
+       "s": 3.12,
+       "e": 4.64
+      },
+      {
+       "w": "I",
+       "s": 4.64,
+       "e": 4.96
+      },
+      {
+       "w": "realized",
+       "s": 4.96,
+       "e": 5.52
+      },
+      {
+       "w": "that",
+       "s": 5.76,
+       "e": 6.08
+      },
+      {
+       "w": "pie",
+       "s": 6.4,
+       "e": 6.64
+      }
+     ],
+     "detector": "bursts.detect_voiced_bursts",
+     "detector_output": {
+      "cut": {
+       "start": 3.12,
+       "end": 3.405,
+       "reason": "noise",
+       "text": "voiced burst: absorbed in 'retrospectives,'"
+      },
+      "peak_dbfs": -21.75,
+      "peak_over_floor_db": 32.526,
+      "floor_dbfs": -54.276,
+      "host_word": {
+       "w": "retrospectives,",
+       "s": 3.12,
+       "e": 4.64
+      },
+      "kind": "absorbed_span"
+     },
+     "source_start": 1665.12,
+     "source_end": 1665.405
+    },
+    {
+     "category": "fillers",
+     "start": 17.6,
+     "end": 18.08,
+     "why": "Parakeet filler token 'Um,' of 0.48 s (longest filler in quintile 5 of the content region 104.72-1888.16 s); derive_cuts filler cut in detector_output.",
+     "words": [
+      {
+       "w": "correctly",
+       "s": 14.56,
+       "e": 15.04
+      },
+      {
+       "w": "and",
+       "s": 15.04,
+       "e": 15.28
+      },
+      {
+       "w": "to",
+       "s": 15.28,
+       "e": 15.44
+      },
+      {
+       "w": "make",
+       "s": 15.44,
+       "e": 15.68
+      },
+      {
+       "w": "it",
+       "s": 15.68,
+       "e": 15.92
+      },
+      {
+       "w": "work",
+       "s": 15.92,
+       "e": 16.16
+      },
+      {
+       "w": "properly",
+       "s": 16.16,
+       "e": 16.72
+      },
+      {
+       "w": "for",
+       "s": 16.72,
+       "e": 17.04
+      },
+      {
+       "w": "you.",
+       "s": 17.04,
+       "e": 17.6
+      },
+      {
+       "w": "Um,",
+       "s": 17.6,
+       "e": 18.08
+      },
+      {
+       "w": "I",
+       "s": 18.08,
+       "e": 18.4
+      },
+      {
+       "w": "think",
+       "s": 18.4,
+       "e": 18.56
+      },
+      {
+       "w": "that",
+       "s": 18.56,
+       "e": 18.72
+      },
+      {
+       "w": "I",
+       "s": 18.72,
+       "e": 18.88
+      },
+      {
+       "w": "managed",
+       "s": 18.88,
+       "e": 19.36
+      },
+      {
+       "w": "to",
+       "s": 19.36,
+       "e": 19.52
+      },
+      {
+       "w": "kind",
+       "s": 19.52,
+       "e": 19.68
+      },
+      {
+       "w": "of",
+       "s": 19.68,
+       "e": 19.92
+      },
+      {
+       "w": "get",
+       "s": 19.92,
+       "e": 20.24
+      },
+      {
+       "w": "it",
+       "s": 20.24,
+       "e": 20.4
+      },
+      {
+       "w": "to",
+       "s": 20.4,
+       "e": 20.72
+      },
+      {
+       "w": "70-80",
+       "s": 20.8,
+       "e": 21.68
+      }
+     ],
+     "detector": "derive.derive_cuts",
+     "detector_output": {
+      "token": {
+       "w": "Um,",
+       "s": 17.6,
+       "e": 18.08
+      },
+      "prob": 1.0,
+      "filler_cut": {
+       "start": 17.54,
+       "end": 18.14,
+       "reason": "filler",
+       "text": "um"
+      },
+      "silences_touching": []
+     },
+     "source_start": 1679.6,
+     "source_end": 1680.08
+    }
+   ]
+  },
+  {
+   "file": "moan-1729.0.wav",
+   "category": "moan",
+   "source_start": 1729.0,
+   "source_end": 1738.0,
+   "why": "moan absorbed in 'sabotaging' 1733.06",
+   "words": [
+    {
+     "w": "I",
+     "s": 0.28,
+     "e": 0.6,
+     "p": 1.0
+    },
+    {
+     "w": "would",
+     "s": 0.6,
+     "e": 0.84,
+     "p": 1.0
+    },
+    {
+     "w": "initially",
+     "s": 0.84,
+     "e": 1.24,
+     "p": 1.0
+    },
+    {
+     "w": "blame",
+     "s": 1.24,
+     "e": 1.56,
+     "p": 1.0
+    },
+    {
+     "w": "Anthropic",
+     "s": 1.56,
+     "e": 2.28,
+     "p": 1.0
+    },
+    {
+     "w": "for",
+     "s": 2.6,
+     "e": 2.92,
+     "p": 1.0
+    },
+    {
+     "w": "sabotaging",
+     "s": 3.56,
+     "e": 4.84,
+     "p": 1.0
+    },
+    {
+     "w": "people",
+     "s": 5.16,
+     "e": 5.4,
+     "p": 1.0
+    },
+    {
+     "w": "that",
+     "s": 5.4,
+     "e": 5.64,
+     "p": 1.0
+    },
+    {
+     "w": "aren't",
+     "s": 5.64,
+     "e": 5.96,
+     "p": 1.0
+    },
+    {
+     "w": "using",
+     "s": 5.96,
+     "e": 6.2,
+     "p": 1.0
+    },
+    {
+     "w": "clot",
+     "s": 6.2,
+     "e": 6.52,
+     "p": 1.0
+    },
+    {
+     "w": "code",
+     "s": 6.68,
+     "e": 7.0,
+     "p": 1.0
+    },
+    {
+     "w": "and",
+     "s": 7.0,
+     "e": 7.16,
+     "p": 1.0
+    },
+    {
+     "w": "stuff",
+     "s": 7.16,
+     "e": 7.32,
+     "p": 1.0
+    },
+    {
+     "w": "like",
+     "s": 7.32,
+     "e": 7.48,
+     "p": 1.0
+    },
+    {
+     "w": "that.",
+     "s": 7.48,
+     "e": 7.72,
+     "p": 1.0
+    },
+    {
+     "w": "But",
+     "s": 7.72,
+     "e": 7.96,
+     "p": 1.0
+    },
+    {
+     "w": "honestly",
+     "s": 7.96,
+     "e": 8.36,
+     "p": 1.0
+    },
+    {
+     "w": "it's",
+     "s": 8.44,
+     "e": 8.84,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "moans",
+     "start": 4.06,
+     "end": 4.67,
+     "why": "Voiced burst (hum/moan) absorbed into Parakeet span of 'sabotaging' (1732.56-1733.84), sitting after the word core; peak 32.1 dB over floor. Join-steering fixture: must never be cut.",
+     "words": [
+      {
+       "w": "initially",
+       "s": 0.84,
+       "e": 1.24
+      },
+      {
+       "w": "blame",
+       "s": 1.24,
+       "e": 1.56
+      },
+      {
+       "w": "Anthropic",
+       "s": 1.56,
+       "e": 2.28
+      },
+      {
+       "w": "for",
+       "s": 2.6,
+       "e": 2.92
+      },
+      {
+       "w": "sabotaging",
+       "s": 3.56,
+       "e": 4.84
+      },
+      {
+       "w": "people",
+       "s": 5.16,
+       "e": 5.4
+      },
+      {
+       "w": "that",
+       "s": 5.4,
+       "e": 5.64
+      },
+      {
+       "w": "aren't",
+       "s": 5.64,
+       "e": 5.96
+      },
+      {
+       "w": "using",
+       "s": 5.96,
+       "e": 6.2
+      },
+      {
+       "w": "clot",
+       "s": 6.2,
+       "e": 6.52
+      },
+      {
+       "w": "code",
+       "s": 6.68,
+       "e": 7.0
+      },
+      {
+       "w": "and",
+       "s": 7.0,
+       "e": 7.16
+      },
+      {
+       "w": "stuff",
+       "s": 7.16,
+       "e": 7.32
+      },
+      {
+       "w": "like",
+       "s": 7.32,
+       "e": 7.48
+      },
+      {
+       "w": "that.",
+       "s": 7.48,
+       "e": 7.72
+      }
+     ],
+     "detector": "bursts.detect_voiced_bursts",
+     "detector_output": {
+      "cut": {
+       "start": 4.06,
+       "end": 4.67,
+       "reason": "noise",
+       "text": "voiced burst: absorbed in 'sabotaging'"
+      },
+      "peak_dbfs": -22.21,
+      "peak_over_floor_db": 32.066,
+      "floor_dbfs": -54.276,
+      "host_word": {
+       "w": "sabotaging",
+       "s": 3.56,
+       "e": 4.84
+      },
+      "kind": "absorbed_span"
+     },
+     "source_start": 1733.06,
+     "source_end": 1733.67
+    }
+   ]
+  },
+  {
+   "file": "outro-1882.0.wav",
+   "category": "outro",
+   "source_start": 1882.0,
+   "source_end": 1894.6,
+   "why": "final word 'Goodbye.' 1887.12-1888.16, acoustic end 1887.66; trailing dead air",
+   "words": [
+    {
+     "w": "consider",
+     "s": 0.24,
+     "e": 0.56,
+     "p": 1.0
+    },
+    {
+     "w": "doing",
+     "s": 0.56,
+     "e": 0.96,
+     "p": 1.0
+    },
+    {
+     "w": "so.",
+     "s": 0.96,
+     "e": 1.28,
+     "p": 1.0
+    },
+    {
+     "w": "And",
+     "s": 1.28,
+     "e": 1.6,
+     "p": 1.0
+    },
+    {
+     "w": "with",
+     "s": 1.6,
+     "e": 1.92,
+     "p": 1.0
+    },
+    {
+     "w": "that",
+     "s": 1.92,
+     "e": 2.24,
+     "p": 1.0
+    },
+    {
+     "w": "said,",
+     "s": 2.24,
+     "e": 2.88,
+     "p": 1.0
+    },
+    {
+     "w": "thank",
+     "s": 2.88,
+     "e": 3.2,
+     "p": 1.0
+    },
+    {
+     "w": "you",
+     "s": 3.2,
+     "e": 3.36,
+     "p": 1.0
+    },
+    {
+     "w": "so",
+     "s": 3.36,
+     "e": 3.6,
+     "p": 1.0
+    },
+    {
+     "w": "much.",
+     "s": 3.6,
+     "e": 4.0,
+     "p": 1.0
+    },
+    {
+     "w": "Have",
+     "s": 4.0,
+     "e": 4.24,
+     "p": 1.0
+    },
+    {
+     "w": "a",
+     "s": 4.24,
+     "e": 4.4,
+     "p": 1.0
+    },
+    {
+     "w": "great",
+     "s": 4.4,
+     "e": 4.64,
+     "p": 1.0
+    },
+    {
+     "w": "day.",
+     "s": 4.64,
+     "e": 5.12,
+     "p": 1.0
+    },
+    {
+     "w": "Goodbye.",
+     "s": 5.12,
+     "e": 6.16,
+     "p": 1.0
+    }
+   ],
+   "events": [
+    {
+     "category": "outro",
+     "start": 5.12,
+     "end": 6.16,
+     "why": "Final Parakeet word 'Goodbye.' (1887.12-1888.16); acoustic end (envelope below floor+6 dB for >=40 ms) at 1887.66 s.",
+     "words": [
+      {
+       "w": "that",
+       "s": 1.92,
+       "e": 2.24
+      },
+      {
+       "w": "said,",
+       "s": 2.24,
+       "e": 2.88
+      },
+      {
+       "w": "thank",
+       "s": 2.88,
+       "e": 3.2
+      },
+      {
+       "w": "you",
+       "s": 3.2,
+       "e": 3.36
+      },
+      {
+       "w": "so",
+       "s": 3.36,
+       "e": 3.6
+      },
+      {
+       "w": "much.",
+       "s": 3.6,
+       "e": 4.0
+      },
+      {
+       "w": "Have",
+       "s": 4.0,
+       "e": 4.24
+      },
+      {
+       "w": "a",
+       "s": 4.24,
+       "e": 4.4
+      },
+      {
+       "w": "great",
+       "s": 4.4,
+       "e": 4.64
+      },
+      {
+       "w": "day.",
+       "s": 4.64,
+       "e": 5.12
+      },
+      {
+       "w": "Goodbye.",
+       "s": 5.12,
+       "e": 6.16
+      }
+     ],
+     "detector": "rms10ms_envelope",
+     "detector_output": {
+      "word": {
+       "w": "Goodbye.",
+       "s": 5.12,
+       "e": 6.16
+      },
+      "acoustic_end": 5.66,
+      "prev_word": {
+       "w": "day.",
+       "s": 4.64,
+       "e": 5.12
+      }
+     },
+     "whisper_words": [
+      {
+       "w": "said,",
+       "s": 2.06,
+       "e": 2.38
+      },
+      {
+       "w": "thank",
+       "s": 2.68,
+       "e": 3.3
+      },
+      {
+       "w": "you",
+       "s": 3.3,
+       "e": 3.42
+      },
+      {
+       "w": "so",
+       "s": 3.42,
+       "e": 3.58
+      },
+      {
+       "w": "much.",
+       "s": 3.58,
+       "e": 3.9
+      },
+      {
+       "w": "Have",
+       "s": 4.1,
+       "e": 4.34
+      },
+      {
+       "w": "a",
+       "s": 4.34,
+       "e": 4.44
+      },
+      {
+       "w": "great",
+       "s": 4.44,
+       "e": 4.62
+      },
+      {
+       "w": "day.",
+       "s": 4.62,
+       "e": 4.84
+      },
+      {
+       "w": "Goodbye.",
+       "s": 5.24,
+       "e": 5.58
+      }
+     ],
+     "source_start": 1887.12,
+     "source_end": 1888.16
+    },
+    {
+     "category": "outro",
+     "start": 8.64,
+     "end": 12.603,
+     "why": "Start of trailing dead air: first detect_silences range after 'Goodbye.' begins at 1890.64 s; the 2.48 s between the word end and it carries non-silent material (peak 9.5 dB over floor; a smack at 1890.46 s per detect_mouth_noises). Silences run to the file end 1894.603.",
+     "words": [
+      {
+       "w": "Goodbye.",
+       "s": 5.12,
+       "e": 6.16
+      }
+     ],
+     "detector": "transcribe.detect_silences",
+     "detector_output": {
+      "silences_after_goodbye": [
+       [
+        8.64,
+        9.18
+       ],
+       [
+        9.52,
+        10.22
+       ],
+       [
+        10.26,
+        12.6
+       ]
+      ],
+      "peak_dbfs_between": -44.81,
+      "mouth_noise_cuts_after_goodbye": [
+       {
+        "start": 8.46,
+        "end": 8.505,
+        "reason": "noise",
+        "text": "mouth noise: smack"
+       }
+      ],
+      "duration": 12.603
+     },
+     "source_start": 1890.64,
+     "source_end": 1894.603
+    }
+   ]
+  }
+ ]
+}

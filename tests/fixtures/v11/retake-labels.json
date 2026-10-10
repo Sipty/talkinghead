@@ -1,0 +1,74 @@
+{
+  "source": "<SOURCE_VIDEO>",
+  "audio_sha256": "b39d33626855024d37e55bf962b90f7c381b622a3d753d214646eea1ccfbb801",
+  "transcript": "transcript-929d495f7dccacc3811d9d66.json",
+  "note": "Hand-labelled from a v10 render, plus one case (w3464) the marker scan surfaced during v11 implementation. Six real retakes shipped in v10's final.mp4 because the retakes stage made zero cuts; five marker-bearing spans must be preserved.",
+  "cases": [
+    {
+      "word": 96,
+      "marker": "hold on",
+      "expect": "cut",
+      "note": "throat, abandoned restart"
+    },
+    {
+      "word": 553,
+      "marker": "sorry",
+      "expect": "cut",
+      "note": "reviewer -> planner, agent misnamed"
+    },
+    {
+      "word": 719,
+      "marker": "sorry",
+      "expect": "cut",
+      "note": "agents -> agentic harnesses"
+    },
+    {
+      "word": 2079,
+      "marker": "sorry",
+      "expect": "cut",
+      "note": "single day run restated"
+    },
+    {
+      "word": 2381,
+      "marker": "sorry",
+      "expect": "cut",
+      "note": "scout -> engineering agent"
+    },
+    {
+      "word": 3464,
+      "marker": "scrap that",
+      "expect": "cut",
+      "note": "epic-size claim retracted; 'scrap that part' + 'I will do a retake here' + \"I'll correct myself\""
+    },
+    {
+      "word": 177,
+      "marker": "i mean",
+      "expect": "keep",
+      "note": "definitional, load-bearing"
+    },
+    {
+      "word": 2284,
+      "marker": "i mean",
+      "expect": "keep",
+      "note": "discourse filler"
+    },
+    {
+      "word": 2708,
+      "marker": "i mean",
+      "expect": "keep",
+      "note": "discourse filler"
+    },
+    {
+      "word": 3211,
+      "marker": "i mean",
+      "expect": "keep",
+      "note": "know what I mean"
+    },
+    {
+      "word": 3986,
+      "marker": "sorry",
+      "expect": "keep",
+      "note": "sorry guys -- audience address"
+    }
+  ]
+}

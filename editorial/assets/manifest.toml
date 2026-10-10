@@ -1,0 +1,84 @@
+# The asset library: the diagrams this project ships with. Sources and licences
+# are in CREDITS.md beside this file.
+#
+# `depicts` is what the asset shows, in the words someone would search for; it
+# is matched against what the speaker actually says. `anchors` are phrases the
+# asset should appear on, in preference order -- an asset with anchors places
+# itself whenever one survives the cut, rather than waiting for the judge to
+# name it. `sequence` + `order` mark a build-up: one visual that changes,
+# chained with no gap between steps. Entries whose file is missing are skipped.
+#
+# Replace these with your own library (point `assets_dir` at it) or leave it
+# empty: an empty library still renders, and beats with no match are dropped.
+
+[[asset]]
+id = "p1-scout"
+file = "p1-scout.png"
+depicts = "agent pipeline diagram scout stage only"
+kind = "card"
+sequence = "pipeline"
+order = 1
+anchors = ["a scout agent passing", "so a scout agent", "but scout agent"]
+# Ordering note: every anchor below starts LATER in the sentence than the step
+# before it, so consecutive steps never collapse onto the same instant.
+
+[[asset]]
+id = "p2-planner"
+file = "p2-planner.png"
+depicts = "agent pipeline diagram scout passing over to planner"
+kind = "card"
+sequence = "pipeline"
+order = 2
+anchors = ["over to a planner", "to a planner agent", "planning over to"]
+
+[[asset]]
+id = "p3-engineer"
+file = "p3-engineer.png"
+depicts = "agent pipeline diagram passing over to an engineer agent"
+kind = "card"
+sequence = "pipeline"
+order = 3
+anchors = ["to an engineer agent", "an engineer agent"]
+
+[[asset]]
+id = "p4-rev1"
+file = "p4-rev1.png"
+depicts = "agent pipeline diagram engineer passes over to reviewer one"
+kind = "card"
+sequence = "pipeline"
+order = 4
+anchors = ["over to two reviewers", "to two reviewers"]
+
+[[asset]]
+id = "p5-rev2"
+file = "p5-rev2.png"
+depicts = "agent pipeline diagram all five nodes two reviewers"
+kind = "card"
+sequence = "pipeline"
+order = 5
+hold = 12.0
+anchors = ["two reviewers review", "the two reviewers review each"]
+
+[[asset]]
+id = "h-planner"
+file = "h-planner.png"
+depicts = "harness diagram with the planner model highlighted"
+kind = "card"
+hold = 14.0
+anchors = ["model that I use for my planners", "for my planners is usually"]
+
+[[asset]]
+id = "h-rev1"
+file = "h-rev1.png"
+depicts = "harness diagram with reviewer number one highlighted"
+kind = "card"
+hold = 14.0
+anchors = ["reviewer number one", "the first reviewer"]
+
+[[asset]]
+id = "h-rev2"
+file = "h-rev2.png"
+depicts = "harness diagram with the second reviewer highlighted"
+kind = "card"
+hold = 14.0
+anchors = ["I have a second reviewer", "the second reviewer", "second reviewer for"]

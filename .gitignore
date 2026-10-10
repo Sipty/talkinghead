@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# private material and generated run directories never ship
+.lavish/
+mailing-list/
+*.talkinghead/
+
+# media artifacts must never be committed
+*.mp4
+*.mov
+*.mkv
+*.m4a
+*.wav
+*.pcm
+*.webm
+
+# real-audio test fixtures: short clips cut from one recording
+!tests/fixtures/*.wav

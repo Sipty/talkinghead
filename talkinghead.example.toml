@@ -1,0 +1,75 @@
+# talkinghead.example.toml: a template for your own settings. Nothing loads it by itself.
+# Copy it, uncomment what you change, and point talkinghead at the copy with
+# `--config FILE` or TALKINGHEAD_CONFIG=FILE. Precedence, highest first:
+# command-line flag, environment variable, this file, built-in default.
+
+# ---- Judge and transcriber
+# Both have NO built-in default. Name them in the environment (TALKINGHEAD_JUDGE,
+# TALKINGHEAD_TRANSCRIBER) or here; the environment wins over this file.
+
+# Judge: "claude" runs Claude Code headless; "shell:<command>" runs any CLI that reads
+# the prompt on stdin and prints one JSON object on stdout.
+# judge = "claude"
+# judge = "shell:omp -p --no-session --no-tools --mode text --model anthropic/claude-opus-5-5"
+# judge = "shell:python3 -m talkinghead.dryrun_judge"   # offline, no model: checks the install only
+
+# Judge model. Applied only when set: a shell command's --model is rewritten to it, and
+# for "claude" it is passed as --model. Unset, a shell command runs as written and
+# Claude Code uses its own default.
+# model = "opus"                          # with judge = "claude" (a Claude Code model alias)
+# model = "anthropic/claude-opus-5-5"     # with an omp shell judge (an omp model id)
+
+# Transcriber: "scribe" (ELEVENLABS_API_KEY or OPENROUTER_API_KEY), "parakeet"
+# (fluidaudiocli on PATH), or "whisper" (mlx-whisper, Apple Silicon).
+# transcriber = "scribe"
+
+# Claude Code judge only: the --effort level passed to claude.
+# effort = "high"
+
+# A second shell command, used only after the primary judge reports a usage limit.
+# Unset: a limited judge stops the run. It names its own model.
+# fallback_command = "<second shell judge command>"
+
+# Shell commands that share the vote round-robin with the primary. Each names its own model.
+# panel = ["<shell judge command A>", "<shell judge command B>"]
+
+# ---- Editorial inputs
+# Editorial rules the judge follows (markdown). A relative path resolves inside the source checkout.
+# guidelines = "editorial/guidelines.md"
+
+# Asset library for overlays (cards, photos). An absolute path works too.
+# assets_dir = "editorial/assets"
+
+# ---- Judging
+# Samples per decision, and how many must agree. agree cannot exceed votes.
+# votes = 5
+# agree = 4
+
+# Seconds one judge answer may take before it is abandoned and retried.
+# judge_timeout = 3600.0
+
+# Interior pauses longer than this many seconds are trimmed.
+# pause_above = 0.35
+
+# Content cuts: passages the judge finds that do not earn their runtime. false turns them off.
+# content_enabled = true
+
+# ---- Picture
+# Overlays (quote cards, research visuals). false turns the visuals pass off.
+# visuals_enabled = true
+
+# Fetch reference screenshots for technical evidence. false keeps cards only.
+# visuals_research = true
+
+# The corner the overlays take: top-right, top-left, bottom-right or bottom-left.
+# visuals_corner = "top-right"
+
+# Output frame rate. Cut edges snap to this grid.
+# fps = 30
+
+# Final render quality: x264 CRF (lower is larger and sharper) and encoder preset.
+# crf = 18
+# preset = "medium"
+
+# The mascot drawn on quote cards and the plan card: a square PNG or JPEG. Unset: cards render without one.
+# visuals_avatar = "/path/to/avatar.png"
