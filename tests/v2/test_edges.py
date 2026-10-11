@@ -483,6 +483,49 @@ def test_refine_joins_keeps_both_kept_words_inside_their_pads() -> None:
     assert refined.segments[1].start <= 1.6 - ctx.splice_pad + 1e-9
 
 
+def test_refining_a_refined_plan_moves_no_join() -> None:
+    words = [_w("so", 0.5, 0.9), _w("next", 1.6, 2.4)]
+    env = _levels([(0.5, 0.9, LOUD), (1.6, 2.4, LOUD)])
+    ctx = _ctx(words, env=env)
+    refined, first = refine_joins(_two_segment_plan(Cut(0.9, 1.6, "content", "")), ctx)
+    assert first[0]["moved"] is True
+    again, (record,) = refine_joins(refined, ctx)
+    assert record["skipped"] == "already refined"
+    assert record["moved"] is False
+    assert again.segments == refined.segments
+
+
+def test_refined_joins_survive_a_json_round_trip() -> None:
+    words = [_w("so", 0.5, 0.9), _w("next", 1.6, 2.4)]
+    env = _levels([(0.5, 0.9, LOUD), (1.6, 2.4, LOUD)])
+    ctx = _ctx(words, env=env)
+    refined, _ = refine_joins(_two_segment_plan(Cut(0.9, 1.6, "content", "")), ctx)
+    _, (record,) = refine_joins(Plan.from_json(refined.to_json()), ctx)
+    assert record["skipped"] == "already refined"
+
+
+def test_a_join_edited_after_refining_is_the_only_one_refined_again() -> None:
+    words = [_w("so", 0.5, 0.9), _w("next", 1.6, 2.4), _w("more", 3.4, 4.0)]
+    env = _levels([(0.5, 0.9, LOUD), (1.6, 2.4, LOUD), (3.4, 4.0, LOUD)])
+    ctx = _ctx(words, env=env)
+    source = SourceInfo("main", "rec.mov", "sha", 10.0)
+    plan = Plan(sources={"main": source}, main="main",
+                cuts=[Cut(0.9, 1.6, "content", ""), Cut(3.0, 3.4, "content", "")],
+                segments=[Segment("main", 0.0, 0.9), Segment("main", 1.6, 3.0), Segment("main", 3.4, 10.0)])
+    refined, _ = refine_joins(plan, ctx)
+    # Hand edit: the second join's resume edge moves 0.1 s earlier.
+    edited = Plan(sources=refined.sources, main=refined.main, cuts=refined.cuts,
+                  segments=[refined.segments[0], refined.segments[1],
+                            Segment("main", refined.segments[2].start - 0.1, 10.0)],
+                  provenance=refined.provenance)
+    again, records = refine_joins(edited, ctx)
+    assert records[0]["skipped"] == "already refined"
+    assert again.segments[:2] == edited.segments[:2]
+    assert "skipped" not in records[1]
+    assert records[1]["old"] == [round(edited.segments[1].end, 4), round(edited.segments[2].start, 4)]
+
+
+
 def test_a_filler_on_voiced_audio_takes_its_voiced_run_into_the_cut() -> None:
     # "um" is voiced from 1.1 (quiet before it, 1.0-1.1). The cut starts 0.1 s into that run.
     words = [_w("so", 0.5, 1.0), _w("um", 1.2, 1.7), _w("next", 2.0, 2.4)]

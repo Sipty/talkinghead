@@ -757,6 +757,19 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     return merge_cuts(cuts, ctx.duration)
 
 
+REFINED_JOINS = "refined_joins"
+
+
+def _is_refinable(plan: Plan, prev: Segment, seg: Segment) -> bool:
+    """A join between two forward-running segments of one recording."""
+    return plan.sources[prev.source].sha256 == plan.sources[seg.source].sha256 and seg.start > prev.end
+
+
+def _join_key(source: str, prev_end: float, next_start: float) -> tuple[str, float, float]:
+    """A join's identity: its source and edge pair in ms, as serialised."""
+    return (source, round(prev_end, 3), round(next_start, 3))
+
+
 def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
                  window: float = JOIN_MOVE_WINDOW) -> tuple[Plan, list[dict]]:
     """Re-place each same-recording join of an existing plan (hand-authored EDLs).
@@ -767,18 +780,25 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
     snap_to_valleys, so no kept word or voiced audio is cut and no removed word
     is kept. A join moves only when its cost falls by more than `margin`: an
     edge the author placed well stays where it is. Segment order, sources and
-    count are unchanged. Returns the plan and one record per join.
+    count are unchanged. Returns the plan and one record per join. Joins already
+    recorded in `provenance["refined_joins"]` are skipped, so refining a refined
+    plan moves nothing; a join edited since has a new edge pair and is refined.
     The incoming edge then gets the splice lead-in (keep_splice_lead_in), whether or not the join moved.
     """
     segments = list(plan.segments)
     cuts = list(plan.cuts)
+    done = {_join_key(e["source"], e["prev_end"], e["next_start"])
+            for e in plan.provenance.get(REFINED_JOINS, [])}
     records: list[dict] = []
     for i in range(1, len(segments)):
         prev, seg = segments[i - 1], segments[i]
         rec: dict = {"join": i, "old": [round(prev.end, 4), round(seg.start, 4)], "moved": False}
         records.append(rec)
-        if plan.sources[prev.source].sha256 != plan.sources[seg.source].sha256 or seg.start <= prev.end:
+        if not _is_refinable(plan, prev, seg):
             rec["skipped"] = "not a forward join within one recording"
+            continue
+        if _join_key(seg.source, prev.end, seg.start) in done:
+            rec["skipped"] = "already refined"
             continue
         k = next((k for k, c in enumerate(cuts)
                   if abs(c.start - prev.end) <= EDGE_CUT_MATCH_SEC and abs(c.end - seg.start) <= EDGE_CUT_MATCH_SEC),
@@ -806,4 +826,7 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
             rec.update(moved=True, new=[round(moved.start, 4), round(moved.end, 4)])
     for rec in records:
         rec["t"] = round(sum(s.length for s in segments[: rec["join"]]), 4)
-    return replace(plan, segments=segments, cuts=cuts), records
+    refined = [{"source": seg.source, "prev_end": round(prev.end, 3), "next_start": round(seg.start, 3)}
+               for prev, seg in zip(segments, segments[1:]) if _is_refinable(plan, prev, seg)]
+    provenance = {**plan.provenance, REFINED_JOINS: refined}
+    return replace(plan, segments=segments, cuts=cuts, provenance=provenance), records
