@@ -10,6 +10,7 @@ from talkinghead.audio import FRAME_SEC, Envelope, RefinedWord
 from talkinghead.edges import (
     EdgeContext,
     finalize_cuts,
+    keep_splice_lead_in,
     protect_words,
     refine_joins,
     removed_words,
@@ -214,7 +215,7 @@ def test_mid_sentence_cut_takes_the_deepest_dip_and_keeps_no_extra_quiet() -> No
     words = [_w("so", 0.5, 1.0), _w("um", 1.5, 1.9), _w("next", 2.4, 3.0)]
     env = _levels([(0.5, 1.0, LOUD), (1.5, 1.9, LOUD), (2.4, 3.0, LOUD)])
     (c,) = finalize_cuts([Cut(1.0, 2.4, "retake", "um")], _ctx(words, env=env))
-    assert c.start - 1.0 < 0.05 and 2.4 - c.end < 0.05
+    assert c.start - 1.0 < 0.05 and 2.4 - c.end < 0.1   # only the splice lead-in (at most 60 ms) is handed back
 
 
 def test_cut_after_a_completed_sentence_keeps_a_real_eighty_millisecond_tail() -> None:
@@ -503,3 +504,59 @@ def test_a_short_voiced_filler_is_dropped_only_when_the_drop_limit_allows_it() -
     ctx.filler_keep_voiced_max = 0.5
     assert settle_filler_edges([Cut(1.3, 1.7, "filler", "um")], ctx) == []
     assert ctx.dropped_fillers == 1
+
+
+# --- splice lead-in: real source in front of a kept onset ---
+
+
+def test_lead_in_moves_a_close_cut_end_back_through_quiet_to_the_onset() -> None:
+    # Speech resumes 10 ms after the cut ends, with quiet before it: the end moves
+    # back until 60 ms of real source precedes the onset.
+    ctx = _ctx([_w("so", 0.5, 0.9), _w("next", 2.01, 2.5)])
+    (c,) = keep_splice_lead_in([Cut(1.0, 2.0, "silence")], ctx)
+    assert c.start == pytest.approx(1.0)
+    assert 2.01 - c.end >= ctx.splice_lead_in - 1e-9
+    assert _on_grid(c.end)
+
+
+def test_lead_in_stops_at_voiced_audio_when_the_quiet_runs_out_first() -> None:
+    # Voiced audio ends at 1.94 and the frame grid cannot reach the target: the end
+    # comes back as far as the quiet goes, never into the voiced frames.
+    ctx = _ctx([_w("next", 2.01, 2.5)], env=_levels([(1.5, 1.94, LOUD)]))
+    (c,) = keep_splice_lead_in([Cut(1.0, 2.0, "silence")], ctx)
+    assert 1.94 <= c.end < 2.0
+    assert 2.01 - c.end < ctx.splice_lead_in
+
+
+def test_lead_in_never_re_exposes_a_removed_word_before_the_onset() -> None:
+    # "x" is removed up to 1.95: the quiet after it is handed back, the word is not.
+    words = [_w("x", 1.2, 1.95), _w("next", 2.01, 2.5)]
+    ctx = _ctx(words)
+    (c,) = keep_splice_lead_in([Cut(1.0, 2.0, "content", "x")], ctx)
+    assert 1.95 <= c.end < 2.0
+    assert [w.text for w in removed_words(c, ctx.words)] == ["x"]
+
+
+def test_finalize_gives_a_silence_cut_its_lead_in_after_the_frame_snap() -> None:
+    # protect_words leaves 50 ms between the cut and "b"; the planner hands back quiet to reach 60 ms.
+    (c,) = finalize_cuts([Cut(1.0, 2.0, "silence")], _ctx([_w("a", 0.0, 0.9), _w("b", 2.0, 2.5)]))
+    assert 2.0 - c.end >= 0.06 - 1e-9
+    assert _on_grid(c.start) and _on_grid(c.end)
+
+
+def test_refine_joins_gives_the_incoming_speech_a_lead_in_through_quiet() -> None:
+    # The join sits 10 ms before "next": the incoming segment starts earlier, through quiet only.
+    words = [_w("so", 0.5, 0.9), _w("next", 1.61, 2.4)]
+    env = _levels([(0.5, 0.9, LOUD), (1.61, 2.4, LOUD)])
+    refined, _ = refine_joins(_two_segment_plan(Cut(0.9, 1.6, "content", "")), _ctx(words, env=env))
+    assert refined.segments[0].end < refined.segments[1].start <= 1.61 - 0.06 + 1e-9
+    assert [s.source for s in refined.segments] == ["main", "main"]
+
+
+def test_refine_joins_never_lets_the_lead_in_re_expose_a_removed_word() -> None:
+    # A retake whose removed "x" ends at 1.58, 20 ms before "next": the join stays at the word's end.
+    words = [_w("so", 0.5, 0.9), _w("x", 1.0, 1.58), _w("next", 1.62, 2.4)]
+    env = _levels([(0.5, 0.9, LOUD), (1.0, 1.58, LOUD), (1.62, 2.4, LOUD)])
+    refined, _ = refine_joins(_two_segment_plan(Cut(0.9, 1.6, "retake", "x")), _ctx(words, env=env))
+    assert 1.58 - 1e-9 <= refined.segments[1].start <= 1.6 + 1e-9
+    assert [w.text for w in removed_words(refined.cuts[0], words)] == ["x"]

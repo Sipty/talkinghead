@@ -21,13 +21,15 @@ Order matters and each step is a pure function:
                     after the last kept word
 9. keep_splice_quiet    other word-removing cuts after a clause end: real
                     source quiet next to a kept word is handed back
-10. flow_guard      cuts with less than flow_min_kept of speechless audio
+10. keep_splice_lead_in  kept speech within splice_lead_in of a cut end: the
+                    end moves back through quiet so that much source precedes it
+11. flow_guard      cuts with less than flow_min_kept of speechless audio
                     between them fuse (a rapid-cut pileup reads as a glitch)
-11. snap_to_frames  edges onto the video frame grid, shrinking, so segments
+12. snap_to_frames  edges onto the video frame grid, shrinking, so segments
                     are whole frames and audio/video cannot drift
-12. settle_filler_edges  short filler cuts still on voiced audio: the voiced run is
+13. settle_filler_edges  short filler cuts still on voiced audio: the voiced run is
                     walked into the cut, else the filler is dropped
-13. merge
+14. merge
 
 "Kept word" means a refined word not removed by the cut being placed. `pad`
 is the minimum distance a silence/noise edge keeps from any kept word.
@@ -53,6 +55,9 @@ end any other word-removing cut is topped up from the removed side to
 word, and only from source frames that are actually quiet: silence is never
 synthesised and voiced audio of a removed word is never kept to reach the
 target.
+
+Whatever the cut, kept speech that starts within `splice_lead_in` of the cut end is given that much
+real source in front of it: the end moves back through quiet audio only, and never over a removed word.
 """
 
 from __future__ import annotations
@@ -123,6 +128,9 @@ class EdgeContext:
     # cut leaves after a completed sentence's last kept word.
     splice_quiet_sentence: float = 0.08
     splice_quiet_clause: float = 0.18
+    # Kept speech that starts this soon after a cut end gets this much real source
+    # in front of it, handed back through quiet audio only (keep_splice_lead_in).
+    splice_lead_in: float = 0.06
     splice_crossfade_sec: float = 0.020
     quiet_above_floor_db: float = 6.0
     flow_min_kept: float = 2.0
@@ -593,6 +601,46 @@ def _with_splice_quiet(c: Cut, ctx: EdgeContext, db, fs: float, thr: float, grid
     return moved if same and moved.length >= ctx.min_cut else c
 
 
+def _with_lead_in(c: Cut, ctx: EdgeContext) -> Cut:
+    """`c` with its end moved earlier, so kept speech after it starts at least
+    `splice_lead_in` past the cut end.
+
+    Only quiet frames (at or below floor + quiet_above_floor_db) are handed back.
+    The end never moves back past the cut start or a removed word, and stops at
+    the first voiced frame when the quiet runs out first. It lands on the frame
+    grid at or before the target, so the later snap keeps the lead-in.
+    """
+    lead = ctx.splice_lead_in
+    db, fs = ctx.env.db, ctx.env.frame_sec
+    if lead <= 0 or len(db) == 0:
+        return c
+    removed = removed_words(c, ctx.words)
+    _, after = _kept_neighbours(c, removed, ctx)
+    if not after or not 0 <= after[0].start - c.end < lead:
+        return c
+    lo = max([c.start] + [w.end for w in removed])
+    if lo >= c.end:
+        return c
+    thr = ctx.floor + ctx.quiet_above_floor_db
+    grid = ctx.fps or 1.0 / fs
+    j = min(len(db), math.ceil(c.end / fs - 1e-9)) - 1
+    while j >= 0 and j * fs >= lo and db[j] <= thr:
+        j -= 1
+    quiet_from = math.ceil(max(lo, (j + 1) * fs) * grid - 1e-6) / grid
+    target = math.floor((after[0].start - lead) * grid + 1e-6) / grid
+    end = min(c.end, max(target, quiet_from))
+    if end >= c.end or end - c.start < ctx.min_cut:
+        return c
+    moved = Cut(c.start, end, c.reason, c.text, dict(c.provenance))
+    same = [id(w) for w in removed_words(moved, ctx.words)] == [id(w) for w in removed]
+    return moved if same else c
+
+
+def keep_splice_lead_in(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    """Every cut's kept speech gets its lead-in; see _with_lead_in."""
+    return [_with_lead_in(c, ctx) for c in cuts]
+
+
 def _speech_between(a: float, b: float, ctx: EdgeContext) -> bool:
     """Is there kept speech between these two cuts? Words, plus the voiced audio
     no word covers: fusing across that would delete the span the guard keeps.
@@ -701,6 +749,7 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     cuts = tighten_repairs(cuts, ctx)
     cuts = keep_sentence_tail(cuts, ctx)
     cuts = keep_splice_quiet(cuts, ctx)
+    cuts = keep_splice_lead_in(cuts, ctx)
     cuts = flow_guard(cuts, ctx)
     if ctx.fps:
         cuts = snap_to_frames(cuts, ctx.fps)
@@ -719,6 +768,7 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
     is kept. A join moves only when its cost falls by more than `margin`: an
     edge the author placed well stays where it is. Segment order, sources and
     count are unchanged. Returns the plan and one record per join.
+    The incoming edge then gets the splice lead-in (keep_splice_lead_in), whether or not the join moved.
     """
     segments = list(plan.segments)
     cuts = list(plan.cuts)
@@ -746,8 +796,9 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
         found = _first_valid(c, removed, ctx, sorted(pairs, key=lambda p: (p[0], p[1])))
         rec["cost_before"] = round(here, 3)
         rec["cost_after"] = None if found is None else round(found[0], 3)
-        if found is not None and found[0] < here - margin:
-            moved = found[1]
+        target = found[1] if found is not None and found[0] < here - margin else c
+        moved = _with_lead_in(target, ctx)
+        if (moved.start, moved.end) != (c.start, c.end):
             segments[i - 1] = Segment(prev.source, prev.start, moved.start)
             segments[i] = Segment(seg.source, moved.end, seg.end)
             if k is not None:

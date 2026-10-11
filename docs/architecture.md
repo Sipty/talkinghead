@@ -201,6 +201,7 @@ Scribe supplies native timestamps; local Parakeet stamps may be coarser, so the 
 Within-sentence retakes cannot move inward of the abandoned word or acquire a clause/sentence pacing pause.
 `keep_sentence_tail` retains the 80 ms completed-sentence source tail where that much source room exists, rounded outward for video.
 `keep_splice_quiet` applies the existing 0.18 s clause pacing only to non-repair word cuts.
+`keep_splice_lead_in` then moves a cut's end earlier, through quiet audio only and never over a removed word, so `splice_lead_in` (0.06 s) of source sits before the next kept onset. `refine_joins` applies the same rule to the incoming edge.
 Natural continuous-speech pauses are not shortened solely to force an 80 ms edit seam.
 `drop_voiced_fillers` can then drop a `filler` cut of at most `filler_keep_voiced_max`
 (default 0, so off) whose edge still sits on voiced audio, judged by `joins.edge_state`, the same

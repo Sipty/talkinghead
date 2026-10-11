@@ -63,6 +63,9 @@ class Config:
     splice_valley_window: float = 0.12
     splice_quiet_sentence: float = 0.08
     splice_quiet_clause: float = 0.18
+    # Kept speech that starts this soon after a cut end gets this much real source
+    # in front of it, handed back through quiet audio only (edges.keep_splice_lead_in).
+    splice_lead_in: float = 0.06
     # Filler cuts at most this long are dropped (the filler stays) when an edge
     # still sits on voiced audio after valley snapping. 0 keeps every filler
     # cut; 0.35 restores the old behaviour of sparing short voiced fillers.
@@ -196,7 +199,7 @@ class Config:
         if any(c < self.pause_keep for c in caps):
             raise ValueError("every pause_cap_* must be at least pause_keep")
         lengths = (self.splice_crossfade_sec, self.splice_pad, self.splice_valley_window,
-                   self.splice_quiet_sentence, self.splice_quiet_clause)
+                   self.splice_quiet_sentence, self.splice_quiet_clause, self.splice_lead_in)
         if any(v < 0 for v in lengths):
             raise ValueError("splice_* lengths cannot be negative")
         if self.speech_probe_max < 0:
