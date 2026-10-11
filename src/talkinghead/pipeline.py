@@ -17,7 +17,7 @@ from .align import AlignResult, align
 from .analysis import analyze
 from .config import Config
 from .context import Context, NeedsDecision
-from .edges import EdgeContext, finalize_cuts
+from .edges import EdgeContext, finalize_cuts, refine_joins
 from .judge import Judge
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
@@ -63,6 +63,20 @@ class RunResult:
 
 def settings_fps(config: Config) -> float:
     return float(config.fps)
+
+
+def edge_context(ctx: Context, config: Config, *, fps: float | None) -> EdgeContext:
+    """The edge pass's view of one analysis: the audio, words and spans every cut and join is placed against."""
+    return EdgeContext(
+        duration=ctx.duration, env=ctx.env, floor=ctx.floor, words=ctx.words, moans=ctx.moans,
+        voices=ctx.voices, voice_guard=config.voice_guard,
+        pad=config.pause_keep / 2, splice_pad=config.splice_pad,
+        splice_valley_window=config.splice_valley_window, splice_quiet_sentence=config.splice_quiet_sentence,
+        splice_quiet_clause=config.splice_quiet_clause, splice_crossfade_sec=config.splice_crossfade_sec,
+        quiet_above_floor_db=config.quiet_above_floor_db, filler_keep_voiced_max=config.filler_keep_voiced_max,
+        flow_min_kept=config.flow_min_kept, min_cut=config.min_cut_sec,
+        fps=fps, protected_spans=ctx.protected_spans,
+    )
 
 
 def _plan_memo_json(plan: Plan) -> str:
@@ -340,21 +354,11 @@ def run_pipeline(
                               {"noise_cuts": _digest([(c.start, c.end, c.reason, c.text) for c in ctx.noise_cuts])})
     notes.update(n)
 
-    edge_ctx = EdgeContext(
-        duration=ctx.duration, env=ctx.env, floor=ctx.floor, words=ctx.words, moans=ctx.moans,
-        voices=ctx.voices, voice_guard=config.voice_guard,
-        pad=config.pause_keep / 2, splice_pad=config.splice_pad,
-        splice_valley_window=config.splice_valley_window, splice_quiet_sentence=config.splice_quiet_sentence,
-        splice_quiet_clause=config.splice_quiet_clause, splice_crossfade_sec=config.splice_crossfade_sec,
-        quiet_above_floor_db=config.quiet_above_floor_db, filler_keep_voiced_max=config.filler_keep_voiced_max,
-        flow_min_kept=config.flow_min_kept, min_cut=config.min_cut_sec,
-        # An audio-only cook has no frame grid to snap its edges to.
-        fps=None if audio_only else settings_fps(config),
-        protected_spans=ctx.protected_spans,
-    )
+    edge_ctx = edge_context(ctx, config, fps=None if audio_only else settings_fps(config))
     raw = structural + retake_cuts + content_cuts + pause_cuts
     cuts = finalize_cuts(raw, edge_ctx)
     plan = Plan.from_cuts(ctx.source, cuts)
+    plan, joins = refine_joins(plan, edge_ctx)
     plan.decisions = decided
     plan.provenance = {**ctx.provenance, "raw_cuts": len(raw), "final_cuts": len(cuts), "demo": demo_minutes,
                        **({"audio_only": True} if audio_only else {})}
@@ -363,7 +367,7 @@ def run_pipeline(
     notes["edges"] = {"raw": len(raw), "final": len(cuts), "removed_sec": round(sum(c.length for c in cuts), 2),
                       "voice_spans": len(ctx.voices), "speech_probes": len(ctx.speech_probes),
                       "voice_masked_non_speech": ctx.provenance.get("unclassified_voice", {}).get("masked_non_speech"),
-                      "dropped_fillers": edge_ctx.dropped_fillers}
+                      "dropped_fillers": edge_ctx.dropped_fillers, "refined_joins": sum(j["moved"] for j in joins)}
     if run.superseded:
         # A re-key replaced memos that may hold hand edits: name them and where
         # the previous content was kept, rather than only reporting the new cut.

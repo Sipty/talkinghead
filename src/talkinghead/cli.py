@@ -36,9 +36,11 @@ from pathlib import Path
 
 from . import __version__
 from .align import AlignResult, align, analyze
+from .analysis import analyze as analyze_recording
 from .color import hdr_codec, probe_color
 from .config import Config, config_path_from_env, load_config
 from .context import NeedsDecision
+from .edges import refine_joins
 from .judge import (
     ClaudeCodeJudge,
     FallbackJudge,
@@ -49,11 +51,11 @@ from .judge import (
     judge_model,
     preflight,
 )
-from .pipeline import PipelineError, run_pipeline
+from .pipeline import PipelineError, edge_context, run_pipeline
 from .profile import profile_dir, read_preferences
 from .prompts import system_prompt
 from .render import RenderSettings, render_audio_plan, render_plan
-from .store import Cache
+from .store import DEFAULT_CACHE_DIR, Cache
 from .timeline import Plan
 from .transcribe import (
     ParakeetTranscriber,
@@ -227,6 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="TOML file with overrides (default: $TALKINGHEAD_CONFIG)")
     rend.add_argument("--audio-only", action="store_true",
                       help="the plan is an audio-only cook: write its WAV (no picture, no ASR, no judge)")
+    rend.add_argument("--refine-joins", action="store_true",
+                      help="refine the join placement against the recording's cached analysis first; "
+                           "writes <out>.plan.json and <out>.joins.json beside the output")
 
     insp = sub.add_parser("inspect", help="print a run's report")
     insp.add_argument("out_dir")
@@ -433,6 +438,36 @@ def _lessons_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+class _CachedTranscriber:
+    """The recording's cached transcript only: a render never spends an ASR call on a miss."""
+
+    def __init__(self, real) -> None:
+        self.name, self.version = real.name, real.version
+
+    def transcribe(self, wav_path: str):
+        raise RuntimeError("no cached transcript for this recording: run `talkinghead run` on it first")
+
+
+def _refine_for_render(plan: Plan, cfg: Config, out: Path, *, audio_only: bool) -> Plan:
+    """Refine the plan's joins against its recording's cached analysis, and write the refined plan
+    and the join move records beside OUT (`<stem>.plan.json`, `<stem>.joins.json`)."""
+    if cfg.transcriber is None:
+        raise ValueError(NO_TRANSCRIBER)
+    source = plan.sources[plan.main]
+    run_dir = Path(DEFAULT_CACHE_DIR) / "refine" / source.sha256[:16]
+    real = build_transcriber(cfg.transcriber)
+    ctx = analyze_recording(source.path, run_dir, cfg, _CachedTranscriber(real), None, cache=Cache(),
+                            guidelines="", audio_only=audio_only)
+    refined, records = refine_joins(plan, edge_context(ctx, cfg, fps=None if audio_only else float(cfg.fps)))
+    stem = out.parent / out.stem
+    Path(f"{stem}.plan.json").write_text(refined.to_json())
+    Path(f"{stem}.joins.json").write_text(json.dumps(records, indent=1) + "\n")
+    print(f"refined {sum(1 for r in records if r['moved'])} of {len(records)} joins: {stem}.plan.json",
+          file=sys.stderr)
+    return refined
+
+
+
 def _command(args: argparse.Namespace) -> int:
     if args.cmd == "align":
         return _align_cmd(args)
@@ -464,6 +499,8 @@ def _command(args: argparse.Namespace) -> int:
         _check_tools()
         cfg = load_config(_config_file(args.config))
         plan = Plan.from_json(Path(args.plan).read_text())
+        if args.refine_joins:
+            plan = _refine_for_render(plan, cfg, Path(args.out), audio_only=args.audio_only)
         if args.audio_only:
             cmd = render_audio_plan(plan, args.out, RenderSettings(fps=0, crossfade_sec=cfg.splice_crossfade_sec))
         elif plan.provenance.get("audio_only"):

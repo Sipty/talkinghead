@@ -396,3 +396,9 @@ def test_the_cli_does_not_import_the_apple_only_whisper_package() -> None:
     code = ("import sys, talkinghead.cli as cli; cli.build_parser().format_help(); "
             "assert 'mlx_whisper' not in sys.modules and 'mlx' not in sys.modules")
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_render_refines_joins_only_when_asked() -> None:
+    parser = build_parser()
+    assert parser.parse_args(["render", "plan.json", "--out", "out.mp4"]).refine_joins is False
+    assert parser.parse_args(["render", "plan.json", "--out", "out.mp4", "--refine-joins"]).refine_joins is True

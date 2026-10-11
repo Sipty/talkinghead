@@ -337,7 +337,7 @@ Set up and run talkinghead from the README in this repository.
 1. **Align (only with `--audio`).** The external recording is measured against the video, and a master file is written with that recording as its audio.
 2. **Transcribe and analyse.** The audio is transcribed once and cached. Silences, voiced spans and mouth noises are measured from the waveform.
 3. **Decide.** Three judged stages choose the cuts: the cold open and outro, the retakes, and the content. The judge votes on candidates that the code generated. Code turns each pick into a cut, so the judge never writes a timestamp. A mechanical stage then handles pauses, fillers and mouth noises.
-4. **Render and check.** One ffmpeg render produces the cut and the mastered audio. The output is then measured against the plan: duration, loudness, the first word, join quality, dead air and colour.
+4. **Render and check.** Each cut's edges are placed against the waveform: the level step across each join and voiced audio beside each edge are scored, then every join gets one refinement pass within 40 ms (`refine_joins`, before anything downstream reads the plan's output times). One ffmpeg render produces the cut and the mastered audio. The output is then measured against the plan: duration, loudness, the first word, join quality, dead air and colour.
 5. **Overlay and report.** An optional second pass adds the overlays with the audio copied, so the checks still hold. `report.md` records every decision.
 
 The stage-by-stage map is in [`docs/architecture.md`](docs/architecture.md).
@@ -361,7 +361,7 @@ The measurement is written to `align.json` in the run directory:
 | command | what it does |
 |---|---|
 | `talkinghead align VIDEO AUDIO [-o OUT] [--json] [--fix-drift] [--yes]` | measure the offset and drift, then remux the microphone audio onto the video. It asks before remuxing, unless `--yes` is given. The output defaults to `VIDEO.aligned.mov` next to the video. `--json` prints the result as JSON on stdout after the remux, and sends the report to stderr. This command never refuses on low confidence; it only reports |
-| `talkinghead render PLAN.json --out OUT.mp4` | re-render a finished plan exactly, with no judgment. `--audio-only --out OUT.wav` renders an audio-only plan |
+| `talkinghead render PLAN.json --out OUT.mp4` | re-render a finished plan exactly, with no judgment. `--audio-only --out OUT.wav` renders an audio-only plan. `--refine-joins` first refines the joins against the recording's cached analysis (no new ASR call) and writes `OUT.plan.json` and `OUT.joins.json` (the moves) beside the output; without it the plan is rendered as written |
 | `talkinghead inspect RUN_DIR` | print a run's `report.md` |
 | `talkinghead feedback RUN_DIR "note" [--at TIME] [--kind video\|preference\|defect] [--lesson TEXT]` | record feedback on a cut; see [Editing profile](#editing-profile). `--kind defect --at TIME` also turns what you heard into a fixture and a test stub under the clone's `tests/` |
 | `talkinghead lessons [list\|accept ID [--text TEXT]\|reject ID]` | review proposed lessons and promote approved ones to `preferences.md` |
