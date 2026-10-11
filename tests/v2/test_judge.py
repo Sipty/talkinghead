@@ -63,6 +63,31 @@ def test_shell_judge_pipes_prompt_on_stdin_and_parses_fenced_json(tmp_path: Path
     assert judge.decide("PROMPT-MARK", SCHEMA) == _resp(("c1", "keep"))
 
 
+def test_shell_judge_sends_the_guidelines_ahead_of_the_prompt(tmp_path: Path) -> None:
+    # A shell command has no system-prompt flag, so the guidelines must ride in stdin.
+    script = tmp_path / "guided.py"
+    script.write_text(
+        "import sys; p = sys.stdin.read(); assert p.index('RULE-MARK') < p.index('PROMPT-MARK')\n"
+        "print('{\"verdicts\": []}')\n"
+    )
+    cmd = f"{sys.executable} {script}"
+    assert ShellJudge(cmd, system_prompt="RULE-MARK").decide("PROMPT-MARK", SCHEMA) == {"verdicts": []}
+    with pytest.raises(JudgeError):
+        ShellJudge(cmd).decide("PROMPT-MARK", SCHEMA)
+
+
+def test_answers_cached_before_guidelines_were_sent_still_replay(tmp_path: Path) -> None:
+    old = tmp_path / "old.py"
+    old.write_text("print('{\"verdicts\": [{\"id\": \"c1\", \"verdict\": \"keep\"}]}')\n")
+    dead = tmp_path / "dead.py"
+    dead.write_text("raise SystemExit(1)\n")
+    cache = LLMCache(tmp_path / "llm")
+    vote(ShellJudge(f"{sys.executable} {old}"), "p", SCHEMA, k=1, cache=cache)
+    # Same judge, now carrying guidelines: the cached sample answers, the command never runs.
+    again = vote(ShellJudge(f"{sys.executable} {dead}", system_prompt="rules"), "p", SCHEMA, k=1, cache=cache)
+    assert again.responses == [_resp(("c1", "keep"))]
+
+
 def test_shell_judge_retries_once_on_invalid_json_then_fails(tmp_path: Path) -> None:
     counter = tmp_path / "n"
     counter.write_text("0")

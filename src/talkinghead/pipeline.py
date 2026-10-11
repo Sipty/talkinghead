@@ -19,6 +19,7 @@ from .config import Config
 from .context import Context, NeedsDecision
 from .edges import EdgeContext, finalize_cuts
 from .judge import Judge
+from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
 from .report import build_report
 from .stages import content, pauses, retakes, structure
@@ -241,6 +242,8 @@ def _stage_inputs(ctx: Context, guidelines: str, extra: dict | None = None) -> d
         "judge": ctx.judge.name,
         "decisions": ctx.decisions,
         "topic": ctx.topic,
+        # Absent when empty, so cooks without preferences keep their memo keys.
+        **({"preferences": _digest(ctx.preferences)} if ctx.preferences else {}),
         **({"protected": _digest([(round(a, 3), round(b, 3)) for a, b in ctx.protected_spans])}
            if ctx.protected_spans else {}),
         **(extra or {}),
@@ -267,6 +270,8 @@ def run_pipeline(
     assets_dir: str | Path | None = None,
     audio_only: bool = False,
     verify_output_asr: bool = True,
+    preferences: str = "",
+    refresh_preferences: bool = False,
 ) -> RunResult:
     if audio_only and (audio is not None or demo_minutes is not None):
         raise PipelineError("an audio-only run has no picture to align an external recording onto or to clip "
@@ -280,6 +285,10 @@ def run_pipeline(
     source_sha = sha256_file(video)
     run.bind(video, source_sha)
     notes: dict = {}
+    preferences, origin = snapshot_preferences(run, preferences, refresh=refresh_preferences)
+    if preferences:
+        notes["profile"] = {"preferences": len([ln for ln in preferences.splitlines() if ln.strip()]),
+                            "origin": origin}
     if audio is not None:
         video, notes["align"] = _align_source(run, video, audio, config, fix_drift=fix_drift,
                                               allow_bad_align=allow_bad_align, fresh=fresh,
@@ -299,7 +308,8 @@ def run_pipeline(
         run.write_json(run.decisions, stored)
 
     ctx = analyze(video, run.root, config, transcriber, judge, cache=cache, guidelines=guidelines,
-                  topic=topic, allow_av_mismatch=allow_av_mismatch, audio_only=audio_only)
+                  topic=topic, preferences=preferences, allow_av_mismatch=allow_av_mismatch,
+                  audio_only=audio_only)
     plan_path = run.root / f"{prefix}plan.json"
     final = run.root / f"{prefix}final.{'wav' if audio_only else 'mp4'}"
     report_path = run.report

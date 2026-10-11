@@ -39,6 +39,18 @@ def system_prompt(guidelines: str) -> str:
     )
 
 
+def with_preferences(prompt: str, preferences: str) -> str:
+    """Lead a task prompt with the owner's approved editing preferences.
+
+    They travel in the prompt body, not a system prompt, so every judge
+    adapter receives them and the per-sample cache key changes with them.
+    No preferences leaves the prompt byte-identical, so earlier answers replay.
+    """
+    if not preferences.strip():
+        return prompt
+    return f"--- OWNER EDITING PREFERENCES (follow these) ---\n{preferences.strip()}\n\n{prompt}"
+
+
 def _topic_line(topic: str | None) -> str:
     return f"Video topic (from the owner): {topic}\n\n" if topic else ""
 

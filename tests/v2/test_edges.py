@@ -344,6 +344,14 @@ def test_retake_with_voiced_edges_is_still_cut() -> None:
     assert ctx.dropped_fillers == 0
 
 
+def test_a_filler_with_voiced_edges_is_cut_by_default() -> None:
+    # The default removes every filler; sparing voiced ones is opt-in.
+    env = _levels([(0.5, 2.4, LOUD)])
+    ctx = _ctx(_speech_words(), env=env)
+    assert len(finalize_cuts([Cut(1.3, 1.7, "filler", "um")], ctx)) == 1
+    assert ctx.dropped_fillers == 0
+
+
 def test_edge_pass_uses_the_verifiers_voiced_edge_predicate() -> None:
     assert edges.edge_state is joins.edge_state
 

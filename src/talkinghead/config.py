@@ -48,8 +48,9 @@ class Config:
     # Evidence for the report; the guard that keeps the audio is acoustic.
     speech_probe: bool = True
     speech_probe_max: int = 24
-    # Fillers shorter than this are natural speech, not a cut.
-    min_filler_dur: float = 0.15
+    # Fillers (uh, um, hmm...) shorter than this are kept as natural speech.
+    # 0 removes every filler the transcript names; 0.15 restores the old floor.
+    min_filler_dur: float = 0.0
     # Word-removing cuts (retake, filler, content, join, ...): each edge snaps
     # to the quietest envelope frame within splice_valley_window of its word
     # boundary (never inward of a removed word) and stays splice_pad clear of
@@ -62,9 +63,10 @@ class Config:
     splice_valley_window: float = 0.12
     splice_quiet_sentence: float = 0.08
     splice_quiet_clause: float = 0.18
-    # Filler cuts at most this long are dropped when an edge still sits on
-    # voiced audio after valley snapping; longer ones are cut regardless.
-    filler_keep_voiced_max: float = 0.35
+    # Filler cuts at most this long are dropped (the filler stays) when an edge
+    # still sits on voiced audio after valley snapping. 0 keeps every filler
+    # cut; 0.35 restores the old behaviour of sparing short voiced fillers.
+    filler_keep_voiced_max: float = 0.0
     # Joins are equal-power crossfades this long; each side overlaps the cut
     # by half of it, so the rendered audio length still equals the plan's.
     splice_crossfade_sec: float = 0.020

@@ -83,7 +83,7 @@ def machinery_candidates(
     *,
     pause_above: float = 0.35,
     pause: object | None = None,
-    min_filler_dur: float = 0.15,
+    min_filler_dur: float = 0.0,
 ) -> list[Candidate]:
     """Pause trims, fillers and restarts from the calibrated derive pass.
 

@@ -42,6 +42,8 @@ class Context:
     topic: str | None = None
     decisions: dict = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
+    # Approved owner preferences from this cook's snapshot; empty means none.
+    preferences: str = ""
     noise_cuts: list = field(default_factory=list)
     # Voiced, speech-level spans no refined word covers (a word the ASR
     # dropped). The waveform's own word list: the edge guard and the

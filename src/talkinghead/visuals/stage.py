@@ -19,6 +19,7 @@ from ..prompts import (
     editorial_prompt,
     research_prompt,
     transcript_text,
+    with_preferences,
 )
 from ..timeline import Plan
 from .anchors import Anchor, find_phrase, find_quote, resolve_output
@@ -105,8 +106,8 @@ def pick_winner(group: list[int], enriched: list[dict]) -> int:
 
 def gather_editorial(ctx: Context, words: list) -> tuple[dict, str]:
     """The single proposal call: argument, chapters and visuals in one answer."""
-    result = vote(ctx.judge, editorial_prompt(transcript_text(words), ctx.topic,
-                                              ctx.config.plan_chapters),
+    result = vote(ctx.judge, with_preferences(editorial_prompt(transcript_text(words), ctx.topic,
+                                                               ctx.config.plan_chapters), ctx.preferences),
                   EDITORIAL_SCHEMA, k=1, cache=ctx.llm_cache)
     resp: dict = result.responses[0] if result.responses else {}
     return {

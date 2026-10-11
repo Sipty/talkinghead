@@ -166,10 +166,10 @@ def test_a_judge_command_that_is_not_installed_stops_with_exit_4_and_names_it(
     assert "judge command not found: no-such-judge-for-talkinghead" in capsys.readouterr().err
 
 
-def test_report_parser_and_time_parsing() -> None:
-    args = build_parser().parse_args(["report", "out", "7:03.5", "clipped word"])
-    assert args.cmd == "report" and args.note == "clipped word"
-    assert parse_time(args.time) == 423.5 and parse_time("12.25") == 12.25 and parse_time("1:02:03") == 3723.0
+def test_feedback_parser_and_time_parsing() -> None:
+    args = build_parser().parse_args(["feedback", "out", "clipped word", "--at", "7:03.5", "--kind", "defect"])
+    assert args.cmd == "feedback" and args.note == "clipped word" and args.kind == "defect"
+    assert parse_time(args.at) == 423.5 and parse_time("12.25") == 12.25 and parse_time("1:02:03") == 3723.0
 
 
 # ------------------------------------------------------------------- align
@@ -384,12 +384,12 @@ def test_a_failed_external_tool_is_a_one_line_error_not_a_traceback(
     assert rc == 1 and "tool failed (exit 2): ffmpeg -i in.mov" in capsys.readouterr().err
 
 
-def test_version_flag_and_help_mark_the_experimental_and_maintainer_commands(capsys: pytest.CaptureFixture) -> None:
+def test_version_flag_and_help_mark_the_experimental_commands(capsys: pytest.CaptureFixture) -> None:
     with pytest.raises(SystemExit) as done:
         main(["--version"])
     assert done.value.code == 0 and f"talkinghead {__version__}" in capsys.readouterr().out
     text = build_parser().format_help()
-    assert "board-page" in text and "(experimental)" in text and "(maintainer feedback loop)" in text
+    assert "board-page" in text and "(experimental)" in text
 
 
 def test_the_cli_does_not_import_the_apple_only_whisper_package() -> None:

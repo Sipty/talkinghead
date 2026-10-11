@@ -49,7 +49,7 @@ def test_trailing_silence_cut() -> None:
 # --- Filler cuts: hesitation tokens long enough to disrupt flow ---
 
 def test_long_filler_is_cut() -> None:
-    # "uh" spans 0.3s >= min_filler_dur 0.15: cut, padded by filler_pad.
+    # "uh" spans 0.3s: cut, padded by filler_pad.
     # Gaps around it are small (< pause_above), so no silence cuts interfere.
     ws = words(("hello", 0.0, 0.5), ("uh", 0.55, 0.85), ("world", 1.2, 1.8))
     cuts = derive_cuts(1.8, ws, pad=0.04)
@@ -60,10 +60,17 @@ def test_long_filler_is_cut() -> None:
     assert cuts[0].end == pytest.approx(0.85 + 0.06)
 
 
-def test_short_filler_between_words_is_kept() -> None:
-    # 0.1s "uh" < min_filler_dur: cutting it would splice mid-flow, keep it.
+def test_short_filler_between_words_is_cut_by_default() -> None:
+    # Every named filler goes by default, however short: the padded cut takes it.
     ws = words(("hello", 0.0, 0.5), ("uh", 0.5, 0.6), ("world", 0.6, 1.2))
-    assert derive_cuts(1.2, ws) == []
+    cuts = derive_cuts(1.2, ws)
+    assert [(c.reason, c.text) for c in cuts] == [("filler", "uh")]
+
+
+def test_short_filler_below_a_configured_floor_is_kept() -> None:
+    # min_filler_dur restores the older policy: a 0.1s "uh" under a 0.15s floor stays.
+    ws = words(("hello", 0.0, 0.5), ("uh", 0.5, 0.6), ("world", 0.6, 1.2))
+    assert derive_cuts(1.2, ws, min_filler_dur=0.15) == []
 
 
 def test_long_filler_after_gap_only_is_cut() -> None:

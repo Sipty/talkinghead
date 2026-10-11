@@ -167,6 +167,7 @@ def analyze(
     cache: Cache,
     guidelines: str,
     topic: str | None = None,
+    preferences: str = "",
     allow_av_mismatch: bool = False,
     audio_only: bool = False,
 ) -> Context:
@@ -250,7 +251,7 @@ def analyze(
         transcript_info["events"] = ev_key
     ctx = Context(
         config=config, source=source, words=words, env=env, floor=floor, silences=silences, moans=moans,
-        judge=judge, llm_cache=LLMCache(run.llm_dir), guidelines=guidelines, topic=topic,
+        judge=judge, llm_cache=LLMCache(run.llm_dir), guidelines=guidelines, topic=topic, preferences=preferences,
         decisions=run.read_json(run.decisions, default={}),
         noise_cuts=noise_cuts, voices=voices, speech_probes=speech_probes, protected_spans=protected,
         provenance={

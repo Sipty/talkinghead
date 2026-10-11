@@ -122,8 +122,8 @@ class EdgeContext:
     # render cannot drift between audio and video. None = no snapping.
     fps: float | None = 30.0
     # Filler cuts at most this long are dropped when an edge sits on voiced
-    # audio; a longer "um" costs more to hear than the tight splice it leaves.
-    filler_keep_voiced_max: float = 0.35
+    # audio; 0 (the default) keeps every filler cut. See Config.
+    filler_keep_voiced_max: float = 0.0
     # Set by finalize_cuts: filler cuts dropped for a voiced edge.
     dropped_fillers: int = 0
 
@@ -546,13 +546,13 @@ def snap_to_frames(cuts: list[Cut], fps: float) -> list[Cut]:
 
 
 def drop_voiced_fillers(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
-    """Drop a short filler cut whose edge still sits on voiced audio.
+    """Drop a short filler cut whose edge still sits on voiced audio (opt-in).
 
-    A tight splice around a micro-filler in continuous speech sounds worse than
-    the filler; a long one (over `filler_keep_voiced_max`, or fused with a
-    pause trim) is still worth removing. Same voiced-edge test as the join
-    verifier (joins.edge_state), so the two cannot disagree. Other word-cut
-    reasons remove words on purpose and keep their cuts.
+    With `filler_keep_voiced_max` above 0, a filler cut no longer than it is
+    spared when either edge is voiced, trading a remaining "uh" for a softer
+    splice. The default 0 keeps every filler cut. Same voiced-edge test as the
+    join verifier (joins.edge_state), so the two cannot disagree. Other
+    word-cut reasons remove words on purpose and keep their cuts.
     """
     if len(ctx.env.db) == 0:
         return list(cuts)

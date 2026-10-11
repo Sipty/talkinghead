@@ -1,10 +1,11 @@
-"""`talkinghead report`: turn what a reviewer heard into a fixture and a test.
+"""`talkinghead feedback --kind defect`: turn a heard tool bug into a fixture and a test.
 
 A reviewer watches the output and says "at 7:03 the word 'the' is clipped".
 That instant is mapped back through the plan to the source, a short wav around
 it is cut into the fixtures directory, the ledger records the note with the
 cuts near it, and a test stub is scaffolded so the fix is proven by a test
-against the very audio that failed, and guarded forever after.
+against the very audio that failed, and guarded forever after. Taste and
+one-video corrections go to the editing profile instead (profile.py).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ def _next_id(ledger: Path) -> int:
     return sum(1 for _ in ledger.read_text().splitlines()) + 1
 
 
-def record_feedback(
+def record_defect(
     run_dir: str | Path, *, out_time: float, note: str, fixtures_dir: str | Path,
     tests_dir: str | Path, half_window: float = 6.0,
 ) -> dict:

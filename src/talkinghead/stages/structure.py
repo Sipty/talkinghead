@@ -11,7 +11,7 @@ from __future__ import annotations
 from ..candidates import cold_open_candidates, outro_candidates
 from ..context import Context, NeedsDecision
 from ..judge import vote, vote_scalar
-from ..prompts import COLD_OPEN_SCHEMA, OUTRO_SCHEMA, cold_open_prompt, outro_prompt
+from ..prompts import COLD_OPEN_SCHEMA, OUTRO_SCHEMA, cold_open_prompt, outro_prompt, with_preferences
 from ..timeline import Cut
 
 KEEP_HEAD = "KEEP_HEAD"
@@ -22,7 +22,8 @@ def _decide(ctx: Context, key: str, flag: str, prompt: str, schema: dict, answer
     user = ctx.decisions.get(key)
     if user is not None:
         return None, {"source": "user", "value": user}
-    result = vote(ctx.judge, prompt, schema, k=ctx.config.votes, cache=ctx.llm_cache)
+    result = vote(ctx.judge, with_preferences(prompt, ctx.preferences), schema, k=ctx.config.votes,
+                  cache=ctx.llm_cache)
     valid = [r for r in result.responses if str(r.get(answer_key)) in options]
     tally = vote_scalar(valid, answer_key, agree=ctx.config.agree)
     record = {

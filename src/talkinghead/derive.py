@@ -65,7 +65,7 @@ def warn_whisper_timing(asr_backend: str | None) -> None:
     if asr_backend == "whisper":
         print(_WHISPER_TIMING_WARNING, file=sys.stderr)
 
-# Hesitation tokens that are safe to cut outright when long enough.
+# Hesitation tokens that are cut outright (subject to `min_filler_dur`).
 # Deliberately excludes "like"/"actually"/"you know": fluent uses of those
 # are normal speech and cutting them reads as choppy.
 FILLER_CUT_WORDS: set[str] = {
@@ -78,7 +78,9 @@ FILLER_CUT_WORDS: set[str] = {
     "er",
     "ah",
     "hmm",
+    "hm",
     "mmm",
+    "mm",
 }
 
 # Full filler set (incl. phrases) used by the whisper glue-probe.
@@ -166,11 +168,10 @@ def _filler_cuts(
     pad: float,
     duration: float,
 ) -> list[CutSpan]:
-    """Cut hesitation tokens that are long enough to disrupt flow.
+    """Cut hesitation tokens at least `min_filler_dur` long (0 cuts every one).
 
-    Only tokens ASR actually emitted are considered (Parakeet transcribes
-    fillers; whisper mostly swallows them). Short tokens are kept - a tight
-    splice around a micro-filler sounds worse than the filler itself.
+    Only tokens ASR actually emitted are considered (Parakeet and Scribe
+    transcribe fillers; whisper mostly swallows them).
 
     Cutting is anchored to the VAD speech burst, not the ASR word time: ASR
     filler timestamps drift (Parakeet placed this clip's 'Um' 0.3s early and
@@ -355,7 +356,7 @@ def derive_cuts(
     probe: Callable[[float, float], str] | None = None,
     filler_pad: float = 0.06,
     snap_window: float = 0.12,
-    min_filler_dur: float = 0.15,
+    min_filler_dur: float = 0.0,
 ) -> list[CutSpan]:
     """Propose every CutSpan to remove from a video of the given duration.
 

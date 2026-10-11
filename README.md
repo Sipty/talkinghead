@@ -189,6 +189,7 @@ Neither the judge nor the transcriber has a built-in default, so a run stops wit
 | `OPENROUTER_API_KEY` | for `scribe`, unless `ELEVENLABS_API_KEY` is set | OpenRouter API key | the OpenRouter route of Scribe v2: the only route when no ElevenLabs key is set, and the fallback after an ElevenLabs HTTP or network error | `export OPENROUTER_API_KEY=...` |
 | `TALKINGHEAD_CONFIG` | no | path to a TOML file | the config file to load (same as `--config`) | `export TALKINGHEAD_CONFIG=$HOME/talkinghead.toml` |
 | `TALKINGHEAD_CACHE` | no | directory; default `~/.cache/talkinghead` | where the content-addressed cache lives | `export TALKINGHEAD_CACHE=/Volumes/scratch/th-cache` |
+| `TALKINGHEAD_PROFILE` | no | directory, created on first use | your private editing profile: approved preferences and the feedback log (see [Editing profile](#editing-profile)) | `export TALKINGHEAD_PROFILE=$HOME/talkinghead-profile` |
 | `FLUIDAUDIO_BIN` | no, unless `fluidaudiocli` is not on PATH | path to `fluidaudiocli` | the Parakeet binary | `export FLUIDAUDIO_BIN=/opt/fluidaudio/fluidaudiocli` |
 | `TDT_EMISSION_DELAY_FRAMES` | no, advanced | integer, passed through | a word-timing shift in `fluidaudiocli` (Parakeet); setting it changes the Parakeet cache key | `export TDT_EMISSION_DELAY_FRAMES=2` |
 | `TALKINGHEAD_GAP_BUDGET_FRACTION` | no, advanced | fraction of source duration; default `0.005` | the dead-air budget in the verification table; raise it for a cook that keeps far more pause than the policy trims | `export TALKINGHEAD_GAP_BUDGET_FRACTION=0.15` |
@@ -248,7 +249,8 @@ The settings most people change first are `votes` and `agree` (the vote size), `
 ### Editorial guidelines
 
 `editorial/guidelines.md` is one creator's example rule set.
-The whole file is sent verbatim to the judge with every prompt, so it decides what the judge values.
+The whole file goes to the judge with every call, so it decides what the judge values: as the system prompt with `claude`, and at the head of the prompt on stdin with a `shell:` judge.
+Guidelines are not part of a judge answer's cache key, so after you edit them a rerun replays answers already given; the stages that depend on them are recomputed from those answers.
 Replace it with your own rules in one of two ways:
 
 ```bash
@@ -257,6 +259,56 @@ uv run talkinghead run talk.mov --guidelines ~/my-rules.md
 
 or set `guidelines = "/path/to/my-rules.md"` in the config file.
 A relative `guidelines` path resolves inside the clone.
+
+### Editing profile
+
+The editing profile is a private directory that remembers how you like your videos cut.
+Point `TALKINGHEAD_PROFILE` (or `--profile DIR`) at it; nothing is created until you first use it.
+It holds two files:
+
+| file | what it holds |
+|---|---|
+| `preferences.md` | the rules you approved, one `- rule` per line. Every judge prompt carries them, for every judge |
+| `feedback.jsonl` | every note you recorded, with the source time it points at and its review status |
+
+Feedback comes in three kinds, and each goes to a different place:
+
+| kind | example | where it goes |
+|---|---|---|
+| `video` (default) | "cut the aside at 3:10" | the log only; it is about this video |
+| `preference` | "too salesy" with the lesson "Commit to the pitch" | a proposed lesson, waiting for your approval |
+| `defect` | "the 'the' at 7:03 is clipped" | a fixture and a test stub in the clone (see [Other commands](#other-commands)); a tool bug is fixed in code, never learned as a preference |
+
+```bash
+uv run talkinghead feedback talk.talkinghead "cut the aside" --at 3:10
+uv run talkinghead feedback talk.talkinghead "too salesy" --kind preference --lesson "Commit to the pitch."
+uv run talkinghead lessons                         # list proposed lessons
+uv run talkinghead lessons accept 2 --text "Commit to the pitch: pain, cost, solution."
+uv run talkinghead lessons reject 3
+```
+
+`--at` is a time in the cut you watched; the log stores the matching source time, so the note still points at the right moment after a re-cut.
+Nothing is learned silently: a lesson becomes a preference only through `lessons accept`, which appends it to `preferences.md`.
+You can also edit `preferences.md` by hand.
+
+Each cook keeps a snapshot of the preferences it was judged with, in `<video stem>.talkinghead/preferences.md`.
+Changing the profile affects new cooks only, so a rerun of an existing cook replays its cached judge answers.
+To re-judge an existing cook with the current profile, add `--refresh-preferences`; only the judge calls whose prompt changed run again.
+A cook made before the profile existed is frozen without preferences until you refresh it.
+With no profile, or an empty `preferences.md`, the prompts are unchanged.
+
+### Filler words
+
+Every hesitation the transcriber writes as a word (uh, um, erm, hmm, hm, mm and similar) is cut by default, however short.
+Two config keys bring back a gentler policy:
+
+| key | default | effect |
+|---|---|---|
+| `min_filler_dur` | `0.0` | fillers shorter than this many seconds are kept (the earlier default was `0.15`) |
+| `filler_keep_voiced_max` | `0.0` | a filler up to this long whose edge runs straight into speech is kept, because the tight splice can sound worse than the filler (the earlier default was `0.35`) |
+
+`min_filler_dur` is part of the pauses stage's memo key, so rerunning a cook made under the old default recomputes that mechanical stage.
+No judge call runs again, and the replaced memo is kept as `stages/pauses.superseded.json`.
 
 ### Overlay assets
 
@@ -311,7 +363,8 @@ The measurement is written to `align.json` in the run directory:
 | `talkinghead align VIDEO AUDIO [-o OUT] [--json] [--fix-drift] [--yes]` | measure the offset and drift, then remux the microphone audio onto the video. It asks before remuxing, unless `--yes` is given. The output defaults to `VIDEO.aligned.mov` next to the video. `--json` prints the result as JSON on stdout after the remux, and sends the report to stderr. This command never refuses on low confidence; it only reports |
 | `talkinghead render PLAN.json --out OUT.mp4` | re-render a finished plan exactly, with no judgment. `--audio-only --out OUT.wav` renders an audio-only plan |
 | `talkinghead inspect RUN_DIR` | print a run's `report.md` |
-| `talkinghead report RUN_DIR MM:SS "what you heard"` | maintainer feedback loop: turn something you heard at a timestamp into a fixture and a test stub under the clone's `tests/` |
+| `talkinghead feedback RUN_DIR "note" [--at TIME] [--kind video\|preference\|defect] [--lesson TEXT]` | record feedback on a cut; see [Editing profile](#editing-profile). `--kind defect --at TIME` also turns what you heard into a fixture and a test stub under the clone's `tests/` |
+| `talkinghead lessons [list\|accept ID [--text TEXT]\|reject ID]` | review proposed lessons and promote approved ones to `preferences.md` |
 | `talkinghead board` and `talkinghead board-page` | experimental; see [Experimental: board videos](#experimental-board-videos) |
 
 Every subcommand accepts `--help`.
@@ -415,7 +468,7 @@ Informational. Run `uv sync --extra vad` if you want the mouth-noise pass gated 
 What leaves your Mac depends on your choices:
 
 - **Scribe** (`--transcriber scribe`): the 16 kHz mono audio of the whole recording goes to ElevenLabs or OpenRouter.
-- **The judge**: the transcript sentences, the guidelines, the topic and the candidate lists go to the judge's provider. With `claude` that is Anthropic, through Claude Code. With a shell command it is whatever provider that command calls. The dry-run judge sends nothing.
+- **The judge**: the transcript sentences, the guidelines, your editing preferences, the topic and the candidate lists go to the judge's provider. With `claude` that is Anthropic, through Claude Code. With a shell command it is whatever provider that command calls. The dry-run judge sends nothing.
 - **Overlay research**: when visuals are on, the URLs the judge proposes are fetched, and pages are screenshotted with `chrome-devtools-axi` if it is installed. `--no-research` turns this off.
 - **Whisper and Parakeet**: the audio stays on your machine. Whisper downloads its model from Hugging Face once.
 
@@ -424,7 +477,8 @@ What stays local: the video, the master, the render, the verification and the re
 Where data is kept:
 
 - `~/.cache/talkinghead/` holds the content-addressed cache: transcripts (the words spoken), silences, and voice analysis, each keyed on the hash of the audio it came from. It also holds `bin/`, a helper cache for the head-clip check.
-- `<video stem>.talkinghead/` holds the run: the plan, the report, every judge prompt and answer under `llm/`, and the stage memos. Prompts include transcript text, so treat a run directory like the recording itself.
+- `<video stem>.talkinghead/` holds the run: the plan, the report, the preferences snapshot, every judge prompt and answer under `llm/`, and the stage memos. Prompts include transcript text, so treat a run directory like the recording itself.
+- The editing profile directory holds your preferences and every feedback note, with the run directory and source path it refers to.
 - The Whisper model lives in the Hugging Face cache, under `~/.cache/huggingface/` unless `HF_HOME` is set.
 
 ## Cleanup and uninstall
@@ -478,7 +532,7 @@ The spec is `<RUN_DIR>/board/board.json`. It holds the tablet recording's path, 
 - The cut is only as good as the judge and the guidelines. Read the report before you publish, and watch the cut.
 - HDR is tested on 10-bit HLG sources. Other HDR formats are untested.
 - Long cooks are slow, and they cost money in judge calls and transcription.
-- `talkinghead report` is a maintainer feedback loop. It writes into the clone's `tests/` directory, so it works only from a clone.
+- `talkinghead feedback --kind defect` writes into the clone's `tests/` directory, so it works only from a clone.
 - The default overlay library and the example guidelines are examples. Replace them for your own channel.
 - talkinghead runs from a clone. It is not published as a package, and its bundled files (the guidelines and the assets) are found relative to the clone.
 
@@ -492,7 +546,7 @@ uvx ruff check   # rule set pinned in pyproject.toml; the tree is clean
 
 Some tests call a live judge.
 They are skipped unless `TALKINGHEAD_JUDGE_TESTS=1` is set, and that setting needs a working judge.
-The test suite removes `TALKINGHEAD_JUDGE`, `TALKINGHEAD_TRANSCRIBER` and `TALKINGHEAD_CONFIG` for each test, so your shell settings do not leak into it.
+The test suite removes `TALKINGHEAD_JUDGE`, `TALKINGHEAD_TRANSCRIBER`, `TALKINGHEAD_CONFIG` and `TALKINGHEAD_PROFILE` for each test, so your shell settings do not leak into it.
 
 The code is in `src/talkinghead/`.
 `scripts/render_proof.py` is the maintainer's 31-minute render measurement. It reads `TALKINGHEAD_RENDER_PROOF_SOURCE` and `TALKINGHEAD_RENDER_PROOF_OUT_DIR` when its `--source` and `--out-dir` flags are not given.

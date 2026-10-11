@@ -108,6 +108,39 @@ def test_rerun_replays_every_verdict_and_reproduces_the_plan_byte_for_byte(clip:
     assert second.plan_path.read_bytes() == plan_bytes
 
 
+class PromptRecorder(FakeJudge):
+    """FakeJudge that keeps every prompt it was asked."""
+
+    def __init__(self, responses) -> None:
+        super().__init__(responses)
+        self.prompts: list[str] = []
+
+    def decide(self, prompt: str, schema: dict) -> dict:
+        self.prompts.append(prompt)
+        return super().decide(prompt, schema)
+
+
+def test_preferences_reach_every_judge_and_the_cook_keeps_its_snapshot(clip: Path, tmp_path: Path) -> None:
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    judge = PromptRecorder(_answers())
+    first = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=judge,
+                         cache=cache, guidelines="G", preferences="- keep laughs")
+    assert judge.calls == 20 and all("- keep laughs" in p for p in judge.prompts)
+    assert (out / "preferences.md").read_text().strip() == "- keep laughs"
+
+    # The profile moved on: this cook replays what it was judged with.
+    strict = FakeJudge([])
+    again = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=strict,
+                         cache=cache, guidelines="G", preferences="- cut tangents")
+    assert strict.calls == 0 and again.plan_path.read_bytes() == first.plan_path.read_bytes()
+
+    # Opting in asks the judges again under the new preferences.
+    fresh = PromptRecorder(_answers())
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=fresh,
+                 cache=cache, guidelines="G", preferences="- cut tangents", refresh_preferences=True)
+    assert fresh.calls == 20 and all("- cut tangents" in p and "keep laughs" not in p for p in fresh.prompts)
+
+
 def test_a_cook_directory_belongs_to_one_recording(clip: Path, tmp_path: Path) -> None:
     """Two recordings sharing one run directory would mix their renders and
     hand the second one the first one's persisted decisions."""

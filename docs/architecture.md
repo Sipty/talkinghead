@@ -19,8 +19,8 @@ Two things make the run reproducible rather than merely repeatable:
 | store | path | keyed on | holds |
 |---|---|---|---|
 | cache (global) | `~/.cache/talkinghead` (`TALKINGHEAD_CACHE`), `src/talkinghead/store.py` | `<sha256 of the content>/<kind>-<stable_key>`, 24-hex key from the sorted JSON of the params + a version | `transcript`, `silences`, `moans`, `mouth_noises`, `unclassified_voice` (voiced speech-level audio no word covers), `speech_mask`, `speech_probe` |
-| run dir | `<video stem>.talkinghead/` next to the video, or `--out-dir` (`store.RunDir`) | one per recording: `run.json` records the source sha256 and `bind` refuses a different picture, so two cooks never share a directory | `plan.json`, `render.json`, `decisions.json`, `run.json`, `audio/`, `llm/`, `stages/`, `verify/`, plus `master.mov` and `align.json` when `--audio` was given |
-| stage memos | `<run>/stages/<stage>.json` | `stable_key(inputs, STAGE_VERSION)`: transcription + **the config fields that stage reads** (`pipeline.STAGE_CONFIG_KEYS`) + guidelines + judge name + topic + decisions | the stage's cuts and notes, plus `stages/<stage>.superseded.json` when a re-key replaced one |
+| run dir | `<video stem>.talkinghead/` next to the video, or `--out-dir` (`store.RunDir`) | one per recording: `run.json` records the source sha256 and `bind` refuses a different picture, so two cooks never share a directory | `plan.json`, `render.json`, `decisions.json`, `run.json`, `preferences.md`, `audio/`, `llm/`, `stages/`, `verify/`, plus `master.mov` and `align.json` when `--audio` was given |
+| stage memos | `<run>/stages/<stage>.json` | `stable_key(inputs, STAGE_VERSION)`: transcription + **the config fields that stage reads** (`pipeline.STAGE_CONFIG_KEYS`) + guidelines + judge name + topic + decisions + preferences (only when non-empty) | the stage's cuts and notes, plus `stages/<stage>.superseded.json` when a re-key replaced one |
 | LLM samples | `<run>/llm/<prompt sha>.prompt.txt` and `<prompt sha>-<i>.json` (`judge.LLMCache`) | the prompt **and the judge name**, so switching models never replays another model's answers | every prompt and every sampled answer |
 
 `STAGE_VERSION` and `VISUALS_STAGE_VERSION` (`pipeline.py`) and `ANALYSIS_VERSION`
@@ -159,8 +159,7 @@ whole stage.
 `stages/pauses.py`, the only fully mechanical stage. `candidates.machinery_candidates`
 turns the calibrated derive pass into three kinds of cut: pause trims (interior pauses keep
 a boundary-typed, length-scaled amount split across the two edges, leading and trailing
-silence goes entirely), filler cuts for hesitation tokens that are long enough (`min_filler_dur`) and
-were emitted as words, and `restart` cuts - an abandoned sentence that the next one
+silence goes entirely), filler cuts for every hesitation token emitted as a word (`min_filler_dur`, default 0, sets an optional length floor), and `restart` cuts - an abandoned sentence that the next one
 restates, found by token similarity. The mouth-noise cuts computed during analysis are
 appended unchanged.
 
@@ -203,10 +202,10 @@ Within-sentence retakes cannot move inward of the abandoned word or acquire a cl
 `keep_sentence_tail` retains the 80 ms completed-sentence source tail where that much source room exists, rounded outward for video.
 `keep_splice_quiet` applies the existing 0.18 s clause pacing only to non-repair word cuts.
 Natural continuous-speech pauses are not shortened solely to force an 80 ms edit seam.
-`drop_voiced_fillers` then drops a `filler` cut of at most `filler_keep_voiced_max`
-(0.35 s) whose edge still sits on voiced audio, judged by `joins.edge_state`, the same
-predicate verify's `join_edges` uses: a micro-filler glued into running speech is less
-noticeable than the tight splice its removal makes, while a long "um" is worth the splice.
+`drop_voiced_fillers` can then drop a `filler` cut of at most `filler_keep_voiced_max`
+(default 0, so off) whose edge still sits on voiced audio, judged by `joins.edge_state`, the same
+predicate verify's `join_edges` uses: when enabled, a micro-filler glued into running speech is kept
+because the tight splice its removal makes can be more noticeable than the filler.
 Retake, content and join cuts stay even with a voiced edge, since they remove real words.
 
 `protect_words` guards two kinds of kept audio, and the difference matters. Words are
@@ -319,8 +318,8 @@ and the render command. `talkinghead inspect OUT_DIR` prints it.
 ## Judge adapters
 
 `judge.py` defines one protocol (`decide(prompt, schema) -> dict`) and four
-implementations: `ShellJudge` (any command: prompt on stdin, JSON on stdout; it injects
-the schema contract into every prompt and retries once on invalid JSON),
+implementations: `ShellJudge` (any command: prompt on stdin, JSON on stdout; it leads every
+prompt with the system prompt (role + guidelines) and the schema contract, and retries on invalid JSON),
 `ClaudeCodeJudge` (headless `claude -p`, subscription, structured output),
 `FallbackJudge` (switches to a second judge when the primary reports a usage limit) and
 `FakeJudge` for tests. `Config.judge` selects the adapter; `Config.model` rewrites the

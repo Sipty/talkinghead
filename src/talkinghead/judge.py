@@ -175,12 +175,20 @@ def _not_found(cmd: str) -> JudgeUnavailable:
 
 
 class ShellJudge:
-    """Any command that reads the prompt on stdin and prints JSON on stdout."""
+    """Any command that reads the prompt on stdin and prints JSON on stdout.
 
-    def __init__(self, cmd: str, timeout: float = 1800.0, model: str | None = None) -> None:
+    A shell command has no system-prompt channel, so `system_prompt` (the
+    editor role and guidelines) leads the stdin text of every call. Like
+    Claude Code's --system-prompt it stays out of the per-sample cache key;
+    stage memos hash the guidelines instead.
+    """
+
+    def __init__(self, cmd: str, timeout: float = 1800.0, model: str | None = None,
+                 system_prompt: str | None = None) -> None:
         self.cmd = with_model(cmd, model)
         self.timeout = timeout
         self.model = command_model(self.cmd)
+        self.system_prompt = system_prompt
         # The model belongs in the name: the cache key is built from the
         # judge's name, so two shell judges differing only in --model must not
         # replay each other's answers.
@@ -253,7 +261,7 @@ class ShellJudge:
         last = ""
         for attempt in range(attempts):
             try:
-                raw = self._run(instruction + prompt)
+                raw = self._run(self._system_block() + instruction + prompt)
             except subprocess.TimeoutExpired:
                 # A hung shell judge must not kill the whole run: sol wedges
                 # on large whole-transcript prompts and needs a fresh call.
@@ -278,6 +286,11 @@ class ShellJudge:
                     "no markdown."
                 )
         raise JudgeError(f"unreachable: {last[:200]!r}")
+
+    def _system_block(self) -> str:
+        if not self.system_prompt:
+            return ""
+        return f"--- SYSTEM INSTRUCTIONS ---\n{self.system_prompt}\n--- END SYSTEM INSTRUCTIONS ---\n\n"
 
 
 _MODE_FLAG = re.compile(r"--mode(?:\s*=\s*|\s+)\S+")

@@ -30,6 +30,7 @@ from ..prompts import (
     marker_prompt,
     marker_window,
     retake_prompt,
+    with_preferences,
 )
 from ..spans import Span, cluster_spans
 from ..timeline import Cut
@@ -53,7 +54,7 @@ def _quote(words: list, a: int, b: int, pad: int = 0) -> str:
 def _pass_a(ctx: Context, table: str) -> tuple[list[Span], dict]:
     """Global sweep; span-level voting, intersection-leaning boundaries."""
     n = len(ctx.words)
-    result = vote(ctx.judge, retake_prompt(table, ctx.topic), RETAKE_SCHEMA,
+    result = vote(ctx.judge, with_preferences(retake_prompt(table, ctx.topic), ctx.preferences), RETAKE_SCHEMA,
                   k=ctx.config.votes, cache=ctx.llm_cache)
     per_response: list[list[tuple[int, int]]] = []
     dropped_bad = dropped_overlong = proposed = 0
@@ -91,7 +92,8 @@ def _pass_b(ctx: Context) -> tuple[list[Span], list[dict], dict]:
         window = marker_window(sents, groups, words, cand.word)
         if not window:
             continue
-        result = vote(ctx.judge, marker_prompt(window, cand.marker, cand.tier, ctx.topic),
+        result = vote(ctx.judge, with_preferences(marker_prompt(window, cand.marker, cand.tier, ctx.topic),
+                                                  ctx.preferences),
                       MARKER_SCHEMA, k=ctx.config.marker_votes, cache=ctx.llm_cache)
         cut_votes = sum(1 for r in result.responses if r.get("verdict") == "cut")
         keep_votes = sum(1 for r in result.responses if r.get("verdict") == "keep")

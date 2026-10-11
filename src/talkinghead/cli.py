@@ -3,16 +3,19 @@
     talkinghead run VIDEO [--audio RECORDING] [--demo MINUTES] [--topic ...] [--cold-open S] [--outro S]
                     [--audio-only] [--judge SPEC] [--transcriber scribe|parakeet|whisper]
                     [--scribe-response JSON --scribe-audio WAV] [--no-output-asr]
+                    [--profile DIR] [--refresh-preferences]
     talkinghead align VIDEO AUDIO [-o OUT] [--json] [--fix-drift] [--yes]
     talkinghead render PLAN.json --out OUT.mp4 | OUT.wav --audio-only
     talkinghead inspect OUT_DIR
     talkinghead board RUN_DIR [--spec JSON] [--out MP4]                 (experimental)
     talkinghead board-page RUN_DIR [--spec JSON] [--port N] [--no-open] (experimental)
-    talkinghead report OUT_DIR MM:SS "what you heard"                   (maintainer feedback loop)
+    talkinghead feedback RUN_DIR "note" [--at MM:SS] [--kind video|preference|defect] [--lesson TEXT]
+    talkinghead lessons [list | accept ID [--text TEXT] | reject ID]
     talkinghead --version
 
 The judge and the transcriber come from TALKINGHEAD_JUDGE and TALKINGHEAD_TRANSCRIBER
-(or --judge, --transcriber, or the config file): see the README's Configuration section.
+(or --judge, --transcriber, or the config file); the editing profile comes from
+TALKINGHEAD_PROFILE (or --profile): see the README's Configuration section.
 
 Exit codes: 0 done, 1 error, 3 a structural decision is needed (the message
 names the flag; the answer is persisted for every later run), 4 the judge is
@@ -47,6 +50,7 @@ from .judge import (
     preflight,
 )
 from .pipeline import PipelineError, run_pipeline
+from .profile import profile_dir, read_preferences
 from .prompts import system_prompt
 from .render import RenderSettings, render_audio_plan, render_plan
 from .store import Cache
@@ -92,16 +96,19 @@ def build_judge(spec: str, *, model: str | None, guidelines: str, effort: str | 
             raise ValueError("panel requires a shell judge; 'claude' has no shell command to add")
         return ClaudeCodeJudge(model=model, system_prompt=system_prompt(guidelines), effort=effort)
     if spec.startswith("shell:"):
+        # Every shell judge, fallback and panel members included, gets the guidelines.
+        system = system_prompt(guidelines)
         primary = ShellJudge(spec[len("shell:"):], model=model,
-                             timeout=timeout if timeout is not None else 1800.0)
+                             timeout=timeout if timeout is not None else 1800.0, system_prompt=system)
         if fallback_command:
-            judge = FallbackJudge(primary, ShellJudge(fallback_command, timeout=primary.timeout))
+            judge = FallbackJudge(primary, ShellJudge(fallback_command, timeout=primary.timeout,
+                                                      system_prompt=system))
         else:
             judge = primary
         if panel:
             members: list[Judge] = [judge]
             for cmd in panel:
-                members.append(ShellJudge(cmd, timeout=primary.timeout))
+                members.append(ShellJudge(cmd, timeout=primary.timeout, system_prompt=system))
             return PanelJudge(members)
         return judge
     raise ValueError(f"unknown judge {spec!r}: use 'claude' or 'shell:<command>'")
@@ -187,6 +194,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="card overlays as a fraction of the frame width (default: 0.46)")
     run.add_argument("--visuals-scale-shot", type=float, default=None,
                      help="photo/screenshot overlays as a fraction of the frame width (default: 0.42)")
+    run.add_argument("--profile", default=None, metavar="DIR",
+                     help="editing profile directory (default: $TALKINGHEAD_PROFILE)")
+    run.add_argument("--refresh-preferences", action="store_true",
+                     help="re-take this cook's preferences snapshot from the current profile")
 
     al = sub.add_parser("align", help="align an external recording onto a video and remux the master")
     al.add_argument("video", help="video master (its picture is copied; only a display rotation is re-encoded)")
@@ -220,13 +231,27 @@ def build_parser() -> argparse.ArgumentParser:
     insp = sub.add_parser("inspect", help="print a run's report")
     insp.add_argument("out_dir")
 
-    fb = sub.add_parser("report", help="record something you heard in the output as a fixture + test stub "
-                                       "(maintainer feedback loop)")
-    fb.add_argument("out_dir")
-    fb.add_argument("time", help="output timestamp, seconds or MM:SS")
-    fb.add_argument("note")
-    fb.add_argument("--fixtures-dir", default=None, help="default: <repo>/tests/fixtures/feedback")
-    fb.add_argument("--tests-dir", default=None, help="default: <repo>/tests/feedback")
+    fb = sub.add_parser("feedback", help="record a correction from reviewing a cook, optionally with a lesson")
+    fb.add_argument("run_dir")
+    fb.add_argument("note", help="what was wrong or what you changed")
+    fb.add_argument("--at", default=None, metavar="TIME",
+                    help="output timestamp the note refers to, seconds or MM:SS (required for a defect)")
+    fb.add_argument("--kind", default="video", choices=["video", "preference", "defect"],
+                    help="video: this cut only; preference: taste worth keeping; defect: a tool bug, "
+                         "recorded as a fixture and a test stub under the clone's tests/ (default: video)")
+    fb.add_argument("--lesson", default=None, metavar="TEXT",
+                    help="a durable rule proposed from this note; it waits for `talkinghead lessons accept`")
+    fb.add_argument("--profile", default=None, metavar="DIR",
+                    help="editing profile directory (default: $TALKINGHEAD_PROFILE)")
+    fb.add_argument("--fixtures-dir", default=None, help="defect fixtures (default: <repo>/tests/fixtures/feedback)")
+    fb.add_argument("--tests-dir", default=None, help="defect test stubs (default: <repo>/tests/feedback)")
+
+    les = sub.add_parser("lessons", help="review proposed lessons and promote them to preferences")
+    les.add_argument("action", nargs="?", default="list", choices=["list", "accept", "reject"])
+    les.add_argument("id", nargs="?", type=int, help="lesson id (for accept and reject)")
+    les.add_argument("--text", default=None, help="with accept: the rule as it should be saved, reworded")
+    les.add_argument("--profile", default=None, metavar="DIR",
+                     help="editing profile directory (default: $TALKINGHEAD_PROFILE)")
     return p
 
 
@@ -345,6 +370,69 @@ def _align_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+NO_PROFILE = ("no editing profile: set TALKINGHEAD_PROFILE to a directory (it is created on first use) "
+              "or pass --profile DIR")
+
+
+def _feedback_cmd(args: argparse.Namespace) -> int:
+    from .feedback import record_defect
+    from .profile import profile_dir, record_feedback
+
+    profile = profile_dir(args.profile)
+    out_time = parse_time(args.at) if args.at is not None else None
+    extra: dict = {}
+    if args.kind == "defect":
+        if out_time is None:
+            raise ValueError("a defect needs --at TIME: the fixture is cut around that instant")
+        if args.lesson:
+            raise ValueError("a defect is fixed in code with a test, not learned as a preference: drop --lesson")
+        defect = record_defect(
+            args.run_dir, out_time=out_time, note=args.note,
+            fixtures_dir=args.fixtures_dir or _repo_file("tests/fixtures/feedback"),
+            tests_dir=args.tests_dir or _repo_file("tests/feedback"),
+        )
+        print(f"fixture: {defect['fixture']}\nledger entry #{defect['id']}\ntest stub: {defect['test_stub']}")
+        # The profile, when there is one, keeps the full review history.
+        if profile is None:
+            return 0
+        extra = {"fixture": defect["fixture"], "test_stub": defect["test_stub"]}
+    elif profile is None:
+        raise ValueError(NO_PROFILE)
+    entry = record_feedback(profile, args.run_dir, kind=args.kind, note=args.note, out_time=out_time,
+                            lesson=args.lesson, extra=extra)
+    where = f" (source {entry['source_time']:.2f}s)" if "source_time" in entry else ""
+    print(f"feedback #{entry['id']} [{entry['kind']}]{where}: {entry['note']}")
+    if entry["status"] == "pending":
+        print(f"proposed lesson #{entry['id']}: {entry['lesson']}\n"
+              f"accept it with: talkinghead lessons accept {entry['id']}")
+    return 0
+
+
+def _lessons_cmd(args: argparse.Namespace) -> int:
+    from .profile import accept_lesson, pending_lessons, profile_dir, reject_lesson
+
+    profile = profile_dir(args.profile)
+    if profile is None:
+        raise ValueError(NO_PROFILE)
+    if args.action == "list":
+        pending = pending_lessons(profile)
+        if not pending:
+            print("no pending lessons")
+        for e in pending:
+            print(f"#{e['id']} [{e['kind']}] {e['lesson']}\n    from: {e['note']}")
+        return 0
+    if args.id is None:
+        raise ValueError(f"lessons {args.action} needs a lesson id: see `talkinghead lessons list`")
+    if args.action == "accept":
+        entry = accept_lesson(profile, args.id, text=args.text)
+        print(f"accepted #{entry['id']}: {entry['rule']}\nsaved to {profile / 'preferences.md'}; "
+              "new cooks use it (existing cooks: run again with --refresh-preferences)")
+        return 0
+    entry = reject_lesson(profile, args.id)
+    print(f"rejected #{entry['id']}")
+    return 0
+
+
 def _command(args: argparse.Namespace) -> int:
     if args.cmd == "align":
         return _align_cmd(args)
@@ -352,16 +440,10 @@ def _command(args: argparse.Namespace) -> int:
         report = Path(args.out_dir) / "report.md"
         print(report.read_text() if report.is_file() else f"no report in {args.out_dir}")
         return 0
-    if args.cmd == "report":
-        from .feedback import record_feedback
-
-        entry = record_feedback(
-            args.out_dir, out_time=parse_time(args.time), note=args.note,
-            fixtures_dir=args.fixtures_dir or _repo_file("tests/fixtures/feedback"),
-            tests_dir=args.tests_dir or _repo_file("tests/feedback"),
-        )
-        print(f"fixture: {entry['fixture']}\nledger entry #{entry['id']}\ntest stub: {entry['test_stub']}")
-        return 0
+    if args.cmd == "feedback":
+        return _feedback_cmd(args)
+    if args.cmd == "lessons":
+        return _lessons_cmd(args)
     if args.cmd == "board":
         from .board.render import render_board
         from .board.spec import load_spec
@@ -469,6 +551,8 @@ def _run_cmd(args: argparse.Namespace) -> int:
         allow_bad_align=args.allow_bad_align, allow_av_mismatch=args.allow_av_mismatch, fresh=args.fresh,
         assets_dir=str(assets),
         audio_only=args.audio_only, verify_output_asr=not args.no_output_asr,
+        preferences=read_preferences(profile_dir(args.profile)),
+        refresh_preferences=args.refresh_preferences,
     )
     print(f"final: {result.final}\nreport: {result.report}")
     if result.final_visuals:
