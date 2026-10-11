@@ -4,7 +4,7 @@ Tiers come from the observed hit rate on the v10 source (see the v11 spec):
 "sorry" and "hold on" marked a real retake in 5 of 6 occurrences, while
 "I mean" marked one in 0 of 4 -- every occurrence was discourse filler or a
 definition ("by vibecode, I mean, apply strong engineering practices"). So the
-owner's default-to-cut bias applies to STRONG markers only; on WEAK markers
+guidelines' default-to-cut bias applies to STRONG markers only; on WEAK markers
 the standing "when unsure, keep" asymmetry stands.
 """
 

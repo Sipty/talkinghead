@@ -24,6 +24,7 @@ from talkinghead.align import (
     align,
     analyze,
 )
+from talkinghead.color import hdr_codec, hdr_pix_fmt
 
 SR = ANALYSIS_SR
 
@@ -162,8 +163,8 @@ def test_rotation_minus_ninety_bakes_in_clockwise_upright():
                                    "color_transfer": "arib-std-b67"}))
     graph = cmd[cmd.index("-filter_complex") + 1]
     assert "transpose=1" in graph and "transpose=2" not in graph
-    for flag, value in (("-c:v", "hevc_videotoolbox"), ("-profile:v", "main10"),
-                        ("-pix_fmt", "p010le"), ("-tag:v", "hvc1"),
+    for flag, value in (("-c:v", hdr_codec()), ("-profile:v", "main10"),
+                        ("-pix_fmt", hdr_pix_fmt(hdr_codec())), ("-tag:v", "hvc1"),
                         ("-color_trc", "arib-std-b67")):
         assert cmd[cmd.index(flag) + 1] == value
     assert "-display_rotation" in cmd  # input side data must not ride through

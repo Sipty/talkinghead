@@ -119,11 +119,19 @@ def test_the_owner_environment_keeps_the_judge_and_scribe_cache_keys(monkeypatch
 
 def test_transcriber_factory_never_falls_back_silently(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("talkinghead.cli.find_fluidaudio", lambda: None)
+    monkeypatch.setattr("sys.platform", "darwin")
     with pytest.raises(RuntimeError, match="fluidaudiocli"):
         build_transcriber("parakeet")
     monkeypatch.setattr("talkinghead.cli.find_fluidaudio", lambda: "/bin/fluidaudiocli")
     assert isinstance(build_transcriber("parakeet"), ParakeetTranscriber)
     assert isinstance(build_transcriber("whisper"), WhisperTranscriber)
+
+
+def test_parakeet_is_refused_off_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("talkinghead.cli.find_fluidaudio", lambda: "/bin/fluidaudiocli")
+    with pytest.raises(RuntimeError, match="macOS only"):
+        build_transcriber("parakeet")
 
 
 def test_main_reports_missing_video(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -316,7 +324,10 @@ def test_render_rebuilds_an_audio_plan_only_when_told_it_is_audio(
     assert float(probed["format"]["duration"]) == pytest.approx(plan.output_duration, abs=0.01)
 
 
-@pytest.mark.parametrize("tool", ["rsvg-convert", "swiftc"])
+@pytest.mark.parametrize("tool", [
+    "rsvg-convert",
+    pytest.param("swiftc", marks=pytest.mark.skipif(sys.platform != "darwin", reason="swiftc is needed on macOS only")),
+])
 def test_visuals_need_their_tools_and_fail_before_any_work(
         tool: str, tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     real_which = shutil.which

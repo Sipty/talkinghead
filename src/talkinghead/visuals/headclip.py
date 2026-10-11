@@ -19,6 +19,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from ..config import OVERLAY_CORNERS
@@ -152,6 +153,12 @@ def check_head_clip(
                    "margin": margin, "corner": corner, "placements": []}
     if not placements:
         return CheckResult("visuals_head_clip", "fatal", True, "no overlays placed"), facts
+    if sys.platform != "darwin":
+        # Apple Vision is the only detector here; say so loudly, then let the cook finish.
+        reason = ("head-coverage check needs macOS; overlays use the configured corner, "
+                  "check framing yourself")
+        print(f"WARNING: {reason}", file=sys.stderr)
+        return CheckResult("visuals_head_clip", "warn", True, f"skipped: {reason}"), facts
     try:
         _helper_path()
     except (RuntimeError, subprocess.TimeoutExpired) as e:

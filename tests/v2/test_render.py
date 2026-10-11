@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from talkinghead.color import ColorProfile
+from talkinghead.color import ColorProfile, hdr_codec, hdr_pix_fmt
 from talkinghead.pipeline import render_memo_key
 from talkinghead.render import (
     AUDIO_RATE,
@@ -34,12 +34,6 @@ HLG = ColorProfile(primaries="bt2020", transfer="arib-std-b67", matrix="bt2020nc
                    range="tv", pix_fmt="yuv420p10le", hdr=True)
 
 
-def _has_encoder(name: str) -> bool:
-    out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                         capture_output=True, text=True).stdout
-    return name in out
-
-
 def _clip(path: Path, seconds: float = 6.0) -> None:
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error",
@@ -58,7 +52,7 @@ def _hlg_clip(path: Path, seconds: float = 3.0) -> None:
          "-vf", "format=yuv420p10le,"
                 "scale=out_color_matrix=bt2020nc:out_transfer=arib-std-b67:"
                 "out_primaries=bt2020:out_range=tv",
-         "-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-pix_fmt", "p010le",
+         "-c:v", hdr_codec(), "-profile:v", "main10", "-pix_fmt", hdr_pix_fmt(hdr_codec()),
          "-b:v", "20M", "-tag:v", "hvc1", *HLG.tags,
          "-c:a", "aac", "-b:a", "128k", str(path)],
         check=True,
@@ -206,8 +200,6 @@ def test_a_render_leaves_no_intermediates_behind(tmp_path: Path) -> None:
 
 
 def test_a_plan_mixing_hdr_and_sdr_sources_is_refused(tmp_path: Path) -> None:
-    if not _has_encoder("hevc_videotoolbox"):
-        pytest.skip("no hevc_videotoolbox in this ffmpeg")
     hdr, sdr = tmp_path / "hdr.mp4", tmp_path / "sdr.mp4"
     _hlg_clip(hdr, 1.0)
     _clip(sdr, 1.0)
@@ -237,8 +229,6 @@ def test_a_plan_cannot_relabel_pq_as_hlg(monkeypatch, tmp_path: Path) -> None:
 
 # -- colour ------------------------------------------------------------------
 def test_hdr_source_renders_ten_bit_hlg_with_equivalent_colour(tmp_path: Path) -> None:
-    if not _has_encoder("hevc_videotoolbox"):
-        pytest.skip("no hevc_videotoolbox in this ffmpeg")
     src = tmp_path / "src.mp4"
     _hlg_clip(src, 3.0)
     plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 3.0), [Cut(1.0, 1.5, "silence")])

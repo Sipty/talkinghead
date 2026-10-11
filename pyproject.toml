@@ -16,6 +16,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -25,6 +26,13 @@ dependencies = [
     "jsonschema>=4.26.0",
     # Apple-native Whisper: fastest on M-series, supports word_timestamps.
     "mlx-whisper>=0.4.0; sys_platform == 'darwin'",
+    # Off macOS: CTranslate2 Whisper with the same weights and word timestamps (no torch).
+    # Pinned to the upstream commit that handles empty word alignments (released 1.2.1 raises
+    # IndexError in find_alignment when Whisper hallucinates a segment past the clip end).
+    # Move back to a PyPI release once one includes SYSTRAN/faster-whisper#1460.
+    "faster-whisper @ git+https://github.com/SYSTRAN/faster-whisper@f6ef59b5e3b70d58e46641417894c3b73eaddb7a ; sys_platform != 'darwin'",
+    # PyAV 19 dropped the metadata_errors keyword that faster-whisper 1.2 passes to av.open.
+    "av>=18,<19; sys_platform != 'darwin'",
     # Envelopes, edge placement and the crossfaded audio join all run on numpy.
     "numpy>=2.0",
 ]
@@ -50,6 +58,10 @@ dev = ["pytest>=8.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/talkinghead"]
+
+# Needed for the commit-pinned faster-whisper above.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

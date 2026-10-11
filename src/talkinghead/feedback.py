@@ -1,6 +1,6 @@
-"""`talkinghead report`: turn what the owner heard into a fixture and a test.
+"""`talkinghead report`: turn what a reviewer heard into a fixture and a test.
 
-The owner watches the output and says "at 7:03 the word 'the' is clipped".
+A reviewer watches the output and says "at 7:03 the word 'the' is clipped".
 That instant is mapped back through the plan to the source, a short wav around
 it is cut into the fixtures directory, the ledger records the note with the
 cuts near it, and a test stub is scaffolded so the fix is proven by a test

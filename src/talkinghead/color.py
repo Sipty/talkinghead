@@ -6,6 +6,7 @@ edited HDR video drops stale Dolby Vision metadata and stays ten-bit.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import subprocess
@@ -18,11 +19,15 @@ from pathlib import Path
 HDR_TRANSFERS = ("arib-std-b67", "smpte2084")
 # The encoder the approved 10-bit HLG export used (M-series, videotoolbox). It
 # is bitrate-driven -- no crf -- and it is the encoder whose output was accepted
-# by eye, so it is the default. Overridable per call for machines without it.
+# by eye, so it is preferred wherever ffmpeg has it. Elsewhere libx265 writes the
+# same 10-bit stream in software (slower; same bitrate contract).
 HDR_CODEC = "hevc_videotoolbox"
+SOFTWARE_HDR_CODEC = "libx265"
 HDR_BITRATE = "20M"
 HDR_PROFILE = "main10"
+# Each encoder takes its own 10-bit layout: videotoolbox MSB-aligned p010, libx265 yuv420p10le.
 HDR_PIX_FMT = "p010le"
+SOFTWARE_HDR_PIX_FMT = "yuv420p10le"
 
 # BT.2408: SDR graphics white sits at 203 nits in an HDR program.
 GRAPHICS_WHITE_NITS = 203.0
@@ -107,17 +112,48 @@ def probe_color(path: str | Path) -> ColorProfile:
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _ffmpeg_encoders() -> frozenset[str]:
+    """Encoder names this ffmpeg build has (`ffmpeg -encoders`), read once per process."""
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    names: set[str] = set()
+    for line in out.splitlines():
+        parts = line.split()
+        # Table rows are "<flags> <name> <description>" with six-character flags; the legend
+        # (" V..... = Video") and the header and rule lines are not encoders.
+        if len(parts) >= 3 and len(parts[0]) == 6 and parts[1] != "=":
+            names.add(parts[1])
+    return frozenset(names)
+
+
+def hdr_codec() -> str:
+    """The 10-bit HEVC encoder for HDR output: VideoToolbox when this ffmpeg has it, else libx265."""
+    encoders = _ffmpeg_encoders()
+    if HDR_CODEC in encoders:
+        return HDR_CODEC
+    if SOFTWARE_HDR_CODEC in encoders:
+        return SOFTWARE_HDR_CODEC
+    raise RuntimeError("no 10-bit HEVC encoder in this ffmpeg (need hevc_videotoolbox or libx265): "
+                       "install an ffmpeg build with libx265, e.g. apt install ffmpeg")
+
+
+def hdr_pix_fmt(codec: str) -> str:
+    """The pixel format `codec` takes for 10-bit HDR output."""
+    return HDR_PIX_FMT if codec == HDR_CODEC else SOFTWARE_HDR_PIX_FMT
+
+
 def encode_args(profile: ColorProfile, *, crf: int = 18, preset: str = "medium",
-                codec: str = HDR_CODEC, bitrate: str = HDR_BITRATE) -> list[str]:
+                codec: str | None = None, bitrate: str = HDR_BITRATE) -> list[str]:
     """Video encode flags that produce `profile`, libx264 for SDR as before.
 
     HDR strips source metadata (`-map_metadata -1`): the output is a new grade
     of a re-timed picture, so the source's Dolby Vision record -- if any -- must
-    not survive it.
+    not survive it. `codec` defaults to the best HDR encoder this ffmpeg has.
     """
     if not profile.hdr:
         return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
-    return ["-c:v", codec, "-profile:v", HDR_PROFILE, "-pix_fmt", HDR_PIX_FMT,
+    codec = codec or hdr_codec()
+    return ["-c:v", codec, "-profile:v", HDR_PROFILE, "-pix_fmt", hdr_pix_fmt(codec),
             "-b:v", bitrate, "-tag:v", "hvc1", *profile.tags, "-map_metadata", "-1"]
 
 

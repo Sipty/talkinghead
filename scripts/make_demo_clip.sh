@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Synthetic, public-safe 30 s test clip for talkinghead.
 #
-# Speech is generated with macOS `say` and separated by generated silence; the
+# Speech is generated with macOS `say` (espeak-ng elsewhere) and separated by generated silence; the
 # picture is ffmpeg's testsrc2 at 1280x720, 30 fps. Output: H.264 video and AAC
 # audio, both exactly 30 s long. The script checks the ffprobe durations of the
 # streams and fails if they differ by more than 0.05 s.
 #
 # Usage: scripts/make_demo_clip.sh OUTPUT.mp4
-# Needs macOS `say`, ffmpeg and ffprobe on PATH.
+# Needs macOS `say` or espeak-ng (apt install espeak-ng on Linux), plus ffmpeg and ffprobe on PATH.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
@@ -25,14 +25,23 @@ lines=(
   "That is the end of the test clip."
 )
 
+ext=aiff
+if [ "$(uname -s)" != Darwin ]; then
+  command -v espeak-ng >/dev/null 2>&1 || { echo "espeak-ng not found: apt install espeak-ng" >&2; exit 2; }
+  ext=wav
+fi
+speak() {
+  if [ "$ext" = aiff ]; then say -o "$2" "$1"; else espeak-ng -w "$2" "$1"; fi
+}
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 inputs=()
 parts=()
 for i in "${!lines[@]}"; do
-  say -o "$work/s$i.aiff" "${lines[$i]}"
-  inputs+=(-i "$work/s$i.aiff")
+  speak "${lines[$i]}" "$work/s$i.$ext"
+  inputs+=(-i "$work/s$i.$ext")
   parts+=("[$i:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono[s$i]")
   if [ "$i" -lt $(( ${#lines[@]} - 1 )) ]; then
     parts+=("aevalsrc=0:s=48000:d=$pause:c=mono,aformat=sample_fmts=fltp:channel_layouts=mono[p$i]")

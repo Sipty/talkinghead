@@ -12,7 +12,7 @@ Design rules that make the pipeline reproducible:
 - A usage-limit error pauses the run (persisting progress) and resumes with
   exponential backoff; it never degrades the vote. A limit that outlasts the
   bounded wait, or a judge that cannot be reached at all (credential, model),
-  stops the run with JudgeUnavailable so the owner decides what happens next.
+  stops the run with JudgeUnavailable so the user decides what happens next.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ class RateLimited(JudgeError):
 class JudgeUnavailable(JudgeError):
     """The configured judge cannot answer (credential, model, or a lasting quota).
 
-    Never handled by switching judges: the run stops and the owner is told.
+    Never handled by switching judges: the run stops and the user is told.
     """
 
 
@@ -412,7 +412,7 @@ class PanelJudge:
     """A panel of judges: sample i is answered by member i mod n.
 
     Retake-heavy recordings benefit from more than one model on the vote, so
-    the owner can add panel members in the cook-local config. Members keep
+    the user can add panel members in a config file. Members keep
     their own names: prompt_sha hashes the panel name, so a panel run never
     replays a single-judge run's answers, and `last_responder` records which
     member actually produced a sample so the cache stays attributable.
@@ -532,7 +532,7 @@ def vote(
     """Sample the judge k times, replaying cached samples, pausing on limits.
 
     A limit still standing after `max_limit_waits` backoffs raises
-    JudgeUnavailable: the owner hears about it instead of the run idling.
+    JudgeUnavailable: the user hears about it instead of the run idling.
     """
     sha = prompt_sha(prompt, judge.name)
     if cache is not None:

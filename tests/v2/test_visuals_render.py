@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from talkinghead.color import ColorProfile, write_sdr_to_hdr_cube
+from talkinghead.color import ColorProfile, hdr_codec, hdr_pix_fmt, write_sdr_to_hdr_cube
 from talkinghead.visuals.render import _even, build_overlay_command, render_visuals
 from talkinghead.visuals.schedule import Placement
 
@@ -150,17 +150,11 @@ HLG = ColorProfile(primaries="bt2020", transfer="arib-std-b67", matrix="bt2020nc
                    range="tv", pix_fmt="yuv420p10le", hdr=True)
 
 
-def _has_encoder(name):
-    out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                         capture_output=True, text=True).stdout
-    return name in out
-
-
 def _bake_clip(path, seconds=2.0, hdr=True):
     """A base with audio: the bake copies that audio stream, so it must exist."""
     enc = (["-vf", "format=yuv420p10le,scale=out_color_matrix=bt2020nc:"
             "out_transfer=arib-std-b67:out_primaries=bt2020:out_range=tv",
-            "-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-pix_fmt", "p010le",
+            "-c:v", hdr_codec(), "-profile:v", "main10", "-pix_fmt", hdr_pix_fmt(hdr_codec()),
             "-b:v", "4M", "-tag:v", "hvc1", *HLG.tags] if hdr else
            ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
     subprocess.run(
@@ -201,8 +195,6 @@ def _luma(path, t, x, y, width=320):
 def test_an_hdr_base_keeps_its_ten_bit_hlg_through_the_bake(tmp_path):
     """The overlay pass used to re-encode any base to 8-bit yuv420p, silently
     dropping a 10-bit HLG cut to SDR. Colour and audio both survive now."""
-    if not _has_encoder("hevc_videotoolbox"):
-        pytest.skip("no hevc_videotoolbox in this ffmpeg")
     base, card, out = tmp_path / "base.mp4", tmp_path / "card.png", tmp_path / "out.mp4"
     _bake_clip(base)
     _card(card)
@@ -227,8 +219,6 @@ def test_an_sdr_card_lands_on_hlg_graphics_white_not_peak(tmp_path):
     conversion shows up. Composing with swscale's own `out_primaries` on top of
     the cube put pure red 60 levels high, which a white card cannot see.
     """
-    if not _has_encoder("hevc_videotoolbox"):
-        pytest.skip("no hevc_videotoolbox in this ffmpeg")
     base, out = tmp_path / "base.mp4", tmp_path / "out.mp4"
     white, red = tmp_path / "white.png", tmp_path / "red.png"
     _bake_clip(base, 4.0)
@@ -264,8 +254,6 @@ def test_without_a_conversion_an_hdr_base_refuses_sdr_overlays():
 
 def test_no_placements_on_an_hdr_base_is_a_stream_copy(tmp_path):
     """Nothing to draw means nothing to convert: the deliverable stays the cut."""
-    if not _has_encoder("hevc_videotoolbox"):
-        pytest.skip("no hevc_videotoolbox in this ffmpeg")
     base, out = tmp_path / "base.mp4", tmp_path / "out.mp4"
     _bake_clip(base)
     cmd = render_visuals(str(base), [], str(out))

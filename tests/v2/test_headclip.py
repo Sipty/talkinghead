@@ -64,3 +64,15 @@ def test_a_missing_swiftc_is_a_runtime_error(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr(headclip.shutil, "which", lambda name: None)
     with pytest.raises(RuntimeError, match="swiftc not found"):
         headclip._helper_path()
+
+
+def test_off_macos_the_head_check_is_skipped_with_a_warning(
+        monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    # Apple Vision is the only detector: elsewhere the cook must go on, loudly, without touching the video.
+    monkeypatch.setattr("sys.platform", "linux")
+    placements = [Placement("a", "x.png", 1.0, 3.0, 0.3)]
+    result, _facts = headclip.check_head_clip("missing.mp4", placements, margin=40, corner="top-right",
+                                              work_dir=tmp_path)
+    assert result.severity == "warn" and result.ok
+    assert result.detail.startswith("skipped: head-coverage check needs macOS")
+    assert "needs macOS" in capsys.readouterr().err

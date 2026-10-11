@@ -33,6 +33,7 @@ from pathlib import Path
 
 from . import __version__
 from .align import AlignResult, align, analyze
+from .color import hdr_codec, probe_color
 from .config import Config, config_path_from_env, load_config
 from .context import NeedsDecision
 from .judge import (
@@ -119,6 +120,9 @@ def build_transcriber(spec: str, *, scribe_response: str | Path | None = None,
         require_scribe_key()
         return ScribeTranscriber()
     if spec == "parakeet":
+        if sys.platform != "darwin":
+            raise RuntimeError("Parakeet (FluidAudio) runs on macOS only: use --transcriber whisper "
+                               "(whisper absorbs hesitations) or scribe")
         if not find_fluidaudio():
             raise RuntimeError(
                 "fluidaudiocli not found: Parakeet is required for machinery timing. Put it on PATH or set "
@@ -252,6 +256,16 @@ def _config_file(given: str | None) -> Path | None:
     return path
 
 
+def _check_hdr_encoder(video: Path) -> None:
+    """An HDR source needs a 10-bit HEVC encoder: refuse before any work, not after the cook."""
+    try:
+        hdr = probe_color(video).hdr
+    except RuntimeError:
+        return  # not a readable video: the pipeline reports that with its own message
+    if hdr:
+        hdr_codec()
+
+
 def _check_tools(*, visuals: bool = False) -> None:
     """Every external tool the command needs, checked before any work starts."""
     missing: list[str] = []
@@ -260,7 +274,7 @@ def _check_tools(*, visuals: bool = False) -> None:
     if visuals:
         if shutil.which("rsvg-convert") is None:
             missing.append("rsvg-convert (install: brew install librsvg, or pass --no-visuals)")
-        if shutil.which("swiftc") is None:
+        if sys.platform == "darwin" and shutil.which("swiftc") is None:
             missing.append("swiftc (install: xcode-select --install, or pass --no-visuals)")
     if missing:
         raise RuntimeError("missing tool(s): " + "; ".join(missing))
@@ -419,6 +433,8 @@ def _run_cmd(args: argparse.Namespace) -> int:
         raise ValueError(NO_TRANSCRIBER)
     visuals = cfg.visuals_enabled and not args.audio_only
     _check_tools(visuals=visuals)
+    if not args.audio_only:
+        _check_hdr_encoder(video)
     cfg = replace(cfg, model=judge_model(cfg.judge, cfg.model))
     guidelines_path = Path(cfg.guidelines)
     if not guidelines_path.is_absolute():

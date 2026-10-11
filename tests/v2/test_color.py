@@ -16,7 +16,10 @@ from talkinghead.color import (
     BT709_TO_BT2020,
     BT2020_TO_BT709,
     ColorProfile,
+    _ffmpeg_encoders,
     encode_args,
+    hdr_codec,
+    hdr_pix_fmt,
     hlg_to_linear,
     linear_to_hlg,
     linear_to_pq,
@@ -29,12 +32,6 @@ HLG = ColorProfile(primaries="bt2020", transfer="arib-std-b67", matrix="bt2020nc
                    range="tv", pix_fmt="yuv420p10le", hdr=True)
 
 
-def _encoder(name: str) -> bool:
-    out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                         capture_output=True, text=True).stdout
-    return name in out
-
-
 def _hlg_clip(path: Path, seconds: float = 2.0) -> None:
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
@@ -42,7 +39,7 @@ def _hlg_clip(path: Path, seconds: float = 2.0) -> None:
          "-vf", "format=yuv420p10le,"
                 "scale=out_color_matrix=bt2020nc:out_transfer=arib-std-b67:"
                 "out_primaries=bt2020:out_range=tv",
-         "-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-pix_fmt", "p010le",
+         "-c:v", hdr_codec(), "-profile:v", "main10", "-pix_fmt", hdr_pix_fmt(hdr_codec()),
          "-b:v", "4M", "-tag:v", "hvc1", *HLG.tags, str(path)],
         check=True)
 
@@ -98,8 +95,6 @@ def test_a_colour_outside_the_sdr_gamut_is_not_clipped_into_a_hue_shift():
 
 # -- probing -----------------------------------------------------------------
 def test_probe_reads_hdr_tags_and_bit_depth_from_a_real_stream(tmp_path: Path):
-    if not _encoder("hevc_videotoolbox"):
-        pytest.skip("no hevc_videotoolbox in this ffmpeg")
     src = tmp_path / "hlg.mp4"
     _hlg_clip(src)
     profile = probe_color(src)
@@ -123,7 +118,7 @@ def test_a_missing_file_is_an_error_not_an_sdr_guess(tmp_path: Path):
 
 
 def test_hdr_encode_carries_the_tags_and_strips_source_metadata():
-    args = encode_args(HLG, bitrate="20M")
+    args = encode_args(HLG, codec="hevc_videotoolbox", bitrate="20M")
     assert "-map_metadata" in args and args[args.index("-map_metadata") + 1] == "-1"
     assert args[args.index("-pix_fmt") + 1] == "p010le"
     assert args[args.index("-profile:v") + 1] == "main10"
@@ -172,3 +167,57 @@ def test_ffmpeg_applies_the_cube_with_the_order_it_was_written_in(tmp_path: Path
         luma = 0.2627 * signal[0] + 0.6780 * signal[1] + 0.0593 * signal[2]
         expected = 64 + 876 * luma
         assert abs(got - expected) <= 4, f"{name}: got {got}, expected {expected:.1f}"
+
+
+# -- encoder choice ----------------------------------------------------------
+def _with_encoders(monkeypatch: pytest.MonkeyPatch, names: set[str]) -> None:
+    monkeypatch.setattr("talkinghead.color._ffmpeg_encoders", lambda: frozenset(names))
+
+
+def test_hdr_output_prefers_videotoolbox_when_ffmpeg_has_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_encoders(monkeypatch, {"hevc_videotoolbox", "libx265"})
+    assert hdr_codec() == "hevc_videotoolbox"
+    assert encode_args(HLG)[:6] == ["-c:v", "hevc_videotoolbox", "-profile:v", "main10",
+                                    "-pix_fmt", "p010le"]
+
+
+def test_the_mac_hdr_encode_flags_are_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The approved look and the cached renders depend on these exact flags.
+    _with_encoders(monkeypatch, {"hevc_videotoolbox"})
+    assert encode_args(HLG) == ["-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-pix_fmt", "p010le",
+                                "-b:v", "20M", "-tag:v", "hvc1", *HLG.tags, "-map_metadata", "-1"]
+
+
+def test_hdr_output_falls_back_to_libx265_without_videotoolbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_encoders(monkeypatch, {"libx265", "libx264"})
+    assert hdr_codec() == "libx265"
+    args = encode_args(HLG)
+    assert args[:6] == ["-c:v", "libx265", "-profile:v", "main10", "-pix_fmt", "yuv420p10le"]
+    assert args[args.index("-color_trc") + 1] == "arib-std-b67"
+    assert args[args.index("-colorspace") + 1] == "bt2020nc"
+    assert args[args.index("-color_primaries") + 1] == "bt2020"
+
+
+def test_hdr_output_without_a_10_bit_encoder_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_encoders(monkeypatch, {"libx264"})
+    with pytest.raises(RuntimeError, match="no 10-bit HEVC encoder"):
+        encode_args(HLG)
+
+
+def test_sdr_output_never_asks_for_an_hdr_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_encoders(monkeypatch, set())
+    assert encode_args(ColorProfile())[:2] == ["-c:v", "libx264"]
+
+
+def test_ffmpeg_encoder_list_is_parsed_from_its_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    table = ("Encoders:\n V..... = Video\n A..... = Audio\n ------\n"
+             " V....D libx265              libx265 H.265 / HEVC (codec hevc)\n"
+             " V....D hevc_videotoolbox    VideoToolbox H.265 Encoder (codec hevc)\n"
+             " A....D aac                  AAC (Advanced Audio Coding)\n")
+    monkeypatch.setattr("talkinghead.color.subprocess.run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=table, stderr=""))
+    _ffmpeg_encoders.cache_clear()
+    try:
+        assert _ffmpeg_encoders() == frozenset({"libx265", "hevc_videotoolbox", "aac"})
+    finally:
+        _ffmpeg_encoders.cache_clear()

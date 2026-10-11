@@ -4,11 +4,10 @@ talkinghead turns one talking-head recording into a finished cut and a report th
 It removes material: warmup, retakes, digressions, long pauses and filler words.
 It does not write, re-record or reorder anything.
 An LLM judge that you choose makes the editorial calls, and every call is recorded with its vote count.
-The cutting, mastering and checks all run on your Mac.
+The cutting, mastering and checks all run on your own machine.
 
-It is for technical creators on macOS with Apple Silicon who record one take at a time and are comfortable in a terminal.
-Most people will run it through their own AI coding agent (Claude Code, Codex, omp or similar).
-This README is written so that an agent can set it up and run it from this file alone.
+Runs on macOS, Linux and Windows (WSL2).
+Point your AI coding agent at this README and it can set everything up.
 
 ## What you get
 
@@ -50,22 +49,63 @@ A real judge makes the editorial cuts.
 ## Requirements
 
 Run each check command in a terminal before you start.
+talkinghead runs on macOS on Apple Silicon, on Linux, and on Windows through WSL2 with Ubuntu.
+Native Windows is not supported.
 
-| requirement | needed | check command | how to get it |
+### Install the system tools
+
+**macOS (Apple Silicon, Homebrew)**
+
+```bash
+brew install ffmpeg librsvg uv
+swiftc --version || xcode-select --install   # for visuals; the installer opens a window
+```
+
+**Linux (Ubuntu or Debian)**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git ffmpeg librsvg2-bin espeak-ng fonts-liberation curl ca-certificates
+curl -LsSf https://astral.sh/uv/install.sh | sh
+. "$HOME/.local/bin/env"
+```
+
+Ubuntu 24.04's ffmpeg 6.1 is enough to run talkinghead, HDR sources included.
+Only the developer test suite needs ffmpeg 7.1 or newer, for its HDR test fixtures: install a newer static build if you run the tests (for example from https://github.com/BtbN/FFmpeg-Builds/releases).
+
+**Windows (WSL2)**
+
+1. In PowerShell as administrator, run `wsl --install -d Ubuntu`, then restart when asked.
+2. Open the Ubuntu app and follow the Linux steps there.
+3. Keep the clone in the Linux home (`~/talkinghead`). File access under `/mnt/c` is much slower.
+
+The Linux steps were verified on Ubuntu 24.04 with its stock ffmpeg 6.1, on both x86_64 and arm64, in Docker.
+WSL2 runs the same Ubuntu, but WSL2 itself has not been run end to end yet.
+
+### Check the tools and requirements
+
+| requirement | needed | check command | notes |
 |---|---|---|---|
-| macOS on Apple Silicon | always | `uname -sm` prints `Darwin arm64` | not applicable |
-| Homebrew | always | `brew --version` | https://brew.sh |
-| uv (Python project manager) | always | `uv --version` | `brew install uv` |
-| Python 3.11 or newer | always | `uv run python --version` | uv provides it; the project requires 3.11 or newer |
-| ffmpeg and ffprobe | always | `ffmpeg -version \| head -1` and `ffprobe -version \| head -1` | `brew install ffmpeg` |
-| Xcode command line tools (`swiftc`) | with visuals (the default) | `swiftc --version` | `xcode-select --install` |
-| librsvg (`rsvg-convert`) | with visuals (the default) | `rsvg-convert --version` | `brew install librsvg` |
+| ffmpeg and ffprobe | always | `ffmpeg -version \| head -1` and `ffprobe -version \| head -1` | 7.1 or newer for the test suite |
+| uv (Python project manager) | always | `uv --version` | |
+| Python 3.11 or newer | always | `uv run python --version` | on Linux and WSL2 use `uv sync --python 3.12`, since faster-whisper has no wheel for the newest Python releases |
+| librsvg (`rsvg-convert`) | with visuals (the default) | `rsvg-convert --version` | `brew install librsvg` or `apt install librsvg2-bin` |
+| `swiftc` | with visuals, macOS only | `swiftc --version` | `xcode-select --install` |
+| fonts | with visuals, Linux only | `fc-match "Liberation Sans"` | `apt install fonts-liberation` |
 | a judge | always | see [Judge values](#judge-values) | Claude Code, omp, or your own command |
 | a Scribe key (`ELEVENLABS_API_KEY` or `OPENROUTER_API_KEY`) | with `--transcriber scribe` | `echo "${ELEVENLABS_API_KEY:+elevenlabs set} ${OPENROUTER_API_KEY:+openrouter set}"` prints what is set; an empty line means neither is set | your provider account |
-| Whisper model (about 1.5 GB) | with `--transcriber whisper` | downloaded on first use; `du -sh ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo` shows it once it exists | the model comes from Hugging Face |
-| `fluidaudiocli` (Parakeet) | with `--transcriber parakeet` | `command -v fluidaudiocli` or `echo "$FLUIDAUDIO_BIN"` | a macOS build of FluidAudio's `fluidaudiocli`, on PATH or named in `FLUIDAUDIO_BIN` |
+| Whisper model (about 1.5 GB) | with `--transcriber whisper` | downloaded on first use; macOS: `du -sh ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo`; Linux and WSL2: `du -sh ~/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo` | the model comes from Hugging Face |
+| `fluidaudiocli` (Parakeet) | with `--transcriber parakeet`, macOS only | `command -v fluidaudiocli` or `echo "$FLUIDAUDIO_BIN"` | a macOS build of FluidAudio's `fluidaudiocli`, on PATH or named in `FLUIDAUDIO_BIN` |
 | Silero VAD (optional) | no | `uv run python -c "import silero_vad"` | `uv sync --extra vad` |
-| VideoToolbox HEVC encoder (for HDR sources) | only for 10-bit HLG or PQ sources | `ffmpeg -hide_banner -encoders \| grep hevc_videotoolbox` | included in the Homebrew ffmpeg build |
+| 10-bit HEVC encoder (for HDR sources) | only for 10-bit HLG or PQ sources | `ffmpeg -hide_banner -encoders \| grep -E "hevc_videotoolbox\|libx265"` | macOS uses `hevc_videotoolbox`; elsewhere `libx265`, which is slower |
+| espeak-ng | only for `scripts/make_demo_clip.sh` on Linux | `espeak-ng --version` | `apt install espeak-ng`; macOS uses `say` |
+
+Off macOS these things differ:
+
+- Whisper runs faster-whisper on the CPU with the same large-v3-turbo weights. Its transcripts carry a different version string, so the two engines never share a cache entry.
+- HDR output is encoded in software with libx265. It keeps the same 10-bit HLG or PQ tags.
+- The head-coverage check needs Apple Vision. Elsewhere it is skipped with a warning, so check the framing of overlays yourself.
+- Parakeet runs on macOS only.
 
 Without Silero VAD the mouth-noise pass falls back to envelope-only gap detection, and the run prints one stderr line that says so.
 That line is not an error.
@@ -76,21 +116,21 @@ Do the smoke test first.
 It needs no API keys and no judge subscription, so it proves the install works before anything is spent.
 
 ### 1. Install
+Install the system tools for your platform first: see [Requirements](#requirements).
 
 ```bash
-brew install ffmpeg uv
 git clone https://github.com/Sipty/talkinghead.git
 cd talkinghead
-uv sync
+uv sync          # on Linux and WSL2: uv sync --python 3.12
 uv run talkinghead --help
 ```
 
 talkinghead is not a pip package.
 Run every command in this README from the clone, with `uv run`.
 
-### 2. Smoke test (offline, under 7 minutes)
+### 2. Smoke test (offline, a few minutes)
 
-This makes a 30 second synthetic clip with macOS `say`, then cuts it with the dry-run judge and the Whisper transcriber.
+This makes a 30 second synthetic clip with macOS `say` (espeak-ng on Linux), then cuts it with the dry-run judge and the Whisper transcriber.
 The dry-run judge answers every prompt with the most conservative answer and calls no model.
 The first run downloads the Whisper model (about 1.5 GB) from Hugging Face.
 
@@ -189,10 +229,10 @@ If the ElevenLabs call fails with an HTTP or network error and an OpenRouter key
 A malformed response is an error on either route and is not retried on the other.
 The route that answered is recorded in the transcript's version.
 
-`parakeet` runs NVIDIA Parakeet TDT through `fluidaudiocli` on your Mac.
+`parakeet` runs NVIDIA Parakeet TDT through `fluidaudiocli` on macOS. It is macOS only.
 Its word timings are tighter, which matters for the machinery cuts, so it is the better local choice.
 
-`whisper` runs `mlx-community/whisper-large-v3-turbo` through mlx-whisper on your Mac.
+`whisper` runs `mlx-community/whisper-large-v3-turbo` through mlx-whisper on macOS. Elsewhere it runs the same model through faster-whisper on the CPU.
 The model is downloaded from Hugging Face once, on first use (about 1.5 GB).
 Whisper's word spans absorb some hesitations, and the CLI says so when you choose it.
 
@@ -232,7 +272,7 @@ Paste this into Claude Code, Codex, omp or another coding agent, from inside you
 
 ```
 Set up and run talkinghead from the README in this repository.
-1. Check every requirement with the check commands in the README's Requirements section, and install what is missing with the commands the README gives. Use Homebrew and uv only.
+1. Check every requirement with the check commands in the README's Requirements section, and install what is missing with the commands the README gives. Use the platform's package manager (Homebrew on macOS, apt on Linux) and uv only.
 2. Run the Quick start smoke test first, exactly as written, and report its exit code and the status line of report.md.
 3. Then ask me which judge (claude or a shell command) and which transcriber (scribe, parakeet or whisper) I want, and which API key environment variables I have set.
 4. Never write an API key into a file. Keep keys in environment variables in the shell you run commands in.
@@ -282,7 +322,10 @@ These are measured examples, not guarantees.
 
 | run | source | judge | transcriber | wall time | machine |
 |---|---|---|---|---|---|
-| smoke test (Quick start step 2) | 30 s | dry run | Whisper, `--no-visuals` | 36 s with a load average near 240; 400 s with a load average near 300. The maintainer measured 156 s earlier on a quiet machine | M-series Mac |
+| smoke test (Quick start step 2), Whisper model already downloaded | 30 s | dry run | Whisper, `--no-visuals` | 49 s | M-series Mac, fresh clone |
+| same | 30 s | dry run | Whisper, `--no-visuals` | 51 s | Ubuntu 24.04 arm64 in Docker on that Mac |
+| same | 30 s | dry run | Whisper, `--no-visuals` | 111 s | Ubuntu 24.04 x86_64, emulated in Docker (a native x86 machine is faster) |
+| smoke clip with visuals | 30 s | Claude Code (`claude`) | Whisper | 4 min 7 s | M-series Mac |
 | real cook | 13 min 38 s | LLM judge | Parakeet, transcript cache warm | 29 min | M5 |
 | real cook | 23 min 44 s | LLM judge | Parakeet, transcript cache warm | 50 min | M5 |
 
@@ -340,11 +383,11 @@ If it is right, pass `--allow-bad-align`.
 
 **`missing tool(s): ...`.**
 The message names each missing tool and its install command.
-For visuals, `rsvg-convert` (`brew install librsvg`) and `swiftc` (`xcode-select --install`) are needed.
+For visuals, `rsvg-convert` is needed (`brew install librsvg`, or `apt install librsvg2-bin`), and on macOS `swiftc` too (`xcode-select --install`).
 Pass `--no-visuals` to skip them.
 
 **`fluidaudiocli not found`.**
-Put `fluidaudiocli` on PATH or set `FLUIDAUDIO_BIN`, or use `--transcriber whisper`.
+Put `fluidaudiocli` on PATH or set `FLUIDAUDIO_BIN`, or use `--transcriber whisper`. Parakeet runs on macOS only.
 
 **`Neither ELEVENLABS_API_KEY nor OPENROUTER_API_KEY is set`.**
 Scribe needs one of them.
@@ -374,7 +417,7 @@ What leaves your Mac depends on your choices:
 - **Scribe** (`--transcriber scribe`): the 16 kHz mono audio of the whole recording goes to ElevenLabs or OpenRouter.
 - **The judge**: the transcript sentences, the guidelines, the topic and the candidate lists go to the judge's provider. With `claude` that is Anthropic, through Claude Code. With a shell command it is whatever provider that command calls. The dry-run judge sends nothing.
 - **Overlay research**: when visuals are on, the URLs the judge proposes are fetched, and pages are screenshotted with `chrome-devtools-axi` if it is installed. `--no-research` turns this off.
-- **Whisper and Parakeet**: the audio stays on your Mac. Whisper downloads its model from Hugging Face once.
+- **Whisper and Parakeet**: the audio stays on your machine. Whisper downloads its model from Hugging Face once.
 
 What stays local: the video, the master, the render, the verification and the report.
 
@@ -399,10 +442,16 @@ It holds the Scribe transcripts, so removing it means paying for those transcrip
 rm -rf ~/.cache/talkinghead
 ```
 
-Remove the Whisper model:
+Remove the Whisper model on macOS:
 
 ```bash
 rm -rf ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo
+```
+
+Remove the Whisper model on Linux and WSL2:
+
+```bash
+rm -rf ~/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo
 ```
 
 Remove the program: delete the clone, which includes the virtual environment in `.venv/`.
@@ -422,7 +471,10 @@ The spec is `<RUN_DIR>/board/board.json`. It holds the tablet recording's path, 
 
 ## Limitations
 
-- macOS on Apple Silicon only. mlx-whisper, the VideoToolbox HDR encoder, the Swift head-clip helper and macOS `say` (for the demo clip) are all Mac-specific.
+- Parakeet (`fluidaudiocli`) and the Apple Vision head-coverage check run on macOS only. Elsewhere the head check is skipped with a warning.
+- HDR output encodes in software with libx265 off macOS. It is slower than the Mac hardware encoder.
+- Windows runs through WSL2 only. Native Windows is not supported.
+- The Whisper engine differs by platform (mlx-whisper on macOS, faster-whisper elsewhere), so the two platforms do not share transcript caches.
 - The cut is only as good as the judge and the guidelines. Read the report before you publish, and watch the cut.
 - HDR is tested on 10-bit HLG sources. Other HDR formats are untested.
 - Long cooks are slow, and they cost money in judge calls and transcription.

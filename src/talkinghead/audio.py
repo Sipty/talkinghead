@@ -4,7 +4,7 @@ The dBFS/ZCR envelope reproduces `noise._envelope` exactly (the
 mouth-noise and burst thresholds were calibrated against it) but in numpy, so
 a 31-minute file takes seconds instead of minutes.
 
-`refine_word_bounds` answers the question the owner put plainly: "when do I
+`refine_word_bounds` answers a plain question: "when do I
 actually finish a word?" ASR stamps are unreliable at the edges in BOTH
 directions on this speaker (measured on the real source: a "Hello." stamped
 15.12-20.80 whose voice runs 15.46-15.82; "for" stamped to end at 219.76 whose

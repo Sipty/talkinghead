@@ -13,7 +13,7 @@ from typing import Iterable
 
 import numpy as np
 
-from ..color import HDR_BITRATE, HDR_CODEC, encode_args, probe_color, write_sdr_to_hdr_cube
+from ..color import HDR_BITRATE, encode_args, probe_color, write_sdr_to_hdr_cube
 from ..timeline import Segment
 from ..verify import display_size
 from .spec import BoardSpec, BoardView
@@ -337,7 +337,7 @@ def render_board(run_dir: Path, spec: BoardSpec, out: Path | None = None) -> Pat
            "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", f"{video_w}x{video_h}",
            "-framerate", f"{fps:.12g}", "-i", "pipe:0",
            "-filter_complex", ";".join(graph_parts), "-map", "[vout]", "-map", "0:a?",
-           *encode_args(color, crf=18, preset="medium", codec=HDR_CODEC, bitrate=HDR_BITRATE),
+           *encode_args(color, crf=18, preset="medium", bitrate=HDR_BITRATE),
            "-c:a", "copy", "-movflags", "+faststart", str(output)]
     encoder = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     assert encoder.stdin is not None

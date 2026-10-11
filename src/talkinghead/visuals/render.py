@@ -37,7 +37,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from ..color import HDR_BITRATE, HDR_CODEC, ColorProfile, encode_args, probe_color, write_sdr_to_hdr_cube
+from ..color import HDR_BITRATE, ColorProfile, encode_args, probe_color, write_sdr_to_hdr_cube
 from ..config import OVERLAY_CORNERS
 from .schedule import Placement
 
@@ -99,7 +99,7 @@ def build_overlay_command(
     margin: int = 40, fade: float = 0.4, width: int = 1920,
     base_duration: float | None = None, fps: int = 30, corner: str = "top-right",
     color: ColorProfile | None = None, cube: str | None = None,
-    hdr_codec: str = HDR_CODEC, hdr_bitrate: str = HDR_BITRATE,
+    hdr_codec: str | None = None, hdr_bitrate: str = HDR_BITRATE,
 ) -> list[str]:
     """`color` is the base's profile; None means SDR (`probe_color` in the caller).
 
@@ -159,7 +159,7 @@ def build_overlay_command(
 def render_visuals(base: str, placements: list[Placement], out: str, *,
                    margin: int = 40, fade: float = 0.4, width: int | None = None,
                    corner: str = "top-right",
-                   hdr_codec: str = HDR_CODEC, hdr_bitrate: str = HDR_BITRATE) -> str:
+                   hdr_codec: str | None = None, hdr_bitrate: str = HDR_BITRATE) -> str:
     """Overlay `placements` onto `base`. Width, duration and colour are PROBED."""
     color = probe_color(base)
     work: tempfile.TemporaryDirectory | None = None

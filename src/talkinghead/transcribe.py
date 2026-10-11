@@ -1,6 +1,7 @@
 """Stage 1: turn a video (or its wav) into timed words + audio truth.
 
-Two layers live here: the raw backends - mlx-whisper and FluidAudio/Parakeet -
+Two layers live here: the raw backends - whisper (mlx-whisper on macOS, faster-whisper
+elsewhere) and FluidAudio/Parakeet (macOS only) -
 plus the waveform helpers that read a wav directly (extract_wav,
 detect_silences), and the Transcriber interface above them, which transcribes
 once per audio hash. The transcript is the pipeline's frozen input: whatever
@@ -49,6 +50,8 @@ from typing import Protocol
 from .store import Cache, sha256_file
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+# The same large-v3-turbo weights for faster-whisper, used off macOS.
+FASTER_WHISPER_MODEL = "large-v3-turbo"
 
 # Biases whisper to transcribe fillers as tokens instead of swallowing them.
 FILLER_PROMPT = "Uh, um, uhh, uhm, erm, er, hmm, like, you know, I mean, actually."
@@ -104,6 +107,24 @@ def extract_wav(video_path: str) -> str:
     return fd.name
 
 
+def whisper_engine() -> str:
+    """Which whisper engine runs here: mlx-whisper on macOS, faster-whisper elsewhere.
+
+    Both decode the same large-v3-turbo weights. Their transcript versions differ
+    (see whisper_version), so a cache never mixes the two engines' output.
+    """
+    return "mlx" if sys.platform == "darwin" else "faster"
+
+
+def default_whisper_model() -> str:
+    return DEFAULT_MODEL if whisper_engine() == "mlx" else FASTER_WHISPER_MODEL
+
+
+def whisper_version(model: str) -> str:
+    """The transcript version string for `model` on this machine's whisper engine."""
+    return model if whisper_engine() == "mlx" else f"faster-whisper;{model}"
+
+
 def _mlx_whisper():
     """mlx-whisper is Apple-only: it loads only when the whisper backend runs."""
     try:
@@ -113,18 +134,60 @@ def _mlx_whisper():
     return mlx_whisper
 
 
-def transcribe(video_path: str, model: str = DEFAULT_MODEL, wav_path: str | None = None) -> tuple[float, list[Word]]:
-    """Transcribe video audio via mlx-whisper; returns (duration, words).
+_FASTER_MODELS: dict[str, object] = {}
+
+
+def _faster_whisper(model: str):
+    """faster-whisper (CTranslate2, no torch) model, loaded once per process."""
+    if model not in _FASTER_MODELS:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as e:
+            raise RuntimeError(f"the whisper backend needs faster-whisper, which did not import ({e})") from None
+        _FASTER_MODELS[model] = WhisperModel(model, device="auto", compute_type="default")
+    return _FASTER_MODELS[model]
+
+
+def _whisper_engine_handle(model: str):
+    """The loaded engine for `model`; RuntimeError when it is not installed."""
+    return _mlx_whisper() if whisper_engine() == "mlx" else _faster_whisper(model)
+
+
+def _whisper_decode(engine, audio: str, model: str, *, prompt: str | None = None,
+                    word_timestamps: bool = False) -> dict:
+    """One whisper decode in mlx-whisper's result shape: {"text", "segments": [{"text", "words"}]}.
+
+    Both engines are normalised to that shape so the callers parse one format.
+    """
+    if whisper_engine() == "mlx":
+        kwargs: dict = {"path_or_hf_repo": model}
+        if word_timestamps:
+            kwargs["word_timestamps"] = True
+        if prompt is not None:
+            kwargs["initial_prompt"] = prompt
+        return engine.transcribe(audio, **kwargs)
+    segments, _info = engine.transcribe(audio, word_timestamps=word_timestamps, initial_prompt=prompt)
+    out = []
+    for s in segments:
+        words = [{"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
+                 for w in (s.words or [])]
+        out.append({"text": s.text, "words": words})
+    return {"text": "".join(s["text"] for s in out), "segments": out}
+
+
+def transcribe(video_path: str, model: str | None = None, wav_path: str | None = None) -> tuple[float, list[Word]]:
+    """Transcribe video audio via this platform's whisper engine; returns (duration, words).
 
     When wav_path is given the audio is extracted there (caller owns cleanup);
     otherwise a temp wav is created and removed here.
     """
-    mlx_whisper = _mlx_whisper()
+    model = model or default_whisper_model()
+    engine = _whisper_engine_handle(model)
     duration = _probe_duration(video_path)
     own_wav = wav_path is None
     wav = wav_path or extract_wav(video_path)
     try:
-        result = mlx_whisper.transcribe(wav, path_or_hf_repo=model, word_timestamps=True)
+        result = _whisper_decode(engine, wav, model, word_timestamps=True)
     finally:
         if own_wav:
             Path(wav).unlink(missing_ok=True)
@@ -290,7 +353,7 @@ def _slice_wav(wav_path: str, start: float, end: float) -> str:
     return fd.name
 
 
-def _decode_slice(slice_path: str, backend: str, model: str) -> str:
+def _decode_slice(slice_path: str, backend: str, model: str | None) -> str:
     """One ASR decode of an already-sliced wav; "" when the engine fails."""
     if backend == "parakeet":
         try:
@@ -298,15 +361,16 @@ def _decode_slice(slice_path: str, backend: str, model: str) -> str:
         except (OSError, RuntimeError):
             return ""
         return " ".join(w.text for w in words).strip()
-    mlx_whisper = _mlx_whisper()
+    model = model or default_whisper_model()
+    engine = _whisper_engine_handle(model)
     try:
-        result = mlx_whisper.transcribe(slice_path, path_or_hf_repo=model, initial_prompt=FILLER_PROMPT)
+        result = _whisper_decode(engine, slice_path, model, prompt=FILLER_PROMPT)
     except (OSError, RuntimeError):
         return ""
     return str(result.get("text") or "").strip()
 
 
-def probe_filler(wav_path: str, start: float, end: float, model: str = DEFAULT_MODEL) -> str:
+def probe_filler(wav_path: str, start: float, end: float, model: str | None = None) -> str:
     """Re-transcribe one audio slice (used to classify glued filler chunks).
 
     Small slices are whisper's weak spot (it hallucinates real words over
@@ -323,7 +387,7 @@ def probe_filler(wav_path: str, start: float, end: float, model: str = DEFAULT_M
         Path(slice_path).unlink(missing_ok=True)
 
 
-def probe_words(wav_path: str, start: float, end: float, backend: str, model: str = DEFAULT_MODEL) -> str:
+def probe_words(wav_path: str, start: float, end: float, backend: str, model: str | None = None) -> str:
     """Re-transcribe ONE narrow slice with one named backend: the focused,
     independent second opinion on an uncertain boundary.
 
@@ -421,17 +485,17 @@ class ParakeetTranscriber:
 
 
 class WhisperTranscriber:
-    """mlx-whisper; explicit opt-in only (its word spans absorb hesitations)."""
+    """Whisper: mlx-whisper on macOS, faster-whisper elsewhere; explicit opt-in only (word spans absorb hesitations)."""
 
     name = "whisper"
     replays_fixed_source = False
 
-    def __init__(self, model: str = DEFAULT_MODEL) -> None:
-        self.model = model
-        self.version = model
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or default_whisper_model()
+        self.version = whisper_version(self.model)
 
     def transcribe(self, wav_path: str) -> Transcript:
-        # Module-level transcribe (mlx-whisper), not this method.
+        # Module-level transcribe (this platform's whisper engine), not this method.
         duration, words = transcribe(wav_path, model=self.model, wav_path=wav_path)
         return Transcript(self.name, self.version, duration, words)
 

@@ -34,6 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .color import hdr_codec, hdr_pix_fmt
 from .transcribe import prepare_audio
 
 # 16 kHz mono: plenty for speech envelopes and GCC-PHAT (sub-10 ms precision)
@@ -386,9 +387,10 @@ def _video_args(video_info: dict) -> list[str]:
     pix = video_info.get("pix_fmt", "")
     args: list[str] = []
     if pix in ("yuv420p10le", "p010le"):
-        # Hardware HEVC main10 keeps the HDR/HLG look of iPhone masters.
-        args += ["-c:v", "hevc_videotoolbox", "-profile:v", "main10",
-                 "-b:v", VIDEO_BITRATE, "-pix_fmt", "p010le", "-tag:v", "hvc1"]
+        # Hardware HEVC main10 keeps the HDR/HLG look of iPhone masters (libx265 off macOS).
+        codec = hdr_codec()
+        args += ["-c:v", codec, "-profile:v", "main10",
+                 "-b:v", VIDEO_BITRATE, "-pix_fmt", hdr_pix_fmt(codec), "-tag:v", "hvc1"]
     else:
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
     # Propagate source colour tagging; decoding into raw frames loses it.
