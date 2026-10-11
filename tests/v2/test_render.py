@@ -24,6 +24,7 @@ from talkinghead.render import (
     _run,
     _timeout,
     build_commands,
+    _join_gain_db,
     join_audio,
     render_audio_plan,
     render_plan,
@@ -402,3 +403,25 @@ def test_the_pass_timeout_scales_with_the_output_length() -> None:
     long = Plan.from_cuts(SourceInfo("main", "/x.mp4", "x", 3600.0), [])
     assert _timeout(short) == RENDER_MIN_TIMEOUT_SEC
     assert _timeout(long) == pytest.approx(3 * 3600.0)
+
+
+def test_a_voiced_join_gain_matches_the_incoming_side_then_eases_back_to_unity() -> None:
+    # Loud sine 0.4-0.9 s, quieter sine 1.1-1.6 s, silence around: a 6 dB step across the cut.
+    rate = AUDIO_RATE
+    x = np.zeros((2 * rate, 1), dtype=np.float32)
+    tt = np.arange(rate // 2) / rate
+    x[int(0.4 * rate):int(0.9 * rate), 0] = 0.5 * np.sin(2 * np.pi * 440 * tt)
+    x[int(1.1 * rate):int(1.6 * rate), 0] = 0.25 * np.sin(2 * np.pi * 440 * tt)
+    out = join_audio({"a": x}, [Segment("a", 0.4, 0.9), Segment("a", 1.1, 1.6)], 0.020)
+    join = round(0.5 * rate)                                 # output index of the join
+    pre, post = _rms_db(x[int(0.7 * rate):int(0.9 * rate)]), _rms_db(x[int(1.3 * rate):int(1.5 * rate)])
+    just_after = out[join + round(0.02 * rate):join + round(0.04 * rate)]
+    assert _rms_db(just_after) == pytest.approx(pre, abs=2.0)  # boosted to the outgoing level at the join
+    settled = out[join + round(0.4 * rate):join + round(0.5 * rate)]
+    assert _rms_db(settled) == pytest.approx(post, abs=0.5)    # unity again after the ramp
+
+
+def test_a_join_between_two_room_tone_sides_keeps_unity_gain() -> None:
+    rng = np.random.default_rng(0)
+    x = (0.001 * rng.standard_normal((AUDIO_RATE, 1))).astype(np.float32)
+    assert _join_gain_db(x, AUDIO_RATE // 4, x, AUDIO_RATE // 2) == 0.0

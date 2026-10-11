@@ -220,6 +220,12 @@ def _mono_window(src: np.ndarray, start: int, count: int) -> np.ndarray:
     return _take(src, start, count).mean(axis=1)
 
 
+def _source_window(src: np.ndarray, start: int, end: int) -> np.ndarray:
+    """Mono samples of the real source in [start, end). Never zero padding: room tone is read from actual audio."""
+    lo, hi = max(0, start), min(len(src), end)
+    return src[lo:hi].mean(axis=1) if hi > lo else np.zeros(0)
+
+
 def _block_db(mono: np.ndarray) -> np.ndarray:
     """RMS dBFS of consecutive GAIN_BLOCK_SEC blocks: the envelope the join grader reads."""
     block = round(GAIN_BLOCK_SEC * AUDIO_RATE)
@@ -244,8 +250,8 @@ def _join_gain_db(out_src: np.ndarray, out_end: int, in_src: np.ndarray, in_star
     if not len(pre) or not len(post):
         return 0.0
     room = float(np.percentile(np.concatenate([
-        _block_db(_mono_window(out_src, out_end - room_n, 2 * room_n)),
-        _block_db(_mono_window(in_src, in_start - room_n, 2 * room_n)),
+        _block_db(_source_window(out_src, out_end - room_n, out_end + room_n)),
+        _block_db(_source_window(in_src, in_start - room_n, in_start + room_n)),
     ]), 25))
     pre_db, post_db = float(pre.mean()), float(post.mean())
     if min(pre_db, post_db) <= room + GAIN_VOICED_ABOVE_ROOM_DB:
