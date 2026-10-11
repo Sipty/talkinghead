@@ -4,7 +4,9 @@
 #           one ffmpeg render -> machine verification -> visuals overlays.
 [project]
 name = "talkinghead"
-version = "1.0.0"
+# Placeholder: release versions are the git tags CI creates on every push (docs/releasing.md);
+# `talkinghead --version` reads them from the clone.
+version = "0.0.0"
 description = "Deterministic talking-head editor: one plan, one render, machine-verified."
 readme = "README.md"
 license = "MIT"

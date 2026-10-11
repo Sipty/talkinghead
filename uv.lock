@@ -1327,7 +1327,7 @@ wheels = [
 
 [[package]]
 name = "talkinghead"
-version = "1.0.0"
+version = "0.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "av", marker = "sys_platform != 'darwin'" },

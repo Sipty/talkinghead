@@ -1,0 +1,41 @@
+# Every push to main is a release: tag the next vX.Y.Z and publish a GitHub Release.
+# scripts/release.py picks the bump from `Release:` commit trailers (docs/releasing.md).
+name: release
+
+on:
+  push:
+    branches: [main]
+
+# One release at a time, in push order, so two quick pushes never race for the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history and tags: the bump reads every commit since the last tag
+
+      - name: Plan the release
+        id: plan
+        run: |
+          version=$(python3 scripts/release.py --notes-file "$RUNNER_TEMP/notes.md")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and publish
+        if: steps.plan.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "talkinghead $VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --title "talkinghead $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag

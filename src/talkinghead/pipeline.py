@@ -64,6 +64,17 @@ def settings_fps(config: Config) -> float:
     return float(config.fps)
 
 
+def _plan_memo_json(plan: Plan) -> str:
+    """The plan as the visuals memo sees it: without the talkinghead release version.
+
+    The version changes on every commit (git describe), and a new release must not
+    re-plan overlays for a cut whose plan is otherwise identical.
+    """
+    payload = json.loads(plan.to_json())
+    payload.get("provenance", {}).pop("talkinghead", None)
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
 def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = False) -> str:
     """The render memo's key: what actually determines the pixels and the audio.
 
@@ -391,7 +402,7 @@ def run_pipeline(
         assets = Path(assets_dir) if assets_dir else Path(config.assets_dir)
         avatar = avatar_fingerprint(config.visuals_avatar)
         payload = run.memo(
-            f"{prefix}visuals", {**base_inputs, **_stage_config(ctx, "visuals"), "plan": plan.to_json(),
+            f"{prefix}visuals", {**base_inputs, **_stage_config(ctx, "visuals"), "plan": _plan_memo_json(plan),
                                  "render_transcript": facts["render_transcript"],
                                  "assets": str(assets), "research": config.visuals_research,
                                  **({"avatar": avatar} if avatar else {})},

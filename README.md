@@ -499,6 +499,18 @@ The code is in `src/talkinghead/`.
 [`docs/architecture.md`](docs/architecture.md) maps each stage to its file.
 [`docs/render-proof.md`](docs/render-proof.md) records the measurement behind the render strategy.
 [`docs/noise-detector-spec.md`](docs/noise-detector-spec.md) records the mouth-noise calibration.
+[`docs/releasing.md`](docs/releasing.md) explains how every push becomes a tagged release and how the version number is chosen.
+
+## Updating
+
+Every change to talkinghead ships as a tagged release with notes on the repository's Releases page.
+`talkinghead --version` shows the version you have.
+To update a clone:
+
+```bash
+git pull
+uv sync
+```
 
 ## Glossary
 
