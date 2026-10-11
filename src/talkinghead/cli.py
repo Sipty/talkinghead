@@ -51,7 +51,7 @@ from .judge import (
     judge_model,
     preflight,
 )
-from .pipeline import PipelineError, edge_context, run_pipeline
+from .pipeline import PipelineError, edge_context, run_pipeline, settings_fps
 from .profile import profile_dir, read_preferences
 from .prompts import system_prompt
 from .render import RenderSettings, render_audio_plan, render_plan
@@ -506,7 +506,8 @@ def _command(args: argparse.Namespace) -> int:
         elif plan.provenance.get("audio_only"):
             raise ValueError(f"{args.plan} is an audio-only plan: pass --audio-only to render its WAV")
         else:
-            settings = RenderSettings(crf=cfg.crf, preset=cfg.preset, crossfade_sec=cfg.splice_crossfade_sec)
+            settings = RenderSettings(fps=settings_fps(cfg), crf=cfg.crf, preset=cfg.preset,
+                                      crossfade_sec=cfg.splice_crossfade_sec)
             cmd = render_plan(plan, args.out, settings)
         print(f"rendered {args.out}")
         print(cmd, file=sys.stderr)
