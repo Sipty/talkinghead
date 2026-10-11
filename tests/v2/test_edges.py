@@ -11,12 +11,14 @@ from talkinghead.edges import (
     EdgeContext,
     finalize_cuts,
     protect_words,
+    refine_joins,
     removed_words,
+    settle_filler_edges,
     snap_to_valleys,
     steer_out_of_moans,
     sweep_to_quiet,
 )
-from talkinghead.timeline import Cut
+from talkinghead.timeline import Cut, Plan, Segment, SourceInfo
 
 FLOOR = -50.0
 
@@ -437,3 +439,67 @@ def test_cuts_either_side_of_a_protected_event_are_never_fused_across_it() -> No
     assert len(fused) == 1                              # nothing between them: the pileup rule fuses
     kept = finalize_cuts([before, after], _ctx([], protected=[(1.0, 1.6), (1.4, 2.0)]))
     assert len(kept) == 2 and _survives(kept, (1.0, 2.0))
+
+
+# --- join refinement for hand-authored plans, and filler voiced runs ---
+
+
+def _two_segment_plan(cut: Cut, duration: float = 10.0) -> Plan:
+    source = SourceInfo("main", "rec.mov", "sha", duration)
+    return Plan(sources={"main": source}, main="main", cuts=[cut],
+                segments=[Segment("main", 0.0, cut.start), Segment("main", cut.end, duration)])
+
+
+def test_refine_joins_moves_an_edge_off_a_voiced_onset_into_the_quiet_before_it() -> None:
+    # Quiet gap 0.9-1.6 then "next" at 1.6: the join was placed on the onset.
+    words = [_w("so", 0.5, 0.9), _w("next", 1.6, 2.4)]
+    env = _levels([(0.5, 0.9, LOUD), (1.6, 2.4, LOUD)])
+    ctx = _ctx(words, env=env)
+    plan = _two_segment_plan(Cut(0.9, 1.6, "content", ""))
+    refined, (record,) = refine_joins(plan, ctx)
+    assert record["moved"] is True
+    assert record["cost_after"] < record["cost_before"]
+    assert 1.5 < refined.segments[1].start < 1.6        # moved into the quiet, not past "next"'s pad
+    assert [s.source for s in refined.segments] == ["main", "main"]
+
+
+def test_refine_joins_keeps_a_join_already_in_quiet_unchanged() -> None:
+    words = [_w("so", 0.5, 0.9), _w("next", 1.6, 2.4)]
+    env = _levels([(0.5, 0.9, LOUD), (1.6, 2.4, LOUD)])
+    plan = _two_segment_plan(Cut(1.0, 1.2, "content", ""))
+    refined, (record,) = refine_joins(plan, _ctx(words, env=env))
+    assert record["moved"] is False
+    assert refined.segments == plan.segments
+
+
+def test_refine_joins_keeps_both_kept_words_inside_their_pads() -> None:
+    words = [_w("so", 0.5, 0.9), _w("next", 1.6, 2.4)]
+    env = _levels([(0.5, 0.9, LOUD), (1.6, 2.4, LOUD)])
+    ctx = _ctx(words, env=env)
+    refined, _ = refine_joins(_two_segment_plan(Cut(0.9, 1.6, "content", "")), ctx)
+    assert refined.segments[0].end >= 0.9 - ctx.splice_valley_window - 1e-9
+    assert refined.segments[1].start >= 1.6 - ctx.splice_valley_window - 1e-9
+    assert refined.segments[1].start <= 1.6 - ctx.splice_pad + 1e-9
+
+
+def test_a_filler_on_voiced_audio_takes_its_voiced_run_into_the_cut() -> None:
+    # "um" is voiced from 1.1 (quiet before it, 1.0-1.1). The cut starts 0.1 s into that run.
+    words = [_w("so", 0.5, 1.0), _w("um", 1.2, 1.7), _w("next", 2.0, 2.4)]
+    env = _levels([(0.5, 1.0, LOUD), (1.1, 2.4, LOUD)])
+    ctx = _ctx(words, env=env)
+    (settled,) = settle_filler_edges([Cut(1.2, 1.7, "filler", "um")], ctx)
+    assert settled.start == pytest.approx(1.1, abs=1 / 30)
+    assert not joins.edge_state(env, FLOOR, settled.start, "left")["voiced"]
+    assert [w.text for w in removed_words(settled, ctx.words)] == ["um"]
+    assert ctx.dropped_fillers == 0
+
+
+def test_a_short_voiced_filler_is_dropped_only_when_the_drop_limit_allows_it() -> None:
+    # Continuous speech: nothing quiet beside "um" to walk into, so its edges stay voiced.
+    env = _levels([(0.5, 2.4, LOUD)])
+    ctx = _ctx(_speech_words(), env=env)
+    assert ctx.filler_keep_voiced_max == 0.0
+    assert len(settle_filler_edges([Cut(1.3, 1.7, "filler", "um")], ctx)) == 1   # default keeps every filler
+    ctx.filler_keep_voiced_max = 0.5
+    assert settle_filler_edges([Cut(1.3, 1.7, "filler", "um")], ctx) == []
+    assert ctx.dropped_fillers == 1

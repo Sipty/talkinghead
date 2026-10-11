@@ -22,8 +22,9 @@ from .timeline import Plan, Segment
 
 # Bumped whenever this module's pixels or audio would differ for an identical
 # plan and settings. Version 4: the picture is one CFR decode per source run
-# filtered by `select`, replacing per-segment trim branches.
-RENDERER_VERSION = 4
+# filtered by `select`, replacing per-segment trim branches. Version 5: voiced
+# joins are gain-matched (join_audio).
+RENDERER_VERSION = 5
 
 FINAL_AUDIO_FILTER = (
     "highpass=f=80,"
@@ -35,6 +36,14 @@ FINAL_AUDIO_FILTER = (
 AUDIO_RATE = 48000
 # Program start/end fade, so the first and last sample cannot click.
 EDGE_FADE_SEC = 0.010
+# Voiced-to-voiced joins: the incoming side is gain-matched to the outgoing level
+# and eases back to unity over GAIN_RAMP_SEC, the correction capped at
+# GAIN_MATCH_CAP_DB. Joins with a side at room tone keep unity gain.
+GAIN_MATCH_CAP_DB = 6.0
+GAIN_RAMP_SEC = 0.12
+GAIN_ROOM_WINDOW_SEC = 1.25
+GAIN_VOICED_ABOVE_ROOM_DB = 12.0
+GAIN_BLOCK_SEC = 0.005
 # ffmpeg's expression parser fails above 99 functions, so the removed spans are
 # split across chained `select` filters of at most this many terms each.
 SELECT_TERMS = 40
@@ -206,12 +215,52 @@ def _handles(segments: list[Segment], lengths: list[int], starts: list[int],
     return out
 
 
+def _mono_window(src: np.ndarray, start: int, count: int) -> np.ndarray:
+    """Mono samples of `count` frames from `start` (silence outside the source)."""
+    return _take(src, start, count).mean(axis=1)
+
+
+def _block_db(mono: np.ndarray) -> np.ndarray:
+    """RMS dBFS of consecutive GAIN_BLOCK_SEC blocks: the envelope the join grader reads."""
+    block = round(GAIN_BLOCK_SEC * AUDIO_RATE)
+    n = len(mono) // block
+    if n == 0:
+        return np.zeros(0)
+    b = mono[: n * block].reshape(n, block).astype(np.float64)
+    return 20 * np.log10(np.sqrt(np.mean(b * b, axis=1)) + 1e-12)
+
+
+def _join_gain_db(out_src: np.ndarray, out_end: int, in_src: np.ndarray, in_start: int) -> float:
+    """Gain (dB) matching the incoming side to the outgoing level at one join.
+
+    Each side is read 20-200 ms from the join, as the join grader reads it. The
+    gain is zero unless both sides are voiced above the local room tone, so
+    quiet joins keep unity gain.
+    """
+    rate = AUDIO_RATE
+    room_n = round(GAIN_ROOM_WINDOW_SEC * rate)
+    pre = _block_db(_mono_window(out_src, out_end - round(0.2 * rate), round(0.18 * rate)))
+    post = _block_db(_mono_window(in_src, in_start + round(0.02 * rate), round(0.18 * rate)))
+    if not len(pre) or not len(post):
+        return 0.0
+    room = float(np.percentile(np.concatenate([
+        _block_db(_mono_window(out_src, out_end - room_n, 2 * room_n)),
+        _block_db(_mono_window(in_src, in_start - room_n, 2 * room_n)),
+    ]), 25))
+    pre_db, post_db = float(pre.mean()), float(post.mean())
+    if min(pre_db, post_db) <= room + GAIN_VOICED_ABOVE_ROOM_DB:
+        return 0.0
+    return float(np.clip(pre_db - post_db, -GAIN_MATCH_CAP_DB, GAIN_MATCH_CAP_DB))
+
+
 def join_audio(sources: dict[str, np.ndarray], segments: list[Segment], crossfade_sec: float) -> np.ndarray:
     """Overlap-add the segments with equal-power crossfades at every join.
 
     The result is exactly round(sum(lengths) * rate) frames: output boundaries
     are rounded from the running total, not per segment, so rounding never
     accumulates. Program start and end get a short fade so they cannot click.
+    A voiced-to-voiced join gain-matches its incoming side to the outgoing level,
+    the correction easing back to unity over GAIN_RAMP_SEC.
     """
     if not segments:
         raise RuntimeError("nothing to render: the plan removes the whole video")
@@ -224,6 +273,8 @@ def join_audio(sources: dict[str, np.ndarray], segments: list[Segment], crossfad
     starts = [round(s.start * AUDIO_RATE) for s in segments]
     frames = {sid: len(a) for sid, a in sources.items()}
     half = _handles(segments, lengths, starts, frames, round(crossfade_sec * AUDIO_RATE))
+    gains = [_join_gain_db(sources[segments[i - 1].source], round(segments[i - 1].end * AUDIO_RATE),
+                           sources[segments[i].source], starts[i]) for i in range(1, len(segments))]
     channels = next(iter(sources.values())).shape[1]
     out = np.zeros((bounds[-1], channels), dtype=np.float32)
     edge = round(EDGE_FADE_SEC * AUDIO_RATE)
@@ -234,6 +285,11 @@ def join_audio(sources: dict[str, np.ndarray], segments: list[Segment], crossfad
         hl = half[i - 1] if i > 0 else 0
         hr = half[i] if i < len(half) else 0
         chunk = _take(sources[s.source], starts[i] - hl, n + hl + hr)
+        if i > 0 and gains[i - 1]:
+            # Chunk index hl is the join. Full gain through the crossfade, then unity.
+            after = np.maximum(np.arange(len(chunk)) - hl, 0)
+            ramp = np.clip(1.0 - after / (GAIN_RAMP_SEC * AUDIO_RATE), 0.0, 1.0)
+            chunk = chunk * np.power(10.0, gains[i - 1] * ramp / 20.0).astype(np.float32)[:, None]
         env = np.ones(len(chunk), dtype=np.float32)
         if hl:
             ramp = np.sin(np.pi / 2 * (np.arange(2 * hl) + 0.5) / (2 * hl))

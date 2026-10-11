@@ -25,7 +25,9 @@ Order matters and each step is a pure function:
                     between them fuse (a rapid-cut pileup reads as a glitch)
 11. snap_to_frames  edges onto the video frame grid, shrinking, so segments
                     are whole frames and audio/video cannot drift
-12. merge
+12. settle_filler_edges  short filler cuts still on voiced audio: the voiced run is
+                    walked into the cut, else the filler is dropped
+13. merge
 
 "Kept word" means a refined word not removed by the cut being placed. `pad`
 is the minimum distance a silence/noise edge keeps from any kept word.
@@ -56,12 +58,12 @@ target.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .audio import Envelope, RefinedWord
 from .derive import pause_boundary
-from .joins import edge_state
-from .timeline import MIN_CUT, Cut, merge_cuts
+from .joins import EDGE_CUT_MATCH_SEC, EDGE_VOICED_ABOVE_FLOOR_DB, edge_state
+from .timeline import MIN_CUT, Cut, Plan, Segment, merge_cuts
 
 # Reasons whose spans are meant to remove words (edges snap to word bounds).
 WORD_CUT_REASONS = frozenset({"retake", "restart", "filler", "content", "cold-open", "outro", "join"})
@@ -81,6 +83,16 @@ REPAIR_REASONS = frozenset({"retake", "restart"})
 # Valley candidates within this many dB of the quietest count as tied, and the
 # one nearest the original edge wins: envelope noise must not move an edge.
 VALLEY_TIE_DB = 0.25
+# Join cost (lower is better), summed over a cut's two edges. Each edge adds the
+# dip its crossfade blends away; the join adds the level step between the kept
+# audio before the start and after the end, and voiced audio the kept side holds
+# beside an edge (a chopped word, or an onset the crossfade would clip).
+LEVEL_STEP_WEIGHT = 0.5
+VOICED_EDGE_WEIGHT = 0.5
+# refine_joins moves a join only when its cost falls by more than this.
+JOIN_MOVE_MARGIN = 1.0
+# refine_joins searches each edge only this far from where the author put it.
+JOIN_MOVE_WINDOW = 0.04
 # pause_boundary only needs the topic threshold for pauses; a kept word's
 # punctuation alone decides the splice target.
 _NO_TOPIC = type("_NoTopic", (), {"pause_topic_above": math.inf})()
@@ -121,8 +133,9 @@ class EdgeContext:
     # earlier) so every kept segment is a whole number of frames and the
     # render cannot drift between audio and video. None = no snapping.
     fps: float | None = 30.0
-    # Filler cuts at most this long are dropped when an edge sits on voiced
-    # audio; 0 (the default) keeps every filler cut. See Config.
+    # Filler cuts at most this long are dropped when an edge still sits on voiced
+    # audio after the voiced run is walked in. 0 (the default) keeps every filler
+    # cut. See Config.
     filler_keep_voiced_max: float = 0.0
     # Set by finalize_cuts: filler cuts dropped for a voiced edge.
     dropped_fillers: int = 0
@@ -308,32 +321,106 @@ def _dip_score(db, fs: float, t: float, half: float) -> float:
     return float(db[lo:hi].mean())
 
 
-def _valley(ctx: EdgeContext, orig: float, lo: float, hi: float) -> float:
-    """The quietest frame-grid position within the valley window of `orig` and
-    inside [lo, hi]; ties go to the one nearest `orig`. `orig` when nothing fits."""
+def _grid_points(ctx: EdgeContext, orig: float, lo: float, hi: float, window: float | None = None) -> list[float]:
+    """Frame-grid positions within `window` (default the splice valley window) of `orig` and inside [lo, hi], skipping moans."""
     grid = ctx.fps or 1.0 / ctx.env.frame_sec
-    a = max(lo, orig - ctx.splice_valley_window)
-    b = min(hi, orig + ctx.splice_valley_window)
-    half = ctx.splice_crossfade_sec / 2
-    scored: list[tuple[float, float, float]] = []   # (score, distance, t)
+    reach = ctx.splice_valley_window if window is None else window
+    a = max(lo, orig - reach)
+    b = min(hi, orig + reach)
+    out: list[float] = []
     for k in range(math.ceil(a * grid - 1e-6), math.floor(b * grid + 1e-6) + 1):
         t = k / grid
-        if any(ms < t < me for ms, me in ctx.moans):
-            continue
-        scored.append((_dip_score(ctx.env.db, ctx.env.frame_sec, t, half), abs(t - orig), t))
-    if not scored:
-        return orig
-    best = min(s for s, _, _ in scored)
-    return min((d, t) for s, d, t in scored if s <= best + VALLEY_TIE_DB)[1]
+        if not any(ms < t < me for ms, me in ctx.moans):
+            out.append(t)
+    return out
+
+
+def _span_peak(db, fs: float, a: float, b: float) -> float:
+    """Loudest envelope frame (dBFS) over [a, b), at least one frame."""
+    n = len(db)
+    lo = min(max(0, round(a / fs)), n - 1)
+    hi = min(n, max(lo + 1, round(b / fs)))
+    return float(db[lo:hi].max())
+
+
+def _edge_terms(ctx: EdgeContext, t: float, side: str) -> tuple[float, float | None, float | None]:
+    """(dip, level, peak) of a cut edge at t. side "start": kept audio before t; "end": kept audio after t.
+
+    dip is what the crossfade blends away. level is the loudest 20-200 ms of kept
+    audio beside the join: the speech level, where a mean would also count the
+    pause the window holds. peak is the loudest 30 ms beside the edge: a chopped
+    word on the left, a voiced onset on the right. Level and peak are None where
+    no kept audio lies on that side (a head or tail trim is not a join).
+    """
+    db, fs = ctx.env.db, ctx.env.frame_sec
+    dip = _dip_score(db, fs, t, ctx.splice_crossfade_sec / 2)
+    if side == "start":
+        if t <= 0.02:
+            return dip, None, None
+        return dip, _span_peak(db, fs, t - 0.2, t - 0.02), _span_peak(db, fs, t - 0.03, t)
+    if t >= ctx.duration - 0.02:
+        return dip, None, None
+    return dip, _span_peak(db, fs, t + 0.02, t + 0.2), _span_peak(db, fs, t, t + 0.03)
+
+
+def _join_cost(ctx: EdgeContext, start: tuple[float, float | None, float | None],
+               end: tuple[float, float | None, float | None]) -> float:
+    """Level-aware cost of a join whose removed span starts and ends at these edge terms (lower is better)."""
+    voiced = ctx.floor + EDGE_VOICED_ABOVE_FLOOR_DB
+    ds, ls, ps = start
+    de, le, pe = end
+    step = abs(ls - le) if ls is not None and le is not None else 0.0
+    onset = sum(max(0.0, p - voiced) for p in (ps, pe) if p is not None)
+    return ds + de + LEVEL_STEP_WEIGHT * step + VOICED_EDGE_WEIGHT * onset
+
+
+def _pairs(ctx: EdgeContext, c: Cut, starts: list[float], ends: list[float]) -> list[tuple[float, float, float, float]]:
+    """(cost, distance from the original edges, start, end) for every admissible pair."""
+    s_terms = {t: _edge_terms(ctx, t, "start") for t in starts}
+    e_terms = {t: _edge_terms(ctx, t, "end") for t in ends}
+    out: list[tuple[float, float, float, float]] = []
+    for s in starts:
+        for e in ends:
+            if e - s >= ctx.min_cut:
+                out.append((_join_cost(ctx, s_terms[s], e_terms[e]), abs(s - c.start) + abs(e - c.end), s, e))
+    return out
+
+
+def _ranked(pairs: list[tuple[float, float, float, float]]) -> list[tuple[float, float, float, float]]:
+    """Cheapest first, except a near-tie (VALLEY_TIE_DB) goes to the pair nearest the original edges."""
+    if not pairs:
+        return []
+    best = min(p[0] for p in pairs)
+    tied = sorted((p for p in pairs if p[0] <= best + VALLEY_TIE_DB), key=lambda p: p[1])
+    rest = sorted((p for p in pairs if p[0] > best + VALLEY_TIE_DB), key=lambda p: (p[0], p[1]))
+    return tied + rest
+
+
+def _near(c: Cut, ctx: EdgeContext) -> list[RefinedWord]:
+    """The words any edge placement of this cut could remove or keep."""
+    return [w for w in ctx.words if w.end >= c.start - 1.0 and w.start <= c.end + 1.0]
+
+
+def _first_valid(c: Cut, removed: list[RefinedWord], ctx: EdgeContext,
+                 ranked: list[tuple[float, float, float, float]]) -> tuple[float, Cut] | None:
+    """The first pair in `ranked` that removes exactly the words `c` removes, with its cost."""
+    near, want = _near(c, ctx), [id(w) for w in removed]
+    for cost, _, s, e in ranked:
+        moved = Cut(s, e, c.reason, c.text, dict(c.provenance))
+        if [id(w) for w in removed_words(moved, near)] == want:
+            return cost, moved
+    return None
 
 
 def snap_to_valleys(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
-    """Word-removing cuts: move each edge to the quietest grid position nearby.
+    """Word-removing cuts: move both edges to the cheapest join nearby, jointly.
 
-    Outward it stops splice_pad short of kept audio (so a kept word's voiced
-    run is never entered); inward it stops where a removed word would drop
-    below REMOVE_COVERAGE. The set of removed words is unchanged, else the cut
-    is left as it was.
+    The pair is scored by _join_cost, so the level step across the join and
+    voiced audio beside an edge count, not only the dip at each edge. Outward
+    each edge stops splice_pad short of kept audio (a kept word's voiced run is
+    never entered); inward it stops where a removed word would drop below
+    REMOVE_COVERAGE. The set of removed words is unchanged, else the cut is left
+    as it was.
     """
     if len(ctx.env.db) == 0:
         return list(cuts)
@@ -345,11 +432,10 @@ def snap_to_valleys(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
         removed = removed_words(c, ctx.words)
         left, right = _kept_bounds(c, ctx)
         hi_start, lo_end = _inward_limits(c, removed, ctx)
-        start = _valley(ctx, c.start, left, hi_start)
-        end = _valley(ctx, c.end, max(lo_end, start + ctx.min_cut), right)
-        moved = Cut(start, end, c.reason, c.text, dict(c.provenance))
-        same = [id(w) for w in removed_words(moved, ctx.words)] == [id(w) for w in removed]
-        out.append(moved if same and end - start >= ctx.min_cut else c)
+        starts = _grid_points(ctx, c.start, left, hi_start) or [c.start]
+        ends = _grid_points(ctx, c.end, lo_end, right) or [c.end]
+        found = _first_valid(c, removed, ctx, _ranked(_pairs(ctx, c, starts, ends)))
+        out.append(found[1] if found else c)
     return out
 
 
@@ -545,25 +631,62 @@ def snap_to_frames(cuts: list[Cut], fps: float) -> list[Cut]:
     return out
 
 
-def drop_voiced_fillers(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
-    """Drop a short filler cut whose edge still sits on voiced audio (opt-in).
+def _grid_outward(t: float, grid: float | None, bound: float, *, later: bool) -> float:
+    """`t` moved onto the frame grid, later (end edge) or earlier (start edge), never past `bound`."""
+    if not grid:
+        return t
+    g = (math.ceil(t * grid - 1e-6) if later else math.floor(t * grid + 1e-6)) / grid
+    if later and g > bound:
+        g = math.floor(bound * grid + 1e-6) / grid
+    if not later and g < bound:
+        g = math.ceil(bound * grid - 1e-6) / grid
+    return g
 
-    With `filler_keep_voiced_max` above 0, a filler cut no longer than it is
-    spared when either edge is voiced, trading a remaining "uh" for a softer
-    splice. The default 0 keeps every filler cut. Same voiced-edge test as the
-    join verifier (joins.edge_state), so the two cannot disagree. Other
-    word-cut reasons remove words on purpose and keep their cuts.
+
+def _claim_voiced_run(c: Cut, ctx: EdgeContext) -> Cut:
+    """Walk each voiced edge of a cut outward over the voiced run beside it, stopping at quiet or the kept-word bound."""
+    db, fs = ctx.env.db, ctx.env.frame_sec
+    thr = ctx.floor + ctx.quiet_above_floor_db
+    left, right = _kept_bounds(c, ctx)
+    start, end = c.start, c.end
+    if edge_state(ctx.env, ctx.floor, start, "left")["voiced"]:
+        j = math.ceil(start / fs - 1e-9) - 1
+        while j >= 0 and db[j] > thr and j * fs >= left:
+            j -= 1
+        start = min(start, _grid_outward(max(left, (j + 1) * fs), ctx.fps, left, later=False))
+    if edge_state(ctx.env, ctx.floor, end, "right")["voiced"]:
+        j = int(end / fs)
+        while j < len(db) and db[j] > thr and j * fs <= right:
+            j += 1
+        end = max(end, _grid_outward(min(right, j * fs), ctx.fps, right, later=True))
+    return Cut(start, end, c.reason, c.text, dict(c.provenance))
+
+
+def settle_filler_edges(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    """Filler cuts whose edge still sits on voiced audio: take the voiced run into the cut.
+
+    The valley pass can settle a filler's edge on a dip inside the filler's own
+    voiced burst, leaving a syllable of it in the kept audio. The run beside each
+    voiced edge is walked into the cut, out to quiet or to the kept-word bound.
+    Only when `filler_keep_voiced_max` is above 0 is a short filler still on
+    voiced audio after that dropped instead: the kept word beside it owns that
+    voice. The default keeps every filler cut. Other word-cut reasons remove
+    words on purpose.
     """
     if len(ctx.env.db) == 0:
         return list(cuts)
     out: list[Cut] = []
     for c in cuts:
-        if (c.reason == "filler" and c.length <= ctx.filler_keep_voiced_max
-                and (edge_state(ctx.env, ctx.floor, c.start, "left")["voiced"]
-                     or edge_state(ctx.env, ctx.floor, c.end, "right")["voiced"])):
+        if c.reason != "filler":
+            out.append(c)
+            continue
+        settled = _claim_voiced_run(c, ctx)
+        still_voiced = (edge_state(ctx.env, ctx.floor, settled.start, "left")["voiced"]
+                        or edge_state(ctx.env, ctx.floor, settled.end, "right")["voiced"])
+        if still_voiced and c.length <= ctx.filler_keep_voiced_max:
             ctx.dropped_fillers += 1
             continue
-        out.append(c)
+        out.append(settled)
     return out
 
 
@@ -581,5 +704,55 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     cuts = flow_guard(cuts, ctx)
     if ctx.fps:
         cuts = snap_to_frames(cuts, ctx.fps)
-    cuts = drop_voiced_fillers(cuts, ctx)
+    cuts = settle_filler_edges(cuts, ctx)
     return merge_cuts(cuts, ctx.duration)
+
+
+def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
+                 window: float = JOIN_MOVE_WINDOW) -> tuple[Plan, list[dict]]:
+    """Re-place each same-recording join of an existing plan (hand-authored EDLs).
+
+    A join is the gap between two consecutive segments of one recording. Its
+    two edges are searched within `window` of their current position (kept
+    small so pauses keep their length) under the bounds and cost of
+    snap_to_valleys, so no kept word or voiced audio is cut and no removed word
+    is kept. A join moves only when its cost falls by more than `margin`: an
+    edge the author placed well stays where it is. Segment order, sources and
+    count are unchanged. Returns the plan and one record per join.
+    """
+    segments = list(plan.segments)
+    cuts = list(plan.cuts)
+    records: list[dict] = []
+    for i in range(1, len(segments)):
+        prev, seg = segments[i - 1], segments[i]
+        rec: dict = {"join": i, "old": [round(prev.end, 4), round(seg.start, 4)], "moved": False}
+        records.append(rec)
+        if plan.sources[prev.source].sha256 != plan.sources[seg.source].sha256 or seg.start <= prev.end:
+            rec["skipped"] = "not a forward join within one recording"
+            continue
+        k = next((k for k, c in enumerate(cuts)
+                  if abs(c.start - prev.end) <= EDGE_CUT_MATCH_SEC and abs(c.end - seg.start) <= EDGE_CUT_MATCH_SEC),
+                 None)
+        source_cut = cuts[k] if k is not None else Cut(prev.end, seg.start, "content")
+        c = Cut(prev.end, seg.start, source_cut.reason, source_cut.text, dict(source_cut.provenance))
+        removed = removed_words(c, _near(c, ctx))
+        left, right = _kept_bounds(c, ctx)
+        left = max(left, prev.start + ctx.min_cut)
+        right = min(right, seg.end - ctx.min_cut)
+        hi_start, lo_end = _inward_limits(c, removed, ctx)
+        here = _join_cost(ctx, _edge_terms(ctx, c.start, "start"), _edge_terms(ctx, c.end, "end"))
+        pairs = _pairs(ctx, c, _grid_points(ctx, c.start, left, hi_start, window),
+                       _grid_points(ctx, c.end, lo_end, right, window))
+        found = _first_valid(c, removed, ctx, sorted(pairs, key=lambda p: (p[0], p[1])))
+        rec["cost_before"] = round(here, 3)
+        rec["cost_after"] = None if found is None else round(found[0], 3)
+        if found is not None and found[0] < here - margin:
+            moved = found[1]
+            segments[i - 1] = Segment(prev.source, prev.start, moved.start)
+            segments[i] = Segment(seg.source, moved.end, seg.end)
+            if k is not None:
+                cuts[k] = moved
+            rec.update(moved=True, new=[round(moved.start, 4), round(moved.end, 4)])
+    for rec in records:
+        rec["t"] = round(sum(s.length for s in segments[: rec["join"]]), 4)
+    return replace(plan, segments=segments, cuts=cuts), records
