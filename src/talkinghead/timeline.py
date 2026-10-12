@@ -5,9 +5,14 @@ pipeline's deliverable and the only thing the renderer reads.
 
 Invariants:
 - Cut and Segment times are seconds on their SOURCE's timeline, half-open.
-- `Plan.segments` is the EDL: what the viewer sees, in order. For the main
-  source it is exactly the complement of `merge_cuts(plan.cuts)`; other
-  sources (a future intro, a sizzle reel) are appended by later stages.
+- `Plan.segments` is the EDL: what the viewer sees, in order. For a plan in
+  source order (every plan without restructure's reorder) it is exactly the
+  complement of `merge_cuts(plan.cuts)`. A reordered plan (restructure moved
+  topic blocks to the front) keeps the same cuts, and its segments are the
+  kept audio in output order: each source instant appears once, so as a set
+  they still equal the complement, but the list is not monotone in source
+  time. Other sources (a future intro, a sizzle reel) are appended by later
+  stages.
 - Serialisation is byte-stable: sorted keys, millisecond precision.
 """
 
@@ -25,7 +30,7 @@ FUSE_GAP = 0.0
 # When cuts fuse, the most informative reason survives: a structural decision
 # over a word-level judgment over a mechanical trim.
 REASON_RANK = {"cold-open": 3, "outro": 3, "retake": 2, "content": 2, "restart": 2, "join": 2,
-               "filler": 1, "noise": 1, "silence": 0}
+               "tangent": 2, "lead-in": 2, "filler": 1, "noise": 1, "silence": 0}
 
 
 @dataclass
@@ -101,6 +106,16 @@ def cuts_to_segments(cuts: list[Cut], source: SourceInfo) -> list[Segment]:
     if source.duration - cursor > MIN_CUT:
         segments.append(Segment(source.id, cursor, source.duration))
     return segments
+
+
+def in_source_order(segments: list[Segment]) -> bool:
+    """True when consecutive segments of one source run forward in source time.
+
+    A reordered plan (a block moved ahead of earlier material) jumps backwards
+    at some seam; anything that reads the picture or the transcript in one
+    forward pass must refuse it.
+    """
+    return all(b.source != a.source or b.start >= a.end for a, b in zip(segments, segments[1:]))
 
 
 @dataclass

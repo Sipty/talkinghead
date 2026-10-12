@@ -110,6 +110,37 @@ def _pacing(pacing: dict | None) -> list[str]:
     return rows
 
 
+def _blocks(plan: Plan) -> list[str]:
+    """Topic blocks: where each came from, where it landed in the cut, and why it was kept or dropped."""
+    blocks = plan.provenance.get("blocks")
+    if not blocks:
+        return []
+
+    def clean(text: object, width: int) -> str:
+        return " ".join(str(text).replace("|", "/").split())[:width]
+
+    rows = ["## Blocks", "", "| id | source | output | dur | title | interest/relevance | decision | reason | front |",
+            "|---|---|---|---|---|---|---|---|---|"]
+    kept_out = dropped_src = 0.0
+    n_kept = n_dropped = 0
+    for b in blocks:
+        s0, s1 = b["source"]
+        out = b["output"]
+        if b["decision"] == "drop":
+            n_dropped += 1
+            dropped_src += s1 - s0
+        else:
+            n_kept += 1
+            if out:
+                kept_out += out[1] - out[0]
+        out_txt = f"{_fmt(out[0])}-{_fmt(out[1])}" if out else "-"
+        rows.append(f"| {b['id']} | {_fmt(s0)}-{_fmt(s1)} | {out_txt} | {s1 - s0:.1f}s | {clean(b['title'], 60)} | "
+                    f"{b['interest']}/{b['relevance']} | {b['decision']} | {clean(b['reason'], 80)} | "
+                    f"{b['front_rank'] or ''} |")
+    rows += ["", f"Kept: {kept_out / 60:.2f} min of output in {n_kept} blocks. "
+                 f"Dropped: {dropped_src / 60:.2f} min of source in {n_dropped} blocks.", ""]
+    return rows
+
 
 def build_report(
     *, plan: Plan, notes: dict, checks: list[CheckResult], status: str, render_cmd: str | None,
@@ -150,6 +181,7 @@ def build_report(
     rows += [c.line() for c in checks] or ["- not run"]
     rows.append("")
     rows += _pacing(pacing)
+    rows += _blocks(plan)
     rows += ["## Cuts", "", "| start | end | dur | reason | votes | text |", "|---|---|---|---|---|---|"]
     for c in plan.cuts:
         votes = c.provenance.get("votes", "")

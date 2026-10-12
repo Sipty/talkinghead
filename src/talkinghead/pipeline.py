@@ -22,7 +22,7 @@ from .judge import Judge
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
 from .report import build_report
-from .stages import content, pauses, retakes, structure
+from .stages import content, pauses, restructure, retakes, structure
 from .store import Cache, RunDir, sha256_file, stable_key
 from .timeline import Cut, Plan
 from .transcribe import Transcriber
@@ -220,6 +220,8 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...] | None] = {
                               "sentence_split_pause"),
     "pauses": ("pause_above", "pause_keep", "pause_keep_ratio", "pause_cap_mid", "pause_cap_clause",
                "pause_cap_sentence", "pause_cap_topic", "pause_topic_above", "min_filler_dur"),
+    "restructure": ("restructure_brief", "restructure_window_sec", "restructure_context_sec",
+                    "restructure_votes", "restructure_front", "sentence_split_pause"),
 }
 
 
@@ -357,12 +359,32 @@ def run_pipeline(
 
     edge_ctx = edge_context(ctx, config, fps=None if audio_only else settings_fps(config))
     raw = structural + retake_cuts + content_cuts + pause_cuts
+    blocks: list[restructure.Block] = []
+    if config.restructure:
+        # Judged on the transcript the earlier cuts leave; the memo holds the blocks and their
+        # decisions, so a hand-edited decision is honoured on replay.
+        value = run.memo(
+            f"{prefix}restructure",
+            {**base_inputs, **_stage_config(ctx, "restructure"),
+             "raw": _digest([(c.start, c.end, c.reason) for c in raw]), "policy": restructure.policy()},
+            STAGE_VERSION_OVERRIDES.get("restructure", STAGE_VERSION),
+            lambda: restructure.run(ctx, raw), fresh=fresh,
+        )
+        blocks = restructure.blocks_from(value)
+        notes["restructure"] = restructure.summary(value)
+        raw = raw + restructure.block_cuts(blocks)
     cuts = finalize_cuts(raw, edge_ctx)
     plan = Plan.from_cuts(ctx.source, cuts)
     plan, joins = refine_joins(plan, edge_ctx)
+    if config.restructure:
+        plan = restructure.reorder(plan, blocks, edge_ctx)
     plan.decisions = decided
+    restructured = plan.provenance.get("blocks")
     plan.provenance = {**ctx.provenance, "raw_cuts": len(raw), "final_cuts": len(cuts), "demo": demo_minutes,
-                       **({"audio_only": True} if audio_only else {})}
+                       **({"audio_only": True} if audio_only else {}),
+                       **({"blocks": restructured} if restructured is not None else {})}
+    # Source time of the cold open. Under restructure's reordering the output opens on an opener, so this is
+    # a source instant only; it does not name where the hook sits in the cut.
     if decided.get("cold_open", {}).get("start", 0.0) > 0:
         plan.anchors["hook_start"] = float(decided["cold_open"]["start"])
     notes["edges"] = {"raw": len(raw), "final": len(cuts), "removed_sec": round(sum(c.length for c in cuts), 2),

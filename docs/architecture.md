@@ -49,6 +49,7 @@ the memos are hand-editable, so a re-key must not discard manual cuts without a 
 | 4 | retakes | which abandoned attempts and marked restarts are removed | judge, two passes | stage memo |
 | 5 | content | which whole sentences do not earn their runtime (and a coherence veto) | judge + coherence pass | stage memo |
 | 6 | pauses | pause trims, fillers, similarity-detected restarts, mouth noises | deterministic | stage memo |
+| 6b | restructure (opt-in: `restructure = true`) | topic blocks: which have no payoff (dropped), which open the cut (moved first) | judge: one sample per window, then one vote | stage memo, `plan.json` layout |
 | 7 | edges | final span of every cut | deterministic | `plan.json` |
 | 8 | render | picture and mastered audio, or mastered audio alone | deterministic | `final.mp4` or `final.wav`, `render.json` |
 | 9 | verify | did the render keep the plan's promises | deterministic, declarative checks | `verify/facts.json` |
@@ -176,6 +177,22 @@ pause of at least `pause_topic_above` (1.5 s) counts as a topic change, 0.80 s. 
 sit near the speaker's own p75-p90 natural pauses, so a topic change keeps a longer beat
 than a hesitation.
 
+### 6b. Restructure (judge, opt-in)
+
+`stages/restructure.py`, enabled by `restructure = true`. The kept transcript (sentences no earlier cut
+removes) is judged in windows of `restructure_window_sec` with `restructure_context_sec` of read-only context
+each side, one sample per window. The windows' answers partition the sentences into topic blocks. One vote over
+the block list (`restructure_votes` samples, strict majority) drops a block only when it has no payoff. Up to
+`restructure_front` blocks that stand without earlier context move to the front, Borda-ranked and majority-backed.
+Dropped blocks become `tangent` cuts; an opener's lead-in sentences become `lead-in` cuts. `restructure_brief`
+is the owner's brief, sent verbatim to both passes.
+
+Only after `refine_joins` does `restructure.reorder` split the plan at each block's quietest boundary and
+lay the openers first. The plan then runs out of source order: the picture and the audio join in list order,
+the join at a moved block's old place is a crossfade, and `plan.provenance["blocks"]` records each block's
+output range. Board overlays refuse such a plan. The stage memo holds the blocks with their decisions, so a
+hand-edited decision is honoured on replay.
+
 ### 7. Edges (deterministic)
 
 `edges.finalize_cuts` receives the union of all four stages and is the only place cut
@@ -191,7 +208,7 @@ Protected sound intervals are reconciled after cut fusion and snapping, so prese
 
 Edge clearance depends on the cut. `silence` and `noise` cuts keep `pad = pause_keep / 2`
 (0.15 s) from the neighbouring word, so a trimmed pause leaves room on both sides.
-Word-removing cuts (`content`, `retake`, `cold-open`, `outro`, `join`, `filler`) only keep
+Word-removing cuts (`content`, `retake`, `cold-open`, `outro`, `join`, `filler`, `tangent`, `lead-in`) only keep
 `splice_pad` (0.03 s) clear of kept voiced audio, because the join is crossfaded and the
 edge is placed by ear-relevant quiet rather than by a fixed margin.
 `snap_to_valleys` moves each such edge to the quietest envelope frame within

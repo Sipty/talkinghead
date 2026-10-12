@@ -184,6 +184,20 @@ class Config:
     # regardless. A `None` confidence -- the two tracks share no signal -- is
     # refused whatever this is set to.
     align_min_confidence: float = 3.0
+    # Restructure (opt-in): topic blocks are judged per window, blocks without a
+    # payoff are dropped and a few self-contained openers move to the front.
+    restructure: bool = False
+    # The owner's editorial brief for this video, given verbatim to every restructure judge.
+    restructure_brief: str = ""
+    # Window length and the read-only context kept on each side of a window's core (seconds).
+    restructure_window_sec: float = 600.0
+    restructure_context_sec: float = 120.0
+    # Samples in the global keep/drop + opener vote (each window is judged once).
+    restructure_votes: int = 3
+    # Most blocks that may move to the front.
+    restructure_front: int = 3
+    # Windows judged at once, only with a judge that is safe to call concurrently.
+    restructure_parallel: int = 4
 
     def validate(self) -> "Config":
         if self.agree > self.votes:
@@ -208,10 +222,20 @@ class Config:
             raise ValueError(
                 f"visuals_corner {self.visuals_corner!r} is not one of "
                 f"{', '.join(sorted(OVERLAY_CORNERS))}")
+        if self.restructure:
+            if self.restructure_window_sec <= 2 * self.restructure_context_sec:
+                raise ValueError("restructure_window_sec must exceed twice restructure_context_sec")
+        if self.restructure_votes < 1 or self.restructure_parallel < 1 or self.restructure_front < 0:
+            raise ValueError("restructure_votes and restructure_parallel must be at least 1; restructure_front at least 0")
         return self
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if not self.restructure:
+            # A disabled feature leaves no trace: plan provenance and memo keys stay as they were.
+            for k in [k for k in d if k == "restructure" or k.startswith("restructure_")]:
+                del d[k]
+        return d
 
 
 def config_path_from_env() -> Path | None:
