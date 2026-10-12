@@ -43,10 +43,11 @@ from .transcribe import (
 # 2x p15, which collapsed on long tracks).
 ANALYSIS_VERSION = 2
 
-# v1: laughter and unrecognised tags are protected whole (grown over quiet
-# edges); sigh/breath/mouth-noise tags are cut candidates. Part of every stage
+# v2: laughter and unrecognised tags are protected over their audible runs
+# (above the floor inside the stamp, grown over quiet edges), not the whole
+# stamp. Sigh/breath/mouth-noise tags are cut candidates. Part of every stage
 # memo key through the transcript provenance whenever a run has events.
-EVENT_POLICY_VERSION = 1
+EVENT_POLICY_VERSION = 2
 _LAUGH_STEMS = ("laugh", "chuckl", "giggl", "snicker", "chortl", "cackl", "guffaw", "titter", "haha", "hehe")
 _NOISE_STEMS = ("sigh", "breath", "inhale", "exhale", "smack", "tongue", "throat", "cough", "sniff",
                 "swallow", "gulp")
@@ -56,6 +57,11 @@ _NOISE_STEMS = ("sigh", "breath", "inhale", "exhale", "smack", "tongue", "throat
 EVENT_EDGE_ABOVE_FLOOR_DB = 3.0
 EVENT_GAP_SEC = 0.15
 EVENT_GROW_MAX_SEC = 0.6
+# Event bounds are read off a 50 ms smoothed envelope: per-5 ms RMS jitters by
+# about a dB, enough for a 3 dB edge to catch room tone. Audible runs closer
+# than EVENT_CORE_GAP_SEC are one laugh; quiet longer than that is not.
+EVENT_SMOOTH_SEC = 0.05
+EVENT_CORE_GAP_SEC = 0.5
 
 
 def classify_event(text: str) -> str:
@@ -88,14 +94,38 @@ def _reach(db: np.ndarray, threshold: float, frame_sec: float, t: float, limit: 
     return last
 
 
-def _grow_span(env, floor: float, start: float, end: float, words) -> tuple[float, float]:
+def _smoothed_db(db: np.ndarray, frame_sec: float) -> np.ndarray:
+    """dB of the mean power over EVENT_SMOOTH_SEC: the envelope event bounds are read from."""
+    if db.size == 0:
+        return db
+    n = max(1, round(EVENT_SMOOTH_SEC / frame_sec))
+    smooth = np.convolve(np.power(10.0, db / 10.0), np.ones(n) / n, mode="same")
+    return 10.0 * np.log10(np.maximum(smooth, 1e-30))
+
+
+def _audible_runs(db: np.ndarray, threshold: float, frame_sec: float, start: float, end: float
+                  ) -> list[tuple[float, float]]:
+    """Runs of frames above `threshold` inside [start, end]. Runs separated by
+    no more than EVENT_CORE_GAP_SEC of quiet are one run."""
+    i0, i1 = max(0, int(start / frame_sec)), min(len(db), int(np.ceil(end / frame_sec)))
+    idx = np.flatnonzero(db[i0:i1] > threshold)
+    if idx.size == 0:
+        return []
+    breaks = np.flatnonzero(np.diff(idx) - 1 > int(EVENT_CORE_GAP_SEC / frame_sec))
+    firsts = np.r_[idx[0], idx[breaks + 1]]
+    lasts = np.r_[idx[breaks], idx[-1]]
+    return [((i0 + a) * frame_sec, (i0 + b + 1) * frame_sec) for a, b in zip(firsts.tolist(), lasts.tolist())]
+
+
+def _grow_span(db: np.ndarray, frame_sec: float, duration: float, floor: float,
+               start: float, end: float, words) -> tuple[float, float]:
     prev_end = max((w.end for w in words if w.end <= start), default=0.0)
-    next_start = min((w.start for w in words if w.start >= end), default=env.duration)
+    next_start = min((w.start for w in words if w.start >= end), default=duration)
     lo = min(start, max(prev_end, start - EVENT_GROW_MAX_SEC))
     hi = max(end, min(next_start, end + EVENT_GROW_MAX_SEC))
     thr = floor + EVENT_EDGE_ABOVE_FLOOR_DB
-    new_start = _reach(env.db, thr, env.frame_sec, start, lo, -1) * env.frame_sec
-    new_end = (_reach(env.db, thr, env.frame_sec, end, hi, +1) + 1) * env.frame_sec
+    new_start = _reach(db, thr, frame_sec, start, lo, -1) * frame_sec
+    new_end = (_reach(db, thr, frame_sec, end, hi, +1) + 1) * frame_sec
     return min(start, new_start), max(end, min(new_end, hi))
 
 
@@ -136,18 +166,24 @@ def apply_event_policy(events: list[AudioEvent], words, env, floor: float
                        ) -> tuple[list[tuple[float, float]], list[Cut], list[dict]]:
     """(protected spans, noise-candidate cuts, per-event report rows).
 
-    Protected spans never overlap a candidate: a candidate is trimmed around
-    them and around every spoken word.
+    A laughter or unknown event protects only its audible runs: frames above
+    the floor inside its stamp, each grown over quiet edges. Quiet the stamp
+    covers is not protected, so pauses may still cut it. Protected spans never
+    overlap a candidate: a candidate is trimmed around them and around every
+    spoken word.
     """
+    db = _smoothed_db(env.db, env.frame_sec)
+    thr = floor + EVENT_EDGE_ABOVE_FLOOR_DB
     rows: list[dict] = []
     grown: list[tuple[float, float]] = []
     for e in events:
         kind = classify_event(e.text)
         row = {"text": e.text, "start": round(e.start, 3), "end": round(e.end, 3), "kind": kind}
         if kind != "noise":
-            s, t = _grow_span(env, floor, e.start, e.end, words)
-            grown.append((s, t))
-            row["protected"] = [round(s, 3), round(t, 3)]
+            runs = [_grow_span(db, env.frame_sec, env.duration, floor, s, t, words)
+                    for s, t in _audible_runs(db, thr, env.frame_sec, e.start, e.end)]
+            grown += runs
+            row["protected"] = [[round(s, 3), round(t, 3)] for s, t in runs]
         rows.append(row)
     protected = _union(grown)
     blocked = protected + [(w.start, w.end) for w in words]

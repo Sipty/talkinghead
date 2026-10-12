@@ -146,3 +146,52 @@ def test_a_tagged_event_survives_the_transcript_cache_into_the_next_analysis(tmp
     again = _audio_cook(tmp_path, "[chuckles]", cache=cache)   # same backend identity: cached transcript wins
     assert again.protected_spans == first.protected_spans != []
     assert again.provenance["transcript"]["events"] == first.provenance["transcript"]["events"]
+
+
+def _write_wav(path: Path, x: np.ndarray) -> None:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
+
+
+def _bounded_cook(tmp_path: Path, bursts: list[tuple[float, float, float]], stamp: tuple[float, float],
+                  tag: str = "[laughs]", digital: bool = False, total: float = 8.0):
+    """`total` s over room tone (0.0005 std) with white-noise bursts (start, end, amplitude) on top.
+    With `digital`, the stamp is zeroed except for the bursts; keep it under a quarter of `total`,
+    or the noise floor reads digital silence and room tone counts as audible. Words sit at 0.2-0.7
+    and in the last 1.5 s."""
+    rng = np.random.default_rng(11)
+    t = np.arange(int(total * SR)) / SR
+    x = 0.0005 * rng.standard_normal(t.size)
+    if digital:
+        x[(t >= stamp[0]) & (t < stamp[1])] = 0.0
+    for a, b, amp in bursts:
+        m = (t >= a) & (t < b)
+        x[m] += amp * rng.standard_normal(m.sum())
+    wav = tmp_path / "talk.wav"
+    _write_wav(wav, x)
+    backend = FakeTranscriber([Word("one.", 0.2, 0.7, 1.0), Word("two.", total - 1.5, total - 1.0, 1.0)],
+                              duration=total, name="bounded", events=[AudioEvent(tag, *stamp)])
+    return analyze(str(wav), tmp_path / "run", Config(), backend, FakeJudge([]),
+                   cache=Cache(tmp_path / "cache"), guidelines="G", audio_only=True)
+
+
+def test_a_long_laugh_over_digital_silence_protects_only_the_audible_parts(tmp_path: Path) -> None:
+    ctx = _bounded_cook(tmp_path, [(2.0, 2.5, 0.2), (4.0, 4.4, 0.2)], stamp=(1.0, 6.0), digital=True, total=24.0)
+    assert len(ctx.protected_spans) == 2                  # one span per audible laugh, not the 5 s stamp
+    (s1, e1), (s2, e2) = ctx.protected_spans
+    assert 1.9 <= s1 <= 2.05 and 2.45 <= e1 <= 2.7
+    assert 3.95 <= s2 <= 4.05 and 4.35 <= e2 <= 4.6
+    assert not any(s < 3.8 and 2.8 < e for s, e in ctx.protected_spans)   # the dead air between stays cuttable
+    assert ctx.provenance["audio_events"][0]["protected"] == [[round(s1, 3), round(e1, 3)],
+                                                             [round(s2, 3), round(e2, 3)]]
+
+
+def test_a_real_laugh_keeps_its_soft_tail(tmp_path: Path) -> None:
+    ctx = _bounded_cook(tmp_path, [(2.0, 2.5, 0.2), (2.5, 3.5, 0.02)], stamp=(1.5, 4.0))
+    assert len(ctx.protected_spans) == 1
+    s, e = ctx.protected_spans[0]
+    assert s <= 2.05                                      # the loud core is kept whole
+    assert 3.45 <= e <= 3.75                              # the soft decay is kept; the silence after it is not
