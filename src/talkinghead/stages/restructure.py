@@ -30,7 +30,7 @@ from typing import Any
 from ..context import Context
 from ..edges import EdgeContext
 from ..judge import ClaudeCodeJudge, Judge, ShellJudge, vote
-from ..prompts import sentence_table, with_preferences
+from ..prompts import sentence_table, with_conversation, with_preferences
 from ..semantic import Sentence
 from ..timeline import Cut, Plan, Segment
 
@@ -288,13 +288,13 @@ def merge_windows(sents: list[Sentence], judged: list[dict], sid_index: dict[str
     return blocks
 
 
-def _attach_shares(words, blocks: list[Block]) -> None:
-    """Each block's speaker share of its words, when the transcript carries speaker labels."""
+def _attach_shares(words, blocks: list[Block], names: dict[str, str]) -> None:
+    """Each block's speaker share of its words, keyed by display name, when the transcript carries labels."""
     spoken = [w for w in words if w.speaker is not None]
     if not spoken:
         return
     for b in blocks:
-        counts = Counter(w.speaker for w in spoken if b.start <= (w.start + w.end) / 2 < b.end)
+        counts = Counter(names.get(w.speaker, w.speaker) for w in spoken if b.start <= (w.start + w.end) / 2 < b.end)
         total = sum(counts.values())
         b.share = {k: round(v / total, 2) for k, v in sorted(counts.items())} if total else {}
 
@@ -395,15 +395,17 @@ def run(ctx: Context, raw: list[Cut]) -> dict:
     sents = kept_sentences(ctx, raw)
     sid_index = {s.sid: i for i, s in enumerate(sents)}
     wins = windows(sents, cfg.restructure_window_sec, cfg.restructure_context_sec)
-    prompts = [with_preferences(window_prompt(sents, w, cfg.restructure_brief, ctx.topic), ctx.preferences)
+    prompts = [with_preferences(with_conversation(window_prompt(sents, w, cfg.restructure_brief, ctx.topic),
+                                                  ctx.conversation), ctx.preferences)
                for w in wins]
     judged = [j for lst in _judge_windows(ctx, sents, sid_index, wins, prompts) for j in lst]
     blocks = merge_windows(sents, judged, sid_index)
-    _attach_shares(ctx.words, blocks)
+    _attach_shares(ctx.words, blocks, cfg.speaker_names)
     value: dict = {"windows": len(wins), "global_prompt_sha": None}
     votable = [b for b in blocks if b.judged]
     if votable:
-        prompt = with_preferences(keep_prompt(votable, cfg.restructure_brief, ctx.topic, cfg.restructure_front),
+        prompt = with_preferences(with_conversation(keep_prompt(votable, cfg.restructure_brief, ctx.topic,
+                                                                cfg.restructure_front), ctx.conversation),
                                   ctx.preferences)
         result = vote(ctx.judge, prompt, KEEP_SCHEMA, k=cfg.restructure_votes, cache=ctx.llm_cache)
         _decide(votable, result.responses, cfg.restructure_front)
