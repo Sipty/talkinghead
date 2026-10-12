@@ -37,6 +37,8 @@ class Sentence:
     start: float
     end: float
     text: str
+    # Display name of the one speaker who says the whole sentence; None when unlabelled.
+    speaker: str | None = None
 
 
 def run_llm(cmd: str, prompt: str) -> str:

@@ -9,7 +9,7 @@ from collections import Counter
 from ..coherence import build_coherence_prompt
 from ..context import Context
 from ..judge import vote, vote_items
-from ..prompts import COHERENCE_SCHEMA, CONTENT_SCHEMA, content_prompt, with_preferences
+from ..prompts import COHERENCE_SCHEMA, CONTENT_SCHEMA, content_prompt, with_conversation, with_preferences
 from ..timeline import Cut
 
 
@@ -51,7 +51,8 @@ def run(ctx: Context, existing: list[Cut]) -> tuple[list[Cut], dict]:
         return [], notes
     sents = ctx.sentences()
     by_sid = {s.sid: i for i, s in enumerate(sents)}
-    result = vote(ctx.judge, with_preferences(content_prompt(sents, ctx.topic), ctx.preferences), CONTENT_SCHEMA,
+    prompt = with_preferences(with_conversation(content_prompt(sents, ctx.topic), ctx.conversation), ctx.preferences)
+    result = vote(ctx.judge, prompt, CONTENT_SCHEMA,
                   k=ctx.config.votes, cache=ctx.llm_cache)
     coverage: Counter[int] = Counter()
     reasons: dict[int, Counter] = {}
@@ -83,7 +84,8 @@ def run(ctx: Context, existing: list[Cut]) -> tuple[list[Cut], dict]:
     if cuts:
         prompt = build_coherence_prompt(sents, cuts, ctx.topic or "")
         prompt = prompt.replace("Respond with JSON only:", "TASK: COHERENCE\nRespond with JSON only:")
-        coh = vote(ctx.judge, with_preferences(prompt, ctx.preferences), COHERENCE_SCHEMA,
+        coh_prompt = with_preferences(with_conversation(prompt, ctx.conversation), ctx.preferences)
+        coh = vote(ctx.judge, coh_prompt, COHERENCE_SCHEMA,
                    k=ctx.config.votes, cache=ctx.llm_cache)
         vetoes = vote_items(
             [{"v": [{"id": str(e["id"]), "x": "veto"} for e in r.get("vetoes", [])]} for r in coh.responses],

@@ -29,7 +29,9 @@ Order matters and each step is a pure function:
                     are whole frames and audio/video cannot drift
 13. settle_filler_edges  short filler cuts still on voiced audio: the voiced run is
                     walked into the cut, else the filler is dropped
-14. merge
+14. spare_other_speaker  two-speaker recordings only: a mechanical cut shrinks away from
+                    words spoken by someone other than its own target (runs first, and last)
+15. merge
 
 "Kept word" means a refined word not removed by the cut being placed. `pad`
 is the minimum distance a silence/noise edge keeps from any kept word.
@@ -69,6 +71,7 @@ from .audio import Envelope, RefinedWord
 from .derive import pause_boundary
 from .joins import EDGE_CUT_MATCH_SEC, EDGE_VOICED_ABOVE_FLOOR_DB, edge_state
 from .timeline import MIN_CUT, Cut, Plan, Segment, merge_cuts
+from .types import MECHANICAL_REASONS
 
 # Reasons whose spans are meant to remove words (edges snap to word bounds).
 WORD_CUT_REASONS = frozenset({"retake", "restart", "filler", "content", "cold-open", "outro", "join"})
@@ -147,6 +150,8 @@ class EdgeContext:
     filler_keep_voiced_max: float = 0.0
     # Set by finalize_cuts: filler cuts dropped for a voiced edge.
     dropped_fillers: int = 0
+    # Set by finalize_cuts: mechanical cuts shrunk or dropped to spare another speaker's words.
+    spared_other_speaker: int = 0
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
@@ -217,6 +222,12 @@ def _kept_bounds(cut: Cut, ctx: EdgeContext) -> tuple[float, float]:
     return left, right
 
 
+def _crosstalk(w: RefinedWord, words: list[RefinedWord]) -> bool:
+    """Whether a word of another speaker overlaps `w` in time."""
+    return any(o.speaker is not None and o.speaker != w.speaker and o.start < w.end and o.end > w.start
+               for o in words)
+
+
 def protect_words(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     out: list[Cut] = []
     for c in cuts:
@@ -243,6 +254,15 @@ def protect_words(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
                 if s - pad - start > MIN_CUT:
                     out.append(Cut(start, s - pad, c.reason, c.text, dict(c.provenance)))
                 start = e + pad
+        # Cross-talk: a kept word of another speaker can push an edge into a removed word of this cut.
+        # That word is then left whole (the cut stops at its near side), never clipped mid-word.
+        for w in removed:
+            if w.speaker is None or not _crosstalk(w, ctx.words):
+                continue
+            if w.start < end < w.end and start <= w.start:
+                end = w.start
+            elif w.start < start < w.end and end >= w.end:
+                start = w.end
         # Keep pad from adjacent kept audio even when not overlapping.
         for s, e in guards:
             if 0 <= start - e < pad:
@@ -738,9 +758,79 @@ def settle_filler_edges(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     return out
 
 
+def _cut_speaker(c: Cut, words: list[RefinedWord]) -> str | None:
+    """Speaker of the labelled word a cut removes that it overlaps most; None when it removes none."""
+    best, speaker = 0.0, None
+    for w in removed_words(c, words):
+        if w.speaker is None:
+            continue
+        overlap = _overlap(c.start, c.end, w.start, w.end)
+        if speaker is None or overlap > best:
+            best, speaker = overlap, w.speaker
+    return speaker
+
+
+def _subtract(start: float, end: float, holes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """[start, end) minus sorted, disjoint `holes`: the pieces left."""
+    pieces: list[tuple[float, float]] = []
+    cur = start
+    for s, e in holes:
+        if e <= cur:
+            continue
+        if s >= end:
+            break
+        if s > cur:
+            pieces.append((cur, s))
+        cur = max(cur, e)
+    if cur < end:
+        pieces.append((cur, end))
+    return pieces
+
+
+# A mechanical cut's target speaker, carried in its provenance so the guard's second run judges it as placed.
+SPEAKER_KEY = "speaker"
+
+
+def spare_other_speaker(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    """A mechanical cut never removes or clips words said by someone other than its own target.
+
+    Another speaker's words are holes in the cut, padded as a kept word is; what remains is kept
+    when it is still at least min_cut long. Cuts that touch no such word keep their values, so a
+    single-speaker recording is untouched.
+    """
+    out: list[Cut] = []
+    for c in cuts:
+        if c.reason not in MECHANICAL_REASONS:
+            out.append(c)
+            continue
+        target = c.provenance[SPEAKER_KEY] if SPEAKER_KEY in c.provenance else _cut_speaker(c, ctx.words)
+        prov = dict(c.provenance)
+        if target is not None:
+            prov[SPEAKER_KEY] = target
+        pad = _pad(c.reason, ctx)
+        holes = _coalesce([
+            (w.start - pad, w.end + pad) for w in ctx.words
+            if w.speaker is not None and w.speaker != target and w.end > w.start
+            and w.end + pad > c.start and w.start - pad < c.end
+        ])
+        if not holes:
+            out.append(Cut(c.start, c.end, c.reason, c.text, prov))
+            continue
+        ctx.spared_other_speaker += 1
+        for a, b in _subtract(c.start, c.end, holes):
+            if ctx.fps:
+                a = math.ceil(a * ctx.fps - 1e-6) / ctx.fps
+                b = math.floor(b * ctx.fps + 1e-6) / ctx.fps
+            if b - a >= ctx.min_cut:
+                out.append(Cut(a, b, c.reason, c.text, dict(prov)))
+    return out
+
+
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.dropped_fillers = 0
+    ctx.spared_other_speaker = 0
     cuts = merge_cuts(cuts, ctx.duration)
+    cuts = spare_other_speaker(cuts, ctx)
     cuts = protect_words(cuts, ctx)
     cuts = steer_out_of_moans(cuts, ctx)
     cuts = sweep_to_quiet(cuts, ctx)
@@ -754,6 +844,7 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     if ctx.fps:
         cuts = snap_to_frames(cuts, ctx.fps)
     cuts = settle_filler_edges(cuts, ctx)
+    cuts = spare_other_speaker(cuts, ctx)
     return merge_cuts(cuts, ctx.duration)
 
 

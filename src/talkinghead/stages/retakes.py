@@ -26,10 +26,11 @@ from ..markers import find_markers
 from ..prompts import (
     MARKER_SCHEMA,
     RETAKE_SCHEMA,
-    annotated_sentence_table,
     marker_prompt,
-    marker_window,
+    retake_marker_window,
     retake_prompt,
+    retake_table,
+    with_conversation,
     with_preferences,
 )
 from ..spans import Span, cluster_spans
@@ -54,7 +55,8 @@ def _quote(words: list, a: int, b: int, pad: int = 0) -> str:
 def _pass_a(ctx: Context, table: str) -> tuple[list[Span], dict]:
     """Global sweep; span-level voting, intersection-leaning boundaries."""
     n = len(ctx.words)
-    result = vote(ctx.judge, with_preferences(retake_prompt(table, ctx.topic), ctx.preferences), RETAKE_SCHEMA,
+    prompt = with_preferences(with_conversation(retake_prompt(table, ctx.topic), ctx.conversation), ctx.preferences)
+    result = vote(ctx.judge, prompt, RETAKE_SCHEMA,
                   k=ctx.config.votes, cache=ctx.llm_cache)
     per_response: list[list[tuple[int, int]]] = []
     dropped_bad = dropped_overlong = proposed = 0
@@ -89,11 +91,12 @@ def _pass_b(ctx: Context) -> tuple[list[Span], list[dict], dict]:
     cut = keep = dropped_overlong = 0
     for cand in cands:
         marker_end = cand.word + len(cand.marker.split()) - 1
-        window = marker_window(sents, groups, words, cand.word)
+        window = retake_marker_window(sents, groups, words, cand.word)
         if not window:
             continue
-        result = vote(ctx.judge, with_preferences(marker_prompt(window, cand.marker, cand.tier, ctx.topic),
-                                                  ctx.preferences),
+        prompt = with_preferences(with_conversation(marker_prompt(window, cand.marker, cand.tier, ctx.topic),
+                                                    ctx.conversation), ctx.preferences)
+        result = vote(ctx.judge, prompt,
                       MARKER_SCHEMA, k=ctx.config.marker_votes, cache=ctx.llm_cache)
         cut_votes = sum(1 for r in result.responses if r.get("verdict") == "cut")
         keep_votes = sum(1 for r in result.responses if r.get("verdict") == "keep")
@@ -169,7 +172,7 @@ def _merge(spans: list[Span]) -> list[tuple[int, int, int]]:
 
 def run(ctx: Context) -> tuple[list[Cut], dict]:
     words = ctx.words
-    table = annotated_sentence_table(ctx.sentences(), ctx.sentence_words(), words)
+    table = retake_table(ctx.sentences(), ctx.sentence_words(), words)
     a_spans, a_notes = _pass_a(ctx, table)
     b_spans, log, b_notes = _pass_b(ctx)
     cuts = [

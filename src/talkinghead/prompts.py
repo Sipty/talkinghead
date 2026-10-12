@@ -12,8 +12,12 @@ def word_id(i: int) -> str:
     return f"w{i:04d}"
 
 
+def speaker_tag(s: Sentence) -> str:
+    return "" if s.speaker is None else f"[{s.speaker}] "
+
+
 def sentence_table(sents: list[Sentence]) -> str:
-    return "\n".join(f"{s.sid} | {s.start:.2f}-{s.end:.2f} | {s.text}" for s in sents)
+    return "\n".join(f"{s.sid} | {s.start:.2f}-{s.end:.2f} | {speaker_tag(s)}{s.text}" for s in sents)
 
 
 def transcript_text(words: list) -> str:
@@ -28,6 +32,21 @@ def annotated_sentence_table(sents: list[Sentence], groups: list[list[int]], wor
     for s, idx in zip(sents, groups):
         tagged = " ".join(f"[{word_id(i)}]{words[i].text}" for i in idx)
         lines.append(f"{s.sid} | {s.start:.2f}-{s.end:.2f} | {tagged}")
+    return "\n".join(lines)
+
+
+def retake_table(sents: list[Sentence], groups: list[list[int]], words: list[RefinedWord]) -> str:
+    """annotated_sentence_table with speaker tags; speakerless sentences get the untagged table itself.
+
+    annotated_sentence_table's text is pinned by the retake memo policy hash (pipeline._retake_policy),
+    so the tagged form is written out here instead of inside it.
+    """
+    if all(s.speaker is None for s in sents):
+        return annotated_sentence_table(sents, groups, words)
+    lines = []
+    for s, idx in zip(sents, groups):
+        tagged = " ".join(f"[{word_id(i)}]{words[i].text}" for i in idx)
+        lines.append(f"{s.sid} | {s.start:.2f}-{s.end:.2f} | {speaker_tag(s)}{tagged}")
     return "\n".join(lines)
 
 
@@ -49,6 +68,25 @@ def with_preferences(prompt: str, preferences: str) -> str:
     if not preferences.strip():
         return prompt
     return f"--- OWNER EDITING PREFERENCES (follow these) ---\n{preferences.strip()}\n\n{prompt}"
+
+
+def with_conversation(prompt: str, speakers: list[str]) -> str:
+    """Lead an editorial judge prompt with who is talking, when the recording has several speakers.
+
+    No speakers leaves the prompt byte-identical, so single-speaker answers replay.
+    """
+    if not speakers:
+        return prompt
+    return (
+        "--- CONVERSATION ---\n"
+        f"This is a conversation between {', '.join(speakers)}, recorded on one microphone.\n"
+        "- A retake is one speaker abandoning their OWN attempt and saying it again. One speaker "
+        "echoing, finishing or answering the other is never a retake.\n"
+        "- Backchannels (\"yeah\", \"mm\", \"right\") from the listener are part of the conversation: keep them.\n"
+        "- Never cut a question while keeping its answer, or an answer while keeping its question.\n"
+        "- The guidelines' \"host\" and \"he\" refer to the host only, not to whichever speaker is talking.\n\n"
+        f"{prompt}"
+    )
 
 
 def _topic_line(topic: str | None) -> str:
@@ -222,6 +260,17 @@ def marker_window(sents, groups, words, marker_word: int, *, context: int = 2) -
         return ""
     lo, hi = max(0, home - context), min(len(groups), home + context + 1)
     return annotated_sentence_table(sents[lo:hi], groups[lo:hi], words)
+
+
+def retake_marker_window(sents, groups, words, marker_word: int, *, context: int = 2) -> str:
+    """marker_window with speaker tags (see retake_table)."""
+    if all(s.speaker is None for s in sents):
+        return marker_window(sents, groups, words, marker_word, context=context)
+    home = next((k for k, idx in enumerate(groups) if marker_word in idx), None)
+    if home is None:
+        return ""
+    lo, hi = max(0, home - context), min(len(groups), home + context + 1)
+    return retake_table(sents[lo:hi], groups[lo:hi], words)
 
 
 def marker_prompt(window: str, marker: str, tier: str, topic: str | None) -> str:

@@ -70,7 +70,17 @@ class Context:
         from .candidates import sentence_table
 
         return sentence_table(self.as_words(), split_pause=self.config.sentence_split_pause,
-                              burst_last=[w.burst_last for w in self.words])
+                              burst_last=[w.burst_last for w in self.words],
+                              speaker_names=self.config.speaker_names)
+
+    @property
+    def conversation(self) -> list[str]:
+        """Display names of the speakers in this recording, in order of first speaking; [] when unlabelled."""
+        seen: dict[str, None] = {}
+        for w in self.words:
+            if w.speaker is not None:
+                seen.setdefault(w.speaker, None)
+        return [self.config.speaker_names.get(label, label) for label in seen]
 
     def sentence_words(self) -> list[list[int]]:
         """Word indices per sentence, aligned with `sentences()`."""
