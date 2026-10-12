@@ -522,6 +522,7 @@ They are experimental, and the spec format may change before a stable release.
 `board-page` opens a browser on port 8765 unless you pass `--no-open`.
 The spec is `<RUN_DIR>/board/board.json`. It holds the tablet recording's path, an `offset` that aligns the tablet's clock with the phone's, and views (time ranges with a rectangle on the canvas).
 `board` renders `final-board.mp4` in the run directory.
+`board` needs the cut in source order. A restructure cut that moves topic blocks ahead of earlier material is refused with a message.
 
 ## Limitations
 

@@ -14,7 +14,7 @@ from typing import Iterable
 import numpy as np
 
 from ..color import HDR_BITRATE, encode_args, probe_color, write_sdr_to_hdr_cube
-from ..timeline import Segment
+from ..timeline import Segment, in_source_order
 from ..verify import display_size
 from .spec import BoardSpec, BoardView
 
@@ -286,6 +286,10 @@ def render_board(run_dir: Path, spec: BoardSpec, out: Path | None = None) -> Pat
     segments = [Segment(**s) for s in plan["segments"]]
     if not segments:
         raise ValueError("plan.json has no kept segments")
+    if not in_source_order(segments):
+        raise ValueError("board overlays need the cut in source order: this plan moves topic blocks "
+                         "ahead of earlier material (restructure), so the tablet timeline would run "
+                         "backwards. Render the board on a cut without restructure reordering.")
     base_info = _probe(base, "stream=avg_frame_rate,nb_read_frames,duration:format=duration")
     stream = base_info["streams"][0]
     width, height = display_size(str(base))

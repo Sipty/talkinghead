@@ -74,7 +74,8 @@ from .timeline import MIN_CUT, Cut, Plan, Segment, merge_cuts
 from .types import MECHANICAL_REASONS
 
 # Reasons whose spans are meant to remove words (edges snap to word bounds).
-WORD_CUT_REASONS = frozenset({"retake", "restart", "filler", "content", "cold-open", "outro", "join"})
+WORD_CUT_REASONS = frozenset({"retake", "restart", "filler", "content", "cold-open", "outro", "join",
+                              "tangent", "lead-in"})
 # Reasons whose whole job is removing NON-speech: for these, voiced audio the
 # transcript does not cover may not be landed inside or swallowed by the cut.
 # An editorial cut (above) is a decision about content, so the waveform only
@@ -875,6 +876,7 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
     recorded in `provenance["refined_joins"]` are skipped, so refining a refined
     plan moves nothing; a join edited since has a new edge pair and is refined.
     The incoming edge then gets the splice lead-in (keep_splice_lead_in), whether or not the join moved.
+    A backward join (a reordered plan, see stages.restructure.reorder) has no cut to move and is skipped.
     """
     segments = list(plan.segments)
     cuts = list(plan.cuts)

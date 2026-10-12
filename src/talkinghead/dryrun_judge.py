@@ -19,6 +19,8 @@ import re
 import sys
 
 _CANDIDATES = re.compile(r"^- (\S+?):", re.M)
+_CORE_FIRST = re.compile(r"--- CORE \(start blocks here\) ---\n(S\d+) \|")
+_BLOCK_ROW = re.compile(r"^(B\d+) \|", re.M)
 
 
 def _last_candidate(prompt: str) -> str:
@@ -48,6 +50,17 @@ def answer(prompt: str) -> dict:
         return {"central_argument": "dry run: no editorial plan", "chapters": [], "visuals": []}
     if "TASK: RESEARCH" in prompt:
         return {"sources": []}
+    if "TASK: RESTRUCTURE WINDOW" in prompt:
+        # One block per window, starting at the window's first core sentence: nothing dropped, nothing moved.
+        core = _CORE_FIRST.search(prompt)
+        if core is None:
+            return {"blocks": []}
+        return {"blocks": [{"start": core.group(1), "title": "dry run block", "summary": "one block per window",
+                            "payoff": None, "payoff_sid": None, "interest": 1, "relevance": 0,
+                            "depends_on_earlier": False, "depends_note": "", "lead_in": []}]}
+    if "TASK: RESTRUCTURE KEEP" in prompt:
+        return {"blocks": [{"id": b, "decision": "keep", "reason": "dry run: keep every block", "front_rank": None}
+                           for b in _BLOCK_ROW.findall(prompt)]}
     raise SystemExit("dryrun judge: no answer for this prompt kind")
 
 

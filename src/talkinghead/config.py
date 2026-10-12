@@ -191,6 +191,20 @@ class Config:
     # Two-person recordings: diarized speaker label ("S0", "S1") -> display name the
     # judges see. Unlisted labels show as-is. Empty for a single speaker.
     speaker_names: dict[str, str] = field(default_factory=dict)
+    # Restructure (opt-in): topic blocks are judged per window, blocks without a
+    # payoff are dropped and a few self-contained openers move to the front.
+    restructure: bool = False
+    # The owner's editorial brief for this video, given verbatim to every restructure judge.
+    restructure_brief: str = ""
+    # Window length and the read-only context kept on each side of a window's core (seconds).
+    restructure_window_sec: float = 600.0
+    restructure_context_sec: float = 120.0
+    # Samples in the global keep/drop + opener vote (each window is judged once).
+    restructure_votes: int = 3
+    # Most blocks that may move to the front.
+    restructure_front: int = 3
+    # Windows judged at once, only with a judge that is safe to call concurrently.
+    restructure_parallel: int = 4
 
     def validate(self) -> "Config":
         if self.agree > self.votes:
@@ -217,6 +231,11 @@ class Config:
                 f"{', '.join(sorted(OVERLAY_CORNERS))}")
         if self.diarize_speakers is not None and (self.diarize_speakers < 1 or not self.diarize):
             raise ValueError("diarize_speakers needs diarize = true and a speaker count of at least 1")
+        if self.restructure:
+            if self.restructure_window_sec <= 2 * self.restructure_context_sec:
+                raise ValueError("restructure_window_sec must exceed twice restructure_context_sec")
+        if self.restructure_votes < 1 or self.restructure_parallel < 1 or self.restructure_front < 0:
+            raise ValueError("restructure_votes and restructure_parallel must be at least 1; restructure_front at least 0")
         return self
 
     def to_dict(self) -> dict:
@@ -229,6 +248,10 @@ class Config:
         # Absent when unset: a speakerless cook's config digests and plan provenance stay as they were.
         if not self.speaker_names:
             del d["speaker_names"]
+        if not self.restructure:
+            # A disabled feature leaves no trace: plan provenance and memo keys stay as they were.
+            for k in [k for k in d if k == "restructure" or k.startswith("restructure_")]:
+                del d[k]
         return d
 
 

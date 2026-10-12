@@ -202,6 +202,9 @@ def _handles(segments: list[Segment], lengths: list[int], starts: list[int],
     half the requested crossfade; the source bounds; half the removed span
     (a handle never reaches the neighbour's own audio); and half of each
     adjacent segment (both of a segment's joins must fit in its body).
+    A jump backwards in the same source (a reordered plan) has no removed span
+    between its edges, so only the other bounds apply: its handles are real
+    source audio on each side of the seam and the crossfade still holds.
     """
     out = []
     for i in range(len(segments) - 1):
@@ -209,7 +212,7 @@ def _handles(segments: list[Segment], lengths: list[int], starts: list[int],
         end_a = starts[i] + lengths[i]
         room = min(crossfade // 2, lengths[i] // 2, lengths[i + 1] // 2,
                    source_frames[a.source] - end_a, starts[i + 1])
-        if a.source == b.source:
+        if a.source == b.source and starts[i + 1] >= end_a:
             room = min(room, (starts[i + 1] - end_a) // 2)
         out.append(max(room, 0))
     return out

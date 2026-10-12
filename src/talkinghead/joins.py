@@ -195,7 +195,10 @@ def source_edge_facts(plan: Plan, env: Envelope, floor: float, quiet_above_floor
         offset += prev.length
         if prev.source != plan.main or seg.source != plan.main:
             continue
-        cut = next((c for c in plan.cuts if abs(c.start - prev.end) <= EDGE_CUT_MATCH_SEC), None)
+        # A seam the source does not run forward across (a reordered plan) has no cut at its
+        # start: matching one by time would pin an unrelated cut to it.
+        forward = seg.start > prev.end
+        cut = next((c for c in plan.cuts if abs(c.start - prev.end) <= EDGE_CUT_MATCH_SEC), None) if forward else None
         left = edge_state(env, floor, prev.end, "left")
         right = edge_state(env, floor, seg.start, "right")
         flag = "both" if left["voiced"] and right["voiced"] else "left" if left["voiced"] else \
@@ -203,7 +206,7 @@ def source_edge_facts(plan: Plan, env: Envelope, floor: float, quiet_above_floor
         ql = _quiet_kept(env, threshold, prev.end, "left", prev.length)
         qr = _quiet_kept(env, threshold, seg.start, "right", seg.length)
         out.append({
-            "t": round(offset, 3), "reason": cut.reason if cut else "unknown",
+            "t": round(offset, 3), "reason": cut.reason if cut else ("unknown" if forward else "reorder"),
             "left": left, "right": right, "flag": flag,
             "quiet_left": round(ql, 3), "quiet_right": round(qr, 3), "quiet": round(ql + qr, 3),
         })

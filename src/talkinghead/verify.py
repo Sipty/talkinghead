@@ -24,7 +24,7 @@ from .derive import pause_boundary, pause_cap
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
 from .store import Cache
-from .timeline import Plan
+from .timeline import Plan, Segment
 from .transcribe import Transcriber, Transcript, Word, av_durations, prepare_audio, transcribe_cached
 
 FIRST_WORD_MAX = 0.5
@@ -118,26 +118,31 @@ def _dead_air_runs(
     """(start, end, raw) output silence runs: source VAD silence mapped onto
     the output, joined across edit seams. `raw` is the longest whole source
     silence that contributes to the run, i.e. the pause before it was trimmed."""
-    pieces: list[tuple[float, float, float]] = []
+    pieces: list[tuple[float, float, float, int]] = []
     offset = 0.0
+    group = 0  # bumped at every seam the source does not run forward across
+    prev: Segment | None = None
     for seg in plan.segments:
         if seg.source != plan.main:
             offset += seg.length
             continue
+        if prev is not None and not (seg.source == prev.source and seg.start > prev.end):
+            group += 1
+        prev = seg
         for a, b in silences:
             lo, hi = max(a, seg.start), min(b, seg.end)
             if hi > lo:
-                pieces.append((offset + lo - seg.start, offset + hi - seg.start, b - a))
+                pieces.append((offset + lo - seg.start, offset + hi - seg.start, b - a, group))
         offset += seg.length
     pieces.sort()
-    merged: list[list[float]] = []
-    for a, b, raw in pieces:
-        if merged and a <= merged[-1][1] + 1e-6:
+    merged: list[list] = []
+    for a, b, raw, g in pieces:
+        if merged and merged[-1][3] == g and a <= merged[-1][1] + 1e-6:
             merged[-1][1] = max(merged[-1][1], b)
             merged[-1][2] = max(merged[-1][2], raw)
         else:
-            merged.append([a, b, raw])
-    return [(a, b, raw) for a, b, raw in merged if b - a >= min_gap]
+            merged.append([a, b, raw, g])
+    return [(a, b, raw) for a, b, raw, _ in merged if b - a >= min_gap]
 
 
 def residual_dead_air(plan: Plan, silences: list[tuple[float, float]], min_gap: float = GAP_MIN) -> list[tuple[float, float]]:
