@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -328,6 +329,29 @@ def test_align_remux_keeps_the_picture_and_lands_the_audio(tmp_path: Path) -> No
 
     corr = _corr_at_offset(_audio(out, tmp_path / "probe-out"), _audio(audio, tmp_path / "probe-in"), 6.0)
     assert corr > 0.9, f"audio not at the measured offset: corr={corr:.3f}"
+
+
+def test_a_drift_fixed_late_recording_decodes_at_its_offset(tmp_path: Path) -> None:
+    """With the drift stretch in front of the delay, ffmpeg's adelay shifted timestamps
+    instead of writing silence. A full decode, which is how the pipeline reads the master,
+    closed that hole and put every word `offset` seconds early against the picture."""
+    video, audio = _make_pair(tmp_path, video_len=36.0, audio_len=28.0, offset=6.0)
+    result = replace(analyze(video, audio), drift_ppm=0.5)
+    out = tmp_path / "master.mov"
+    subprocess.run(_remux_command(video, audio, out, result, fix_drift=True), check=True, capture_output=True)
+
+    decoded = _audio(out, tmp_path / "probe-out")
+    assert len(decoded) / SR == pytest.approx(36.0, abs=0.2)
+    # atempo resynthesises the waveform, so locate the speech by its 10 ms energy envelope.
+    hop = SR // 100
+
+    def envelope(x: np.ndarray) -> np.ndarray:
+        return np.sqrt((x[: len(x) // hop * hop].reshape(-1, hop) ** 2).mean(axis=1))
+
+    out_env, src_env = envelope(decoded), envelope(_audio(audio, tmp_path / "probe-in"))
+    n = len(src_env) - 100
+    scores = [float(np.dot(out_env[lag:lag + n], src_env[:n])) for lag in range(len(out_env) - n)]
+    assert int(np.argmax(scores)) / 100 == pytest.approx(result.offset_sec, abs=0.03)
 
 
 def test_align_pads_the_tail_when_the_audio_runs_out(tmp_path: Path) -> None:

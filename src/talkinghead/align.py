@@ -377,6 +377,10 @@ def _filter_complex(result: AlignResult, fix_drift: bool) -> str:
         audio.append(f"atempo={1.0 / (1.0 + drift):.9f}")
     if result.offset_sec > 0:
         audio.append(f"adelay={int(round(result.offset_sec * 1000))}:all=1")
+        # After atempo, adelay can shift timestamps instead of emitting silence. The track then
+        # has a timestamp hole that a full decode (prepare_audio) closes, moving every word
+        # `offset` seconds early against the picture. Fill any hole with real silent samples.
+        audio.append("aresample=async=1:first_pts=0")
     audio.append("apad[a]")
     parts.append(",".join(audio))
     return ";".join(parts)
