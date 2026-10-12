@@ -21,16 +21,17 @@ Non-obvious decisions:
   - Parakeet emits fillers as real tokens with native per-token timings, so it
     is the default backend; whisper is explicit opt-in, because its word spans
     absorb hesitations.
-  - Scribe v2 is the normal backend, on two routes: ElevenLabs with the user's key,
-    and OpenRouter as the fallback serving the same model. Native word stamps plus
-    sound tags (audio events: sighs, laughter). Events are kept as data on the
-    Transcript; analysis decides which are cuts and which are protected.
+  - Scribe v2 is the normal backend, served through OpenRouter (elevenlabs/scribe-v2).
+    Native word stamps plus sound tags (audio events: sighs, laughter). A recording too
+    long for one request is cut at quiet points into overlapping chunks. Events are kept
+    as data on the Transcript; analysis decides which are cuts and which are protected.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import math
 import os
@@ -40,12 +41,15 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-import uuid
 import wave
 from array import array
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
+
+import numpy as np
 
 from .store import Cache, sha256_file
 
@@ -502,34 +506,46 @@ class WhisperTranscriber:
 
 # ------------------------------------------------------------ Scribe v2
 #
-# One model, two routes. ElevenLabs is the bring-your-own-key route and is used
-# whenever ELEVENLABS_API_KEY is set. OpenRouter serves the same Scribe v2 model
-# and answers when the ElevenLabs route cannot: no key, or an HTTP/network
-# failure. A response that arrives but does not parse is an error on either
-# route and is never retried on the other.
+# Scribe v2 runs through OpenRouter (elevenlabs/scribe-v2) and nothing else:
+# OPENROUTER_API_KEY is the only key it reads. Native word stamps plus sound tags
+# (audio events: sighs, laughter). Events are kept as data on the Transcript;
+# analysis decides which are cuts and which are protected.
+#
+# OpenRouter rejects a request body over OPENROUTER_BODY_LIMIT_BYTES with HTTP 413.
+# A recording that does not fit one request is cut at quiet points into overlapping
+# chunks, sent a few at a time, and merged back onto the recording's clock.
+# Saved responses (ElevenLabs JSON, via --scribe-response) still replay through
+# SavedScribeTranscriber, which reads that format with parse_scribe_response.
 
-SCRIBE_ENDPOINT = "https://api.elevenlabs.io/v1/speech-to-text"
-SCRIBE_KEY_ENV = "ELEVENLABS_API_KEY"
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/audio/transcriptions"
 OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 # The only model the OpenRouter route serves.
 OPENROUTER_SCRIBE_MODEL = "elevenlabs/scribe-v2"
+# OpenRouter's limit on one request body, in bytes.
+OPENROUTER_BODY_LIMIT_BYTES = 52_428_800
+# Request bodies stay 4 MiB under that limit. Each body is measured exactly before it is
+# sent, so the margin only covers anything the gateway counts differently.
+SCRIBE_BODY_BUDGET_BYTES = OPENROUTER_BODY_LIMIT_BYTES - 4 * 1024 * 1024
+# Seconds of audio each chunk hears beyond its core, on every side that has a neighbour.
+# Words are kept only from the core, so this context never duplicates a word.
+SCRIBE_CHUNK_OVERLAP_SEC = 20.0
+# A seam is looked for this far either side of the evenly spaced target.
+SCRIBE_SEAM_SEARCH_SEC = 120.0
+# With no silence in the search window, the seam goes at the quietest block this long.
+SCRIBE_QUIET_BLOCK_SEC = 0.05
+# Chunk requests in flight at once.
+SCRIBE_MAX_PARALLEL = 3
 # Bump when the response parser changes what words/events it yields.
 SCRIBE_PARSER_VERSION = 1
-# Single-speaker cook: word stamps and native sound tags, no diarization.
-# no_verbatim is omitted on purpose: its default (false) keeps fillers.
-SCRIBE_FIELDS = {
-    "model_id": "scribe_v2",
-    "timestamps_granularity": "word",
-    "tag_audio_events": "true",
-    "diarize": "false",
-}
-# The route that answered is appended to this at transcription time.
+# The cache key of every live Scribe transcript. Changing it re-keys every cached transcript.
+# The route and the chunk count are appended to the stored version, not to this key.
 SCRIBE_VERSION = f"scribe_v2;word;events;diarize=false;verbatim;parse={SCRIBE_PARSER_VERSION}"
 # Scribe stamps may trail the audio end by a few frames.
 SCRIBE_TIME_SLACK = 0.1
 SCRIBE_TIMEOUT_SEC = 1200
 PCM_RATE = 16000
+# Bytes before the PCM payload in the WAV this module writes.
+WAV_HEADER_BYTES = 44
 
 
 def _probability_from_logprob(item: dict) -> float:
@@ -636,8 +652,12 @@ def _ascii_key_or_raise(key: str, env_name: str) -> None:
         raise RuntimeError(f"{env_name} must be a single ASCII token without whitespace")
 
 
+class ScribeRequestError(RuntimeError):
+    """A Scribe request failed: HTTP error, network failure or timeout. Never carries the key."""
+
+
 def _send(request: urllib.request.Request, key: str, label: str) -> bytes:
-    """Response body, or ProviderUnavailable so the other route may answer.
+    """Response body, or ScribeRequestError.
 
     Provider error bodies are not echoed: they can contain request data.
     """
@@ -646,62 +666,249 @@ def _send(request: urllib.request.Request, key: str, label: str) -> bytes:
             return response.read()
     except urllib.error.HTTPError as e:
         e.close()
-        raise ProviderUnavailable(f"{label} request failed: HTTP {e.code}") from None
+        raise ScribeRequestError(f"{label} request failed: HTTP {e.code}") from None
     except urllib.error.URLError as e:
-        raise ProviderUnavailable(f"{label} request failed: {str(e.reason).replace(key, '[REDACTED]')}") from None
+        raise ScribeRequestError(f"{label} request failed: {str(e.reason).replace(key, '[REDACTED]')}") from None
     except TimeoutError:
-        raise ProviderUnavailable(f"{label} request timed out") from None
+        raise ScribeRequestError(f"{label} request timed out") from None
 
 
-def _elevenlabs_request(wav_path: str, key: str) -> bytes:
-    _ascii_key_or_raise(key, SCRIBE_KEY_ENV)
-    boundary = uuid.uuid4().hex
-    parts = [
-        f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
-        for name, value in SCRIBE_FIELDS.items()
-    ]
-    parts.append(
-        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
-        "Content-Type: audio/wav\r\n\r\n".encode())
-    parts.append(Path(wav_path).read_bytes())
-    parts.append(f"\r\n--{boundary}--\r\n".encode())
-    request = urllib.request.Request(
-        SCRIBE_ENDPOINT, data=b"".join(parts), method="POST",
-        headers={"xi-api-key": key, "Content-Type": f"multipart/form-data; boundary={boundary}"})
-    return _send(request, key, "ElevenLabs Scribe")
-
-
-def _openrouter_request(wav_path: str, key: str) -> bytes:
-    _ascii_key_or_raise(key, OPENROUTER_KEY_ENV)
-    body = json.dumps({
+def _openrouter_body(wav: bytes) -> bytes:
+    return json.dumps({
         "model": OPENROUTER_SCRIBE_MODEL,
-        "input_audio": {"data": base64.b64encode(Path(wav_path).read_bytes()).decode("ascii"), "format": "wav"},
+        "input_audio": {"data": base64.b64encode(wav).decode("ascii"), "format": "wav"},
         "response_format": "verbose_json",
         "timestamp_granularities": ["word"],
     }).encode()
+
+
+def _openrouter_request(wav: bytes, key: str) -> bytes:
+    """POST one WAV to OpenRouter's Scribe endpoint; the response body."""
+    _ascii_key_or_raise(key, OPENROUTER_KEY_ENV)
     request = urllib.request.Request(
-        OPENROUTER_ENDPOINT, data=body, method="POST",
+        OPENROUTER_ENDPOINT, data=_openrouter_body(wav), method="POST",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     return _send(request, key, "OpenRouter Scribe")
 
 
-class ProviderUnavailable(RuntimeError):
-    """A Scribe route could not answer (HTTP error, network failure, timeout), so the other route may."""
-
-
-def require_scribe_key() -> None:
-    """Scribe v2 needs a key for one of its routes; nothing transcribes locally in its place."""
-    if not os.environ.get(SCRIBE_KEY_ENV) and not os.environ.get(OPENROUTER_KEY_ENV):
+def require_scribe_key() -> str:
+    """The OpenRouter key Scribe v2 needs. Nothing transcribes locally in its place."""
+    key = os.environ.get(OPENROUTER_KEY_ENV)
+    if not key:
         raise RuntimeError(
-            f"Neither {SCRIBE_KEY_ENV} nor {OPENROUTER_KEY_ENV} is set; Scribe v2 needs one of them "
+            f"{OPENROUTER_KEY_ENV} is not set; Scribe v2 runs through OpenRouter "
             "and nothing transcribes locally in its place.")
+    return key
+
+
+def _pcm_wav(pcm: bytes) -> bytes:
+    """A 16 kHz mono s16 WAV around raw PCM frames."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(PCM_RATE)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _max_request_frames() -> int:
+    """Most PCM frames one request can carry while its whole JSON body stays within the budget."""
+    base64_room = SCRIBE_BODY_BUDGET_BYTES - len(_openrouter_body(b""))
+    wav_bytes = (base64_room // 4) * 3  # base64 writes 4 characters per 3 bytes
+    return (wav_bytes - WAV_HEADER_BYTES) // 2
+
+
+def _overlap_frames() -> int:
+    return round(SCRIBE_CHUNK_OVERLAP_SEC * PCM_RATE)
+
+
+def _canonical_pcm_wav(path: str | Path, workdir: Path) -> Path:
+    """`path` itself when it is 16 kHz mono s16 PCM, else its conversion under `workdir`."""
+    try:
+        with wave.open(str(path), "rb") as w:
+            if (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (PCM_RATE, 1, 2):
+                return Path(path)
+    except (wave.Error, EOFError):
+        pass
+    canon = workdir / "canon.wav"
+    _ffmpeg_16k_mono(str(path), canon)
+    return canon
+
+
+def _read_frames(path: Path, start: int, end: int) -> bytes:
+    with wave.open(str(path), "rb") as w:
+        w.setpos(start)
+        return w.readframes(end - start)
+
+
+def _read_pcm(path: Path) -> np.ndarray:
+    with wave.open(str(path), "rb") as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+
+
+@dataclass(frozen=True)
+class ScribeChunk:
+    """One Scribe request and the core it owns, in PCM frames of the canonical recording.
+
+    The request is the core plus the overlap on each side that the recording has.
+    """
+
+    request_start: int
+    request_end: int
+    core_start: int
+    core_end: int
+
+
+def plan_scribe_chunks(n_frames: int, *, max_request_frames: int, overlap_frames: int,
+                       choose_seam: Callable[[int, int, int], int]) -> list[ScribeChunk]:
+    """Split `n_frames` into the fewest chunks whose requests each fit `max_request_frames`.
+
+    Cores are contiguous and cover the recording. The first and last cores carry one
+    overlap, the middle ones two. `choose_seam(lo, hi, target)` returns the seam between
+    two cores anywhere in [lo, hi]; the bounds keep every remaining core within the limit.
+    """
+    if n_frames <= max_request_frames:
+        return [ScribeChunk(0, n_frames, 0, n_frames)]
+    edge = max_request_frames - overlap_frames  # first or last core: overlap on one side
+    inner = max_request_frames - 2 * overlap_frames  # middle core: overlap on both sides
+    if inner <= 0:
+        raise ValueError("the request budget leaves no room beyond the chunk overlap")
+
+    def cover(chunks: int) -> int:
+        """Most frames that `chunks` consecutive cores can own, the last one an edge core."""
+        return (chunks - 1) * inner + edge
+
+    count = 2
+    while edge + cover(count - 1) < n_frames:
+        count += 1
+    seams: list[int] = []
+    start = 0
+    for j in range(count - 1):
+        cap = edge if j == 0 else inner
+        lo = max(start + 1, n_frames - cover(count - 1 - j))
+        hi = min(start + cap, n_frames - 1)
+        seam = choose_seam(lo, hi, n_frames * (j + 1) // count)
+        if not lo <= seam <= hi:
+            raise ValueError(f"seam {seam} lies outside [{lo}, {hi}]")
+        seams.append(seam)
+        start = seam
+    bounds = list(zip([0, *seams], [*seams, n_frames]))
+    return [ScribeChunk(max(0, a - overlap_frames), min(n_frames, b + overlap_frames), a, b)
+            for a, b in bounds]
+
+
+class _SeamFinder:
+    """Seams in the longest silence of the search window, else at its quietest block.
+
+    The silences and the waveform are read on the first call, which only happens when a
+    recording needs chunks.
+    """
+
+    def __init__(self, wav: Path) -> None:
+        self._wav = wav
+        self._silences: list[tuple[float, float]] | None = None
+        self._pcm: np.ndarray | None = None
+
+    def __call__(self, lo: int, hi: int, target: int) -> int:
+        if self._silences is None or self._pcm is None:
+            self._silences = detect_silences(str(self._wav))
+            self._pcm = _read_pcm(self._wav)
+        half = round(SCRIBE_SEAM_SEARCH_SEC * PCM_RATE)
+        w_lo, w_hi = max(lo, target - half), min(hi, target + half)
+        if w_lo > w_hi:
+            w_lo, w_hi = lo, hi
+        best: tuple[tuple[int, int], int] | None = None
+        for s0, s1 in self._silences:
+            a = max(w_lo, round(s0 * PCM_RATE))
+            b = min(w_hi, round(s1 * PCM_RATE))
+            if b > a:
+                mid = (a + b) // 2
+                rank = (b - a, -abs(mid - target))  # longest clipped silence, then nearest the target
+                if best is None or rank > best[0]:
+                    best = (rank, mid)
+        if best is not None:
+            return best[1]
+        return self._quietest(w_lo, w_hi, target)
+
+    def _quietest(self, lo: int, hi: int, target: int) -> int:
+        block = round(SCRIBE_QUIET_BLOCK_SEC * PCM_RATE)
+        count = (hi - lo) // block
+        if count == 0:
+            return (lo + hi) // 2
+        seg = self._pcm[lo: lo + count * block].astype(np.float64).reshape(count, block)
+        rms = np.sqrt((seg * seg).mean(axis=1))
+        centres = lo + np.arange(count) * block + block // 2
+        i = min(range(count), key=lambda k: (rms[k], abs(int(centres[k]) - target)))
+        return int(centres[i])
+
+
+def _owned(start: float, end: float, lo: float, hi: float, last: bool) -> bool:
+    """Whether a stamp belongs to the core [lo, hi), judged by its midpoint.
+
+    The last core also owns the audio's final instant.
+    """
+    mid = (start + end) / 2
+    return lo <= mid and (mid < hi or last)
+
+
+def _merge_chunks(parts: list[tuple[ScribeChunk, list[Word], list[AudioEvent]]],
+                  frames: int) -> tuple[list[Word], list[AudioEvent]]:
+    """One timeline from the chunks' answers.
+
+    Each chunk's stamps move onto the recording's clock. A word or event is kept only from
+    the chunk whose core holds its midpoint, so a word heard in two overlaps is kept once.
+    """
+    words: list[Word] = []
+    events: list[AudioEvent] = []
+    for chunk, got_words, got_events in parts:
+        shift = chunk.request_start / PCM_RATE
+        lo, hi = chunk.core_start / PCM_RATE, chunk.core_end / PCM_RATE
+        last = chunk.core_end == frames
+        for w in got_words:
+            s, e = w.start + shift, w.end + shift
+            if _owned(s, e, lo, hi, last):
+                words.append(Word(w.text, s, e, w.probability))
+        for ev in got_events:
+            s, e = ev.start + shift, ev.end + shift
+            if _owned(s, e, lo, hi, last):
+                events.append(AudioEvent(ev.text, s, e))
+    return words, events
+
+
+def _scribe_chunk(wav: Path, chunk: ScribeChunk, key: str, index: int,
+                  total: int) -> tuple[list[Word], list[AudioEvent]]:
+    """One request's words and events, on the chunk's own clock (zero at its request start)."""
+    pcm = _read_frames(wav, chunk.request_start, chunk.request_end)
+    seconds = (chunk.request_end - chunk.request_start) / PCM_RATE
+    label = f" (chunk {index + 1} of {total})" if total > 1 else ""
+    try:
+        native = json.loads(_openrouter_request(_pcm_wav(pcm), key))
+        return parse_openrouter_response(native, duration=seconds)
+    except ScribeRequestError as e:
+        raise ScribeRequestError(f"{e}{label}") from None
+    except ValueError as e:
+        raise ValueError(f"{e}{label}") from None
+
+
+_ChunkAnswer = tuple[ScribeChunk, list[Word], list[AudioEvent]]
+
+
+def _run_chunks(wav: Path, chunks: list[ScribeChunk], key: str) -> list[_ChunkAnswer]:
+    """Every chunk's answer, in chunk order. The first failure fails the whole transcription."""
+    pool = ThreadPoolExecutor(max_workers=min(SCRIBE_MAX_PARALLEL, len(chunks)))
+    try:
+        futures = [pool.submit(_scribe_chunk, wav, c, key, i, len(chunks)) for i, c in enumerate(chunks)]
+        return [(c, *f.result()) for c, f in zip(chunks, futures)]
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 class ScribeTranscriber:
-    """ElevenLabs Scribe v2 with an OpenRouter fallback; see the section header.
+    """Scribe v2 through OpenRouter, the only route; see the section header.
 
-    The route that answered is recorded in Transcript.version, so a cached
-    transcript says where it came from. Keys are never logged.
+    The stored version records the route, and the chunk count for a chunked recording.
+    Keys are never logged.
     """
 
     name = "scribe"
@@ -709,32 +916,20 @@ class ScribeTranscriber:
     replays_fixed_source = False
 
     def transcribe(self, wav_path: str) -> Transcript:
-        el_key = os.environ.get(SCRIBE_KEY_ENV)
-        or_key = os.environ.get(OPENROUTER_KEY_ENV)
-        require_scribe_key()
-        _, frames = pcm_identity(wav_path)
-        duration = frames / PCM_RATE
-        unavailable: ProviderUnavailable | None = None
-        if el_key:
-            try:
-                native = json.loads(_elevenlabs_request(wav_path, el_key))
-            except ProviderUnavailable as e:
-                unavailable = e
-            else:
-                words, events = parse_scribe_response(native, duration=duration)
-                return Transcript(self.name, f"{self.version};route=elevenlabs", duration, words, events)
-        if not or_key:
-            raise unavailable  # ElevenLabs is the only route configured, and it failed.
-        if unavailable is not None:
-            sys.stderr.write(f"scribe: {unavailable}; falling back to OpenRouter\n")
-        try:
-            native = json.loads(_openrouter_request(wav_path, or_key))
-        except ProviderUnavailable as e:
-            if unavailable is None:
-                raise
-            raise ProviderUnavailable(f"{unavailable}; OpenRouter fallback also failed: {e}") from None
-        words, events = parse_openrouter_response(native, duration=duration)
-        return Transcript(self.name, f"{self.version};route=openrouter", duration, words, events)
+        key = require_scribe_key()
+        _ascii_key_or_raise(key, OPENROUTER_KEY_ENV)
+        with tempfile.TemporaryDirectory(prefix="scribe-") as tmp:
+            wav = _canonical_pcm_wav(wav_path, Path(tmp))
+            with wave.open(str(wav), "rb") as w:
+                frames = w.getnframes()
+            chunks = plan_scribe_chunks(frames, max_request_frames=_max_request_frames(),
+                                        overlap_frames=_overlap_frames(), choose_seam=_SeamFinder(wav))
+            parts = _run_chunks(wav, chunks, key)
+        words, events = _merge_chunks(parts, frames)
+        version = f"{self.version};route=openrouter"
+        if len(chunks) > 1:
+            version += f";chunks={len(chunks)}"
+        return Transcript(self.name, version, frames / PCM_RATE, words, events)
 
 
 def _response_sha256(native: dict) -> str:

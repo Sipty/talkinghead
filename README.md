@@ -93,7 +93,7 @@ WSL2 runs the same Ubuntu, but WSL2 itself has not been run end to end yet.
 | `swiftc` | with visuals, macOS only | `swiftc --version` | `xcode-select --install` |
 | fonts | with visuals, Linux only | `fc-match "Liberation Sans"` | `apt install fonts-liberation` |
 | a judge | always | see [Judge values](#judge-values) | Claude Code, omp, or your own command |
-| a Scribe key (`ELEVENLABS_API_KEY` or `OPENROUTER_API_KEY`) | with `--transcriber scribe` | `echo "${ELEVENLABS_API_KEY:+elevenlabs set} ${OPENROUTER_API_KEY:+openrouter set}"` prints what is set; an empty line means neither is set | your provider account |
+| an OpenRouter key (`OPENROUTER_API_KEY`) | with `--transcriber scribe` | `echo "${OPENROUTER_API_KEY:+openrouter set}"` prints `openrouter set` when it is set | your OpenRouter account |
 | Whisper model (about 1.5 GB) | with `--transcriber whisper` | downloaded on first use; macOS: `du -sh ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo`; Linux and WSL2: `du -sh ~/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo` | the model comes from Hugging Face |
 | `fluidaudiocli` (Parakeet) | with `--transcriber parakeet`, macOS only | `command -v fluidaudiocli` or `echo "$FLUIDAUDIO_BIN"` | a macOS build of FluidAudio's `fluidaudiocli`, on PATH or named in `FLUIDAUDIO_BIN` |
 | Silero VAD (optional) | no | `uv run python -c "import silero_vad"` | `uv sync --extra vad` |
@@ -161,7 +161,7 @@ For example, Claude Code as the judge and Scribe v2 for transcription:
 ```bash
 export TALKINGHEAD_JUDGE=claude
 export TALKINGHEAD_TRANSCRIBER=scribe
-export ELEVENLABS_API_KEY=...        # or OPENROUTER_API_KEY
+export OPENROUTER_API_KEY=...
 uv run talkinghead run ~/Movies/talk.mov --audio ~/Movies/mic.wav --topic "one line about the video"
 ```
 
@@ -185,8 +185,7 @@ Neither the judge nor the transcriber has a built-in default, so a run stops wit
 |---|---|---|---|---|
 | `TALKINGHEAD_JUDGE` | yes, unless `--judge` or `judge` in the config file is set | `claude`, or `shell:<command>` | the LLM that votes on every editorial decision | `export TALKINGHEAD_JUDGE=claude` |
 | `TALKINGHEAD_TRANSCRIBER` | yes, unless `--transcriber` or `transcriber` in the config file is set | `scribe`, `parakeet`, `whisper` | the speech-to-text backend | `export TALKINGHEAD_TRANSCRIBER=whisper` |
-| `ELEVENLABS_API_KEY` | for `scribe`, unless `OPENROUTER_API_KEY` is set | ElevenLabs API key | the ElevenLabs route of Scribe v2 (used first when set) | `export ELEVENLABS_API_KEY=...` |
-| `OPENROUTER_API_KEY` | for `scribe`, unless `ELEVENLABS_API_KEY` is set | OpenRouter API key | the OpenRouter route of Scribe v2: the only route when no ElevenLabs key is set, and the fallback after an ElevenLabs HTTP or network error | `export OPENROUTER_API_KEY=...` |
+| `OPENROUTER_API_KEY` | for `scribe` | OpenRouter API key | the Scribe v2 route: `elevenlabs/scribe-v2` through OpenRouter, the only Scribe route | `export OPENROUTER_API_KEY=...` |
 | `TALKINGHEAD_CONFIG` | no | path to a TOML file | the config file to load (same as `--config`) | `export TALKINGHEAD_CONFIG=$HOME/talkinghead.toml` |
 | `TALKINGHEAD_CACHE` | no | directory; default `~/.cache/talkinghead` | where the content-addressed cache lives | `export TALKINGHEAD_CACHE=/Volumes/scratch/th-cache` |
 | `TALKINGHEAD_PROFILE` | no | directory, created on first use | your private editing profile: approved preferences and the feedback log (see [Editing profile](#editing-profile)) | `export TALKINGHEAD_PROFILE=$HOME/talkinghead-profile` |
@@ -224,11 +223,13 @@ This README does not give legal advice on those terms.
 
 ### Transcriber values
 
-`scribe` sends the 16 kHz mono audio of the whole recording to a provider.
-It uses ElevenLabs when `ELEVENLABS_API_KEY` is set, and otherwise OpenRouter's `elevenlabs/scribe-v2` through `OPENROUTER_API_KEY`.
-If the ElevenLabs call fails with an HTTP or network error and an OpenRouter key is set, the run falls back to OpenRouter.
-A malformed response is an error on either route and is not retried on the other.
-The route that answered is recorded in the transcript's version.
+`scribe` sends the 16 kHz mono audio of the whole recording to OpenRouter, which serves `elevenlabs/scribe-v2` with `OPENROUTER_API_KEY`.
+OpenRouter accepts a request body of at most 50 MiB, so a longer recording is cut into chunks.
+Each chunk holds about 19 minutes of its own audio, with 20 seconds of context on each side that has a neighbour.
+A cut goes at the longest silence near an even split, or at the quietest 50 ms when there is no silence.
+Chunks are sent a few at a time and merged onto one timeline. A word heard in two overlaps is kept once, from the chunk that owns its midpoint.
+A failed chunk fails the run, and a malformed response is an error.
+The transcript's version records the route, and the chunk count when there is more than one chunk.
 
 `parakeet` runs NVIDIA Parakeet TDT through `fluidaudiocli` on macOS. It is macOS only.
 Its word timings are tighter, which matters for the machinery cuts, so it is the better local choice.
@@ -442,14 +443,11 @@ Pass `--no-visuals` to skip them.
 **`fluidaudiocli not found`.**
 Put `fluidaudiocli` on PATH or set `FLUIDAUDIO_BIN`, or use `--transcriber whisper`. Parakeet runs on macOS only.
 
-**`Neither ELEVENLABS_API_KEY nor OPENROUTER_API_KEY is set`.**
-Scribe needs one of them.
-Set one, or use `--transcriber parakeet` or `--transcriber whisper`.
+**`OPENROUTER_API_KEY is not set`.**
+Set it, or use `--transcriber parakeet` or `--transcriber whisper`.
 
-**`ElevenLabs Scribe request failed: HTTP 401`.**
-The ElevenLabs key was rejected, or the account has no quota.
-With `OPENROUTER_API_KEY` set, the run falls back to OpenRouter and says so.
-Without it, the run stops with this message.
+**`OpenRouter Scribe request failed: HTTP 401`.**
+The key was rejected. The run stops with this message and tries nothing else.
 
 **`RunDirConflict` (`... is the cook directory for ...`).**
 A run directory belongs to one recording.
@@ -467,7 +465,7 @@ Informational. Run `uv sync --extra vad` if you want the mouth-noise pass gated 
 
 What leaves your Mac depends on your choices:
 
-- **Scribe** (`--transcriber scribe`): the 16 kHz mono audio of the whole recording goes to ElevenLabs or OpenRouter.
+- **Scribe** (`--transcriber scribe`): the 16 kHz mono audio of the whole recording goes to OpenRouter.
 - **The judge**: the transcript sentences, the guidelines, your editing preferences, the topic and the candidate lists go to the judge's provider. With `claude` that is Anthropic, through Claude Code. With a shell command it is whatever provider that command calls. The dry-run judge sends nothing.
 - **Overlay research**: when visuals are on, the URLs the judge proposes are fetched, and pages are screenshotted with `chrome-devtools-axi` if it is installed. `--no-research` turns this off.
 - **Whisper and Parakeet**: the audio stays on your machine. Whisper downloads its model from Hugging Face once.

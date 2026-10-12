@@ -19,7 +19,7 @@
 # model = "opus"                          # with judge = "claude" (a Claude Code model alias)
 # model = "anthropic/claude-opus-5-5"     # with an omp shell judge (an omp model id)
 
-# Transcriber: "scribe" (ELEVENLABS_API_KEY or OPENROUTER_API_KEY), "parakeet"
+# Transcriber: "scribe" (OPENROUTER_API_KEY), "parakeet"
 # (fluidaudiocli on PATH, macOS only), or "whisper" (mlx-whisper on macOS, faster-whisper elsewhere).
 # transcriber = "scribe"
 

@@ -81,7 +81,8 @@ sha256, `fix_drift`).
 Still in `analysis.analyze`, still no LLM:
 
 - `transcribe.prepare_audio` extracts canonical 16 kHz mono PCM once to `<run>/audio/audio-16k.wav` and caches a structured `Transcript`.
-  Three backends: Scribe v2 (ElevenLabs or OpenRouter), Parakeet and Whisper. The transcriber has no built-in default: it is named by `TALKINGHEAD_TRANSCRIBER`, `--transcriber` or the config file.
+  Three backends: Scribe v2 (through OpenRouter), Parakeet and Whisper. The transcriber has no built-in default: it is named by `TALKINGHEAD_TRANSCRIBER`, `--transcriber` or the config file.
+  Scribe splits a recording longer than one OpenRouter request into overlapping chunks cut at silences. `plan_scribe_chunks` uses the fewest chunks, and each word is kept from the chunk that owns its midpoint.
   The transcript includes words and native audio events rather than dropping non-word sounds.
   Saved Scribe responses replay only after their original request audio matches the current canonical PCM, with response identity included in the replay cache version.
   Parakeet's `TDT_EMISSION_DELAY_FRAMES` override still joins its cache key.

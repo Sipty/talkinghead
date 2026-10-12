@@ -257,21 +257,31 @@ def test_cached_transcript_keeps_events_and_legacy_entries_load_without_them(tmp
     assert legacy.events == []
 
 
-
 def test_live_scribe_without_a_key_fails_loudly_and_never_calls_out(tmp_path: Path, monkeypatch) -> None:
     from talkinghead.transcribe import ScribeTranscriber
 
     wav = tmp_path / "a.wav"
     _tone_wav(wav)
-    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("network used without a key"))
-    with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        ScribeTranscriber().transcribe(str(wav))
+
+
+def test_an_elevenlabs_key_is_no_longer_read(tmp_path: Path, monkeypatch) -> None:
+    from talkinghead.transcribe import ScribeTranscriber
+
+    wav = tmp_path / "a.wav"
+    _tone_wav(wav)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "old-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("network used without a key"))
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         ScribeTranscriber().transcribe(str(wav))
 
 
 def test_live_scribe_http_failure_reports_status_without_the_key(tmp_path: Path, monkeypatch) -> None:
-    from talkinghead.transcribe import ScribeTranscriber
+    from talkinghead.transcribe import ScribeRequestError, ScribeTranscriber
 
     wav = tmp_path / "a.wav"
     _tone_wav(wav)
@@ -279,15 +289,14 @@ def test_live_scribe_http_failure_reports_status_without_the_key(tmp_path: Path,
     def deny(request, timeout=None):
         raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"detail":"invalid"}'))
 
-    monkeypatch.setenv("ELEVENLABS_API_KEY", "secret-do-not-print")
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret-do-not-print")
     monkeypatch.setattr(urllib.request, "urlopen", deny)
-    with pytest.raises(RuntimeError) as err:
+    with pytest.raises(ScribeRequestError) as err:
         ScribeTranscriber().transcribe(str(wav))
     assert "401" in str(err.value) and "secret-do-not-print" not in str(err.value)
 
 
-# ----------------------------------------------- Scribe routes and fallback
+# ------------------------------------------- Scribe through OpenRouter only
 
 OPENROUTER_NATIVE = {
     "words": [
@@ -296,20 +305,6 @@ OPENROUTER_NATIVE = {
         {"word": "world.", "start": 1.3, "end": 1.8, "type": "word"},
     ],
 }
-ROUTE_ELEVENLABS_NATIVE = {
-    "words": [
-        {"text": "Hello", "start": 0.1, "end": 0.5, "type": "word", "logprob": 0.0},
-        {"text": "world.", "start": 1.3, "end": 1.8, "type": "word", "logprob": 0.0},
-    ],
-}
-
-
-def _route_env(monkeypatch, *, elevenlabs: bool, openrouter: bool) -> None:
-    for name, present in (("ELEVENLABS_API_KEY", elevenlabs), ("OPENROUTER_API_KEY", openrouter)):
-        if present:
-            monkeypatch.setenv(name, "route-test-key")
-        else:
-            monkeypatch.delenv(name, raising=False)
 
 
 def test_openrouter_parse_reads_untyped_words_events_and_confidence() -> None:
@@ -321,115 +316,53 @@ def test_openrouter_parse_reads_untyped_words_events_and_confidence() -> None:
     assert [(e.text, e.start, e.end) for e in events] == [("[laughs]", 0.6, 1.2)]
 
 
-def test_elevenlabs_parse_still_refuses_an_untyped_item() -> None:
-    from talkinghead.transcribe import parse_scribe_response
-
-    with pytest.raises(ValueError, match="unknown type"):
-        parse_scribe_response({"words": [{"text": "x", "start": 0.0, "end": 0.1}]}, duration=2.0)
-
-
-def test_scribe_uses_elevenlabs_when_its_key_is_set(tmp_path: Path, monkeypatch) -> None:
+def test_scribe_posts_to_openrouter_with_the_key_and_reads_the_answer(tmp_path: Path, monkeypatch) -> None:
     from talkinghead import transcribe as module
-    from talkinghead.transcribe import ScribeTranscriber
+    from talkinghead.transcribe import OPENROUTER_ENDPOINT, SCRIBE_VERSION, ScribeTranscriber
 
     wav = tmp_path / "a.wav"
     _tone_wav(wav)
-    _route_env(monkeypatch, elevenlabs=True, openrouter=True)
-    monkeypatch.setattr(module, "_elevenlabs_request", lambda path, key: json.dumps(ROUTE_ELEVENLABS_NATIVE).encode())
-    monkeypatch.setattr(module, "_openrouter_request", lambda *a: pytest.fail("fallback used while ElevenLabs answered"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("a subprocess ran"))
+    sent: list = []
+
+    def answer(request, timeout=None):
+        sent.append(request)
+        return io.BytesIO(json.dumps(OPENROUTER_NATIVE).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", answer)
     got = ScribeTranscriber().transcribe(str(wav))
-    assert got.version.endswith(";route=elevenlabs")
-    assert [w.text for w in got.words] == ["Hello", "world."]
-
-
-def test_scribe_falls_back_to_openrouter_when_elevenlabs_is_unavailable(tmp_path: Path, monkeypatch) -> None:
-    from talkinghead import transcribe as module
-    from talkinghead.transcribe import ProviderUnavailable, ScribeTranscriber
-
-    wav = tmp_path / "a.wav"
-    _tone_wav(wav)
-    _route_env(monkeypatch, elevenlabs=True, openrouter=True)
-
-    def down(path, key):
-        raise ProviderUnavailable("ElevenLabs Scribe request failed: HTTP 429")
-
-    monkeypatch.setattr(module, "_elevenlabs_request", down)
-    monkeypatch.setattr(module, "_openrouter_request", lambda path, key: json.dumps(OPENROUTER_NATIVE).encode())
-    got = ScribeTranscriber().transcribe(str(wav))
-    assert got.version.endswith(";route=openrouter")
+    assert got.version == f"{SCRIBE_VERSION};route=openrouter"
     assert [w.text for w in got.words] == ["Hello", "world."]
     assert [e.text for e in got.events] == ["[laughs]"]
+    assert len(sent) == 1 and sent[0].full_url == OPENROUTER_ENDPOINT
+    assert sent[0].get_header("Authorization") == "Bearer route-test-key"
+    body = json.loads(sent[0].data)
+    assert body["model"] == "elevenlabs/scribe-v2" and body["input_audio"]["format"] == "wav"
 
 
-def test_scribe_without_an_elevenlabs_key_goes_straight_to_openrouter(tmp_path: Path, monkeypatch) -> None:
+def test_scribe_treats_a_malformed_answer_as_an_error(tmp_path: Path, monkeypatch) -> None:
     from talkinghead import transcribe as module
     from talkinghead.transcribe import ScribeTranscriber
 
     wav = tmp_path / "a.wav"
     _tone_wav(wav)
-    _route_env(monkeypatch, elevenlabs=False, openrouter=True)
-    monkeypatch.setattr(module, "_elevenlabs_request", lambda *a: pytest.fail("ElevenLabs called without a key"))
-    monkeypatch.setattr(module, "_openrouter_request", lambda path, key: json.dumps(OPENROUTER_NATIVE).encode())
-    assert ScribeTranscriber().transcribe(str(wav)).version.endswith(";route=openrouter")
-
-
-def test_scribe_never_retries_a_malformed_response_on_the_other_route(tmp_path: Path, monkeypatch) -> None:
-    from talkinghead import transcribe as module
-    from talkinghead.transcribe import ScribeTranscriber
-
-    wav = tmp_path / "a.wav"
-    _tone_wav(wav)
-    _route_env(monkeypatch, elevenlabs=True, openrouter=True)
-    bad = {"words": [{"type": "word", "text": "x", "start": 5.0, "end": 6.0}]}
-    monkeypatch.setattr(module, "_elevenlabs_request", lambda path, key: json.dumps(bad).encode())
-    monkeypatch.setattr(module, "_openrouter_request", lambda *a: pytest.fail("malformed response retried on OpenRouter"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
+    bad = {"words": [{"word": "x", "start": 5.0, "end": 6.0}]}
+    monkeypatch.setattr(module, "_openrouter_request", lambda audio, key: json.dumps(bad).encode())
     with pytest.raises(ValueError, match="lies outside"):
         ScribeTranscriber().transcribe(str(wav))
 
 
-def test_scribe_reports_both_routes_when_both_fail_and_keeps_keys_out(tmp_path: Path, monkeypatch) -> None:
-    from talkinghead import transcribe as module
-    from talkinghead.transcribe import ProviderUnavailable, ScribeTranscriber
-
-    wav = tmp_path / "a.wav"
-    _tone_wav(wav)
-    _route_env(monkeypatch, elevenlabs=True, openrouter=True)
-
-    def el_down(path, key):
-        raise ProviderUnavailable("ElevenLabs Scribe request failed: HTTP 401")
-
-    def or_down(path, key):
-        raise ProviderUnavailable("OpenRouter Scribe request failed: HTTP 402")
-
-    monkeypatch.setattr(module, "_elevenlabs_request", el_down)
-    monkeypatch.setattr(module, "_openrouter_request", or_down)
-    with pytest.raises(ProviderUnavailable) as err:
-        ScribeTranscriber().transcribe(str(wav))
-    message = str(err.value)
-    assert "HTTP 401" in message and "HTTP 402" in message and "route-test-key" not in message
-
-
-def test_scribe_refuses_to_run_without_either_key(tmp_path: Path, monkeypatch) -> None:
-    from talkinghead import transcribe as module
-    from talkinghead.transcribe import ScribeTranscriber
-
-    wav = tmp_path / "a.wav"
-    _tone_wav(wav)
-    _route_env(monkeypatch, elevenlabs=False, openrouter=False)
-    monkeypatch.setattr(module, "_openrouter_request", lambda *a: pytest.fail("network used without a key"))
-    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
-        ScribeTranscriber().transcribe(str(wav))
-
-
-def test_the_cache_keeps_the_route_that_answered(tmp_path: Path, monkeypatch) -> None:
+def test_the_cache_replays_the_answer_it_stored(tmp_path: Path, monkeypatch) -> None:
     from talkinghead import transcribe as module
     from talkinghead.transcribe import ScribeTranscriber
 
     wav = tmp_path / "a.wav"
     _tone_wav(wav)
     cache = Cache(tmp_path / "cache")
-    _route_env(monkeypatch, elevenlabs=False, openrouter=True)
-    monkeypatch.setattr(module, "_openrouter_request", lambda path, key: json.dumps(OPENROUTER_NATIVE).encode())
+    monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
+    monkeypatch.setattr(module, "_openrouter_request", lambda audio, key: json.dumps(OPENROUTER_NATIVE).encode())
     first = transcribe_cached(cache, "sha", ScribeTranscriber(), str(wav))
     assert first.version.endswith(";route=openrouter")
     monkeypatch.setattr(module, "_openrouter_request", lambda *a: pytest.fail("cache miss for the same audio"))
@@ -437,37 +370,30 @@ def test_the_cache_keeps_the_route_that_answered(tmp_path: Path, monkeypatch) ->
     assert again.version == first.version
 
 
-def test_scribe_with_only_an_elevenlabs_key_calls_elevenlabs_and_never_runs_a_subprocess(
-        tmp_path: Path, monkeypatch) -> None:
-    from talkinghead import transcribe as module
-    from talkinghead.transcribe import SCRIBE_ENDPOINT, ScribeTranscriber
+@pytest.mark.parametrize("route", ["elevenlabs", "openrouter"])
+def test_cached_transcripts_from_either_old_route_still_replay(tmp_path: Path, monkeypatch, route: str) -> None:
+    from talkinghead.transcribe import SCRIBE_VERSION, TRANSCRIPT_CACHE_VERSION, ScribeTranscriber
 
-    wav = tmp_path / "a.wav"
-    _tone_wav(wav)
-    _route_env(monkeypatch, elevenlabs=True, openrouter=False)
-    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("a subprocess ran"))
-    sent: list = []
-
-    def answer(request, timeout=None):
-        sent.append(request)
-        return io.BytesIO(json.dumps(ROUTE_ELEVENLABS_NATIVE).encode())
-
-    monkeypatch.setattr(urllib.request, "urlopen", answer)
-    got = ScribeTranscriber().transcribe(str(wav))
-    assert got.version.endswith(";route=elevenlabs")
-    assert [w.text for w in got.words] == ["Hello", "world."]
-    assert sent[0].full_url == SCRIBE_ENDPOINT and sent[0].get_header("Xi-api-key") == "route-test-key"
+    cache = Cache(tmp_path / "cache")
+    stored = {"backend": "scribe", "version": f"{SCRIBE_VERSION};route={route}", "duration": 2.0,
+              "words": [{"w": "Hello", "s": 0.1, "e": 0.5, "p": 1.0}], "events": []}
+    params = {"backend": "scribe", "version": SCRIBE_VERSION}
+    cache.put("audio-sha", "transcript", params, TRANSCRIPT_CACHE_VERSION, stored)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("cache miss: a request was sent"))
+    got = transcribe_cached(cache, "audio-sha", ScribeTranscriber(), "unused.wav")
+    assert got.version == f"{SCRIBE_VERSION};route={route}"
+    assert [w.text for w in got.words] == ["Hello"]
 
 
 @pytest.mark.parametrize("key", ["private-test-key\n", "private-test-key\r\n", "private\nkey", "private-key-\u0100"])
 def test_invalid_key_format_is_rejected_without_disclosing_it(tmp_path: Path, monkeypatch, key: str) -> None:
-    from talkinghead import transcribe as module
     from talkinghead.transcribe import ScribeTranscriber
 
     wav = tmp_path / "a.wav"
     _tone_wav(wav)
-    monkeypatch.setenv("ELEVENLABS_API_KEY", key)
-    monkeypatch.setattr(module, "SCRIBE_ENDPOINT", "http://127.0.0.1:1/")
+    monkeypatch.setenv("OPENROUTER_API_KEY", key)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("request sent with a malformed key"))
     with pytest.raises(RuntimeError, match="single ASCII token") as err:
         ScribeTranscriber().transcribe(str(wav))
     assert key not in str(err.value)

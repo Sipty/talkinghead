@@ -106,7 +106,7 @@ def test_the_owner_environment_keeps_the_judge_and_scribe_cache_keys(monkeypatch
     # A change here re-keys every cached judge sample and transcript.
     monkeypatch.setenv("TALKINGHEAD_JUDGE", OWNER_JUDGE_SPEC)
     monkeypatch.setenv("TALKINGHEAD_TRANSCRIBER", "scribe")
-    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = load_config()
     judge = build_judge(cfg.judge, model=judge_model(cfg.judge, cfg.model), guidelines="G", effort=cfg.effort,
                         timeout=cfg.judge_timeout, fallback_command=cfg.fallback_command)
@@ -263,11 +263,10 @@ def _tone_wav(path: Path) -> None:
 
 def test_the_scribe_factory_is_live_with_a_key_and_names_what_is_missing(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     assert isinstance(build_transcriber("scribe"), ScribeTranscriber)
-    monkeypatch.delenv("ELEVENLABS_API_KEY")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         build_transcriber("scribe")
     with pytest.raises(ValueError, match="both"):
         build_transcriber("scribe", scribe_response=tmp_path / "r.json")
