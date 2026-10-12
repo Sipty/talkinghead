@@ -54,6 +54,7 @@ from typing import Protocol
 
 import numpy as np
 
+from . import voice
 from .store import Cache, sha256_file
 
 log = logging.getLogger(__name__)
@@ -962,6 +963,10 @@ SPEAKER_MAX_PER_CHUNK = 6
 # A label is a sliver, absorbed into its neighbours, when it has fewer words than this and a share below the next.
 SPEAKER_MIN_WORDS = 20
 SPEAKER_MIN_SHARE = 0.01
+# Voice signatures decide a match unless the runner-up is within this cosine margin; then text may break the tie.
+VOICE_MARGIN = 0.02
+# Text evidence breaks a voice tie only when every matched label has at least this many agreeing words.
+TEXT_TIE_MIN_WORDS = 8
 
 
 def _word_key(text: str) -> str:
@@ -1062,23 +1067,55 @@ def _fold(label: str, mapping: dict[str, str | None], pairs: Counter) -> str:
     return mapping[best]
 
 
-def _reconcile_speakers(parts: list[_ChunkAnswer], *, max_speakers: int | None = None) -> list[_ChunkAnswer]:
+def _chunk_voice(words: list[Word], chunk: ScribeChunk, mel: np.ndarray | None) -> dict[str, tuple[np.ndarray, int]]:
+    """Voice signature and frame count per label of one chunk; empty when there is no recording's log-mel."""
+    if mel is None:
+        return {}
+    shift = chunk.request_start / PCM_RATE
+    return voice.chunk_signatures(mel, [(w.start + shift, w.end + shift, w.speaker) for w in words if w.speaker is not None])
+
+
+def _voice_mapping(labels: list[str], known: list[str], local_vecs: dict[str, np.ndarray],
+                   global_vecs: dict[str, np.ndarray]) -> tuple[dict[str, str | None], float]:
+    """Labels onto known globals by total voice similarity, and the margin of the best over the runner-up.
+
+    Exhaustive over injective assignments, like _best_matching; a label with no fit maps to None.
+    """
+    scores: dict[tuple[str | None, ...], float] = {}
+    for choice in set(itertools.permutations([*known, *([None] * len(labels))], len(labels))):
+        scores[choice] = sum(voice.similarity(local_vecs[label], global_vecs[g])
+                             for label, g in zip(labels, choice) if g is not None)
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    best, best_score = ranked[0]
+    margin = best_score - ranked[1][1] if len(ranked) > 1 else float("inf")
+    return dict(zip(labels, best)), margin
+
+
+def _reconcile_speakers(parts: list[_ChunkAnswer], *, max_speakers: int | None = None,
+                        mel: np.ndarray | None = None) -> list[_ChunkAnswer]:
     """Every chunk's speaker labels under one set of global labels.
 
     A chunk labels its own speakers, so its "S0" may be the speaker an earlier chunk calls "S1".
-    Each chunk is matched against the one before it through the words both heard in their overlap.
-    Labels with no evidence, without a bound: pair with the one leftover known label when exactly one of
-    each is left, otherwise mint. With max_speakers: take a leftover known label, else mint while under the
-    bound, else fold (_fold). Chunk 0 keeps its max_speakers most frequent labels and folds the rest.
-    Slivers are absorbed first (_absorb_slivers).
+    Precedence for a chunk after the first: voice signatures decide when the best assignment beats the
+    runner-up by VOICE_MARGIN; otherwise the overlap-text evidence decides when it is strong (each matched
+    label has TEXT_TIE_MIN_WORDS agreeing words); otherwise the voice assignment stands. Without a log-mel
+    (mel=None) only the overlap-text evidence is used, as before.
+    A label with no match: pairs with the one leftover known label when exactly one of each is left
+    (no bound), takes a leftover known label (bound), mints while under the bound, else folds (_fold).
+    Chunk 0 keeps its max_speakers most frequent labels and folds the rest. Slivers are absorbed first.
     """
     out: list[_ChunkAnswer] = []
     known: list[str] = []
+    global_vecs: dict[str, np.ndarray] = {}
+    global_weights: dict[str, float] = {}
     for index, (chunk, raw, events) in enumerate(parts):
         words = _absorb_slivers(raw)
         local = sorted({w.speaker for w in words if w.speaker is not None})
         counts = Counter(w.speaker for w in words if w.speaker is not None)
         pairs = _adjacent_pairs(words)
+        voices = _chunk_voice(words, chunk, mel)
+        local_vecs = {label: vec for label, (vec, _) in voices.items()}
+        method = "identity"
         mapping: dict[str, str | None]
         if index == 0:
             ranked = sorted(local, key=lambda label: (-counts[label], label))
@@ -1091,7 +1128,18 @@ def _reconcile_speakers(parts: list[_ChunkAnswer], *, max_speakers: int | None =
             prev_chunk, prev_words, _ = out[-1]
             lo, hi = chunk.request_start / PCM_RATE, prev_chunk.request_end / PCM_RATE
             evidence = _overlap_evidence(_heard(prev_words, prev_chunk, lo, hi), _heard(words, chunk, lo, hi))
-            mapping = _best_matching(local, known, evidence)
+            text = _best_matching(local, known, evidence)
+            mapping = text
+            method = "text"
+            if local and known and all(label in local_vecs for label in local) \
+                    and all(g in global_vecs for g in known):
+                by_voice, margin = _voice_mapping(local, known, local_vecs, global_vecs)
+                matched = [label for label in local if text[label] is not None]
+                text_strong = bool(matched) and all(evidence[(label, text[label])] >= TEXT_TIE_MIN_WORDS
+                                                    for label in matched)
+                if margin >= VOICE_MARGIN or not text_strong:
+                    mapping = by_voice
+                    method = f"voice(margin {margin:.3f})"
             unmatched = [label for label in local if mapping[label] is None]
             free = [g for g in known if g not in mapping.values()]
             pair_free = max_speakers is not None or (len(free) == 1 and len(unmatched) == 1)
@@ -1103,7 +1151,13 @@ def _reconcile_speakers(parts: list[_ChunkAnswer], *, max_speakers: int | None =
                     known.append(mapping[label])
                 else:
                     mapping[label] = _fold(label, mapping, pairs)
-            log.info("chunk %d speaker labels %s, agreement %s", index + 1, mapping, dict(evidence))
+            log.info("chunk %d speaker labels %s via %s, agreement %s", index + 1, mapping, method, dict(evidence))
+        for label in local:
+            target = mapping[label]
+            if label in voices and target is not None:
+                vec, count = voices[label]
+                global_vecs[target], global_weights[target] = voice.merge(
+                    global_vecs.get(target), global_weights.get(target, 0.0), vec, count)
         relabelled = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in words]
         out.append((chunk, relabelled, events))
     return out
@@ -1142,7 +1196,8 @@ class ScribeTranscriber:
                                         overlap_frames=_overlap_frames(), choose_seam=_SeamFinder(wav))
             parts = _run_chunks(wav, chunks, key, self.diarize)
             if self.diarize:
-                parts = _reconcile_speakers(parts, max_speakers=self.diarize_speakers)
+                voice_mel = voice.log_mel(_read_pcm(wav).astype(np.float32) / 32768.0)
+                parts = _reconcile_speakers(parts, max_speakers=self.diarize_speakers, mel=voice_mel)
         words, events = _merge_chunks(parts, frames)
         version = f"{self.version};route=openrouter"
         if len(chunks) > 1:
