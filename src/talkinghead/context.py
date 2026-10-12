@@ -64,7 +64,7 @@ class Context:
 
     def as_words(self) -> list[Word]:
         """Refined words as the transcribe Word type (refined times)."""
-        return [Word(w.text, w.start, w.end, 1.0) for w in self.words]
+        return [Word(w.text, w.start, w.end, 1.0, w.speaker) for w in self.words]
 
     def sentences(self) -> list[Sentence]:
         from .candidates import sentence_table

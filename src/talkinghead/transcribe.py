@@ -32,7 +32,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import itertools
 import json
+import logging
 import math
 import os
 import shutil
@@ -43,6 +45,7 @@ import urllib.error
 import urllib.request
 import wave
 from array import array
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -52,6 +55,8 @@ from typing import Protocol
 import numpy as np
 
 from .store import Cache, sha256_file
+
+log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 # The same large-v3-turbo weights for faster-whisper, used off macOS.
@@ -69,6 +74,8 @@ class Word:
     start: float
     end: float
     probability: float
+    # Diarized speaker ("S0", "S1", ...) for the recording; None when the route labels none.
+    speaker: str | None = None
 
 
 @dataclass
@@ -419,6 +426,19 @@ def probe_words(wav_path: str, start: float, end: float, backend: str, model: st
 TRANSCRIPT_CACHE_VERSION = 1
 
 
+def _word_to_dict(w: Word) -> dict:
+    out = {"w": w.text, "s": w.start, "e": w.end, "p": w.probability}
+    if w.speaker is not None:
+        out["sp"] = w.speaker
+    return out
+
+
+def _word_from_dict(d: dict) -> Word:
+    speaker = d.get("sp")
+    return Word(str(d["w"]), float(d["s"]), float(d["e"]), float(d.get("p", 1.0)),
+                None if speaker is None else str(speaker))
+
+
 @dataclass
 class Transcript:
     backend: str
@@ -433,7 +453,7 @@ class Transcript:
             "backend": self.backend,
             "version": self.version,
             "duration": self.duration,
-            "words": [{"w": w.text, "s": w.start, "e": w.end, "p": w.probability} for w in self.words],
+            "words": [_word_to_dict(w) for w in self.words],
             "events": [{"t": e.text, "s": e.start, "e": e.end} for e in self.events],
         }
 
@@ -443,7 +463,7 @@ class Transcript:
             backend=str(d["backend"]),
             version=str(d["version"]),
             duration=float(d["duration"]),
-            words=[Word(str(w["w"]), float(w["s"]), float(w["e"]), float(w.get("p", 1.0))) for w in d["words"]],
+            words=[_word_from_dict(w) for w in d["words"]],
             events=[AudioEvent(str(e["t"]), float(e["s"]), float(e["e"])) for e in d.get("events", [])],
         )
 
@@ -514,6 +534,7 @@ class WhisperTranscriber:
 # OpenRouter rejects a request body over OPENROUTER_BODY_LIMIT_BYTES with HTTP 413.
 # A recording that does not fit one request is cut at quiet points into overlapping
 # chunks, sent a few at a time, and merged back onto the recording's clock.
+# Each word carries its diarized speaker, relabelled to one set of labels across chunks.
 # Saved responses (ElevenLabs JSON, via --scribe-response) still replay through
 # SavedScribeTranscriber, which reads that format with parse_scribe_response.
 
@@ -535,11 +556,11 @@ SCRIBE_SEAM_SEARCH_SEC = 120.0
 SCRIBE_QUIET_BLOCK_SEC = 0.05
 # Chunk requests in flight at once.
 SCRIBE_MAX_PARALLEL = 3
-# Bump when the response parser changes what words/events it yields.
-SCRIBE_PARSER_VERSION = 1
+# Bump when the response parser changes what words, events or speakers it yields.
+SCRIBE_PARSER_VERSION = 2
 # The cache key of every live Scribe transcript. Changing it re-keys every cached transcript.
 # The route and the chunk count are appended to the stored version, not to this key.
-SCRIBE_VERSION = f"scribe_v2;word;events;diarize=false;verbatim;parse={SCRIBE_PARSER_VERSION}"
+SCRIBE_VERSION = f"scribe_v2;word;events;diarize=true;verbatim;parse={SCRIBE_PARSER_VERSION}"
 # Scribe stamps may trail the audio end by a few frames.
 SCRIBE_TIME_SLACK = 0.1
 SCRIBE_TIMEOUT_SEC = 1200
@@ -560,8 +581,26 @@ def _probability_from_confidence(item: dict) -> float:
     return 1.0 if confidence is None else min(1.0, max(0.0, float(confidence)))
 
 
+def _speaker_from_item(item: dict) -> str | None:
+    """A word's speaker as "S0", "S1", ...: `speaker_label` ("speaker_0") preferred, else `speaker` (0)."""
+    label = item.get("speaker_label")
+    if isinstance(label, str) and label.strip():
+        label = label.strip()
+        digits = label.removeprefix("speaker_")
+        if digits != label and digits.isdigit():
+            return f"S{int(digits)}"
+        return label
+    number = item.get("speaker")
+    if isinstance(number, int) and not isinstance(number, bool):
+        return f"S{number}"
+    if isinstance(number, str) and number.strip():
+        return number.strip()
+    return None
+
+
 def _parse_words(items, *, duration: float, default_kind: str | None, text_key: str,
-                 probability) -> tuple[list[Word], list[AudioEvent]]:
+                 probability,
+                 speaker_of: Callable[[dict], str | None] | None = None) -> tuple[list[Word], list[AudioEvent]]:
     """Words and audio events on the audio's timeline.
 
     Spacing items carry no content and are skipped. A stamp outside the audio
@@ -591,7 +630,8 @@ def _parse_words(items, *, duration: float, default_kind: str | None, text_key: 
         if not text:
             continue
         if kind == "word":
-            words.append(Word(text, start, end, probability(item)))
+            speaker = speaker_of(item) if speaker_of is not None else None
+            words.append(Word(text, start, end, probability(item), speaker))
         else:
             events.append(AudioEvent(text, start, end))
     return words, events
@@ -611,7 +651,7 @@ def parse_openrouter_response(native: dict, *, duration: float) -> tuple[list[Wo
     """
     items = native.get("words") if isinstance(native, dict) else None
     return _parse_words(items, duration=duration, default_kind="word", text_key="word",
-                        probability=_probability_from_confidence)
+                        probability=_probability_from_confidence, speaker_of=_speaker_from_item)
 
 
 def _wav_frames(path: str | Path) -> tuple[str, int] | None:
@@ -679,6 +719,8 @@ def _openrouter_body(wav: bytes) -> bytes:
         "input_audio": {"data": base64.b64encode(wav).decode("ascii"), "format": "wav"},
         "response_format": "verbose_json",
         "timestamp_granularities": ["word"],
+        # Labels every word with the speaker who said it (see parse_openrouter_response).
+        "diarize": True,
     }).encode()
 
 
@@ -868,7 +910,7 @@ def _merge_chunks(parts: list[tuple[ScribeChunk, list[Word], list[AudioEvent]]],
         for w in got_words:
             s, e = w.start + shift, w.end + shift
             if _owned(s, e, lo, hi, last):
-                words.append(Word(w.text, s, e, w.probability))
+                words.append(replace(w, start=s, end=e))
         for ev in got_events:
             s, e = ev.start + shift, ev.end + shift
             if _owned(s, e, lo, hi, last):
@@ -904,6 +946,103 @@ def _run_chunks(wav: Path, chunks: list[ScribeChunk], key: str) -> list[_ChunkAn
         pool.shutdown(wait=True, cancel_futures=True)
 
 
+# Two chunks hear the same word when its text matches and its midpoints lie this close (seconds).
+SPEAKER_MATCH_SEC = 0.5
+# Reconciliation tries every assignment of a chunk's labels, so it stays exhaustive only at this size.
+SPEAKER_MAX_PER_CHUNK = 6
+
+
+def _word_key(text: str) -> str:
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def _heard(words: list[Word], chunk: ScribeChunk, lo: float, hi: float) -> list[tuple[float, str, str]]:
+    """(midpoint on the recording clock, text key, speaker) of the labelled words whose midpoint is in [lo, hi)."""
+    shift = chunk.request_start / PCM_RATE
+    heard = []
+    for w in words:
+        mid = (w.start + w.end) / 2 + shift
+        if w.speaker is not None and lo <= mid < hi:
+            heard.append((mid, _word_key(w.text), w.speaker))
+    return heard
+
+
+def _overlap_evidence(prev: list[tuple[float, str, str]], cur: list[tuple[float, str, str]]) -> Counter:
+    """Counts of (current label, previous label) over words both chunks heard at the same time.
+
+    A word pairs with at most one word of the other chunk: same text, nearest midpoint within SPEAKER_MATCH_SEC.
+    """
+    counts: Counter = Counter()
+    taken: set[int] = set()
+    for mid, key, label in cur:
+        best: int | None = None
+        for i, (pmid, pkey, _) in enumerate(prev):
+            if i in taken or pkey != key or abs(pmid - mid) > SPEAKER_MATCH_SEC:
+                continue
+            if best is None or abs(pmid - mid) < abs(prev[best][0] - mid):
+                best = i
+        if best is not None:
+            taken.add(best)
+            counts[(label, prev[best][2])] += 1
+    return counts
+
+
+def _best_matching(local: list[str], known: list[str], counts: Counter) -> dict[str, str | None]:
+    """Each local label's known label under the assignment with the most total agreement; None when unmatched."""
+    if len(local) > SPEAKER_MAX_PER_CHUNK:
+        raise ValueError(f"a chunk labels {len(local)} speakers; at most {SPEAKER_MAX_PER_CHUNK} can be reconciled")
+    best: tuple[str | None, ...] = ()
+    best_score = -1
+    for choice in itertools.permutations([*known, *([None] * len(local))], len(local)):
+        score = sum(counts[(label, g)] for label, g in zip(local, choice) if g is not None)
+        if score > best_score:
+            best, best_score = choice, score
+    return {label: (g if g is not None and counts[(label, g)] else None) for label, g in zip(local, best)}
+
+
+def _mint_label(known: list[str]) -> str:
+    """The first S<n> label not yet in use."""
+    n = len(known)
+    while f"S{n}" in known:
+        n += 1
+    return f"S{n}"
+
+
+def _reconcile_speakers(parts: list[_ChunkAnswer]) -> list[_ChunkAnswer]:
+    """Every chunk's speaker labels under one set of global labels.
+
+    A chunk labels its own speakers, so its "S0" may be the speaker an earlier chunk calls "S1".
+    Each chunk is matched against the one before it through the words both heard in their overlap.
+    A local label without agreement takes the one leftover known label when exactly one of each is
+    left; otherwise it becomes a new label.
+    """
+    out: list[_ChunkAnswer] = []
+    known: list[str] = []
+    for index, (chunk, words, events) in enumerate(parts):
+        local = sorted({w.speaker for w in words if w.speaker is not None})
+        if index == 0:
+            mapping: dict[str, str | None] = {label: label for label in local}
+            known.extend(local)
+        else:
+            prev_chunk, prev_words, _ = out[-1]
+            lo, hi = chunk.request_start / PCM_RATE, prev_chunk.request_end / PCM_RATE
+            counts = _overlap_evidence(_heard(prev_words, prev_chunk, lo, hi), _heard(words, chunk, lo, hi))
+            mapping = _best_matching(local, known, counts)
+            free = [g for g in known if g not in mapping.values()]
+            unmatched = [label for label in local if mapping[label] is None]
+            if len(free) == 1 and len(unmatched) == 1:
+                mapping[unmatched[0]] = free[0]
+            for label in local:
+                if mapping[label] is None:
+                    mapping[label] = _mint_label(known)
+                    known.append(mapping[label])
+            log.info("chunk %d speaker labels %s, agreement %s", index + 1, mapping, dict(counts))
+        relabelled = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in words]
+        out.append((chunk, relabelled, events))
+    return out
+
+
+
 class ScribeTranscriber:
     """Scribe v2 through OpenRouter, the only route; see the section header.
 
@@ -924,7 +1063,7 @@ class ScribeTranscriber:
                 frames = w.getnframes()
             chunks = plan_scribe_chunks(frames, max_request_frames=_max_request_frames(),
                                         overlap_frames=_overlap_frames(), choose_seam=_SeamFinder(wav))
-            parts = _run_chunks(wav, chunks, key)
+            parts = _reconcile_speakers(_run_chunks(wav, chunks, key))
         words, events = _merge_chunks(parts, frames)
         version = f"{self.version};route=openrouter"
         if len(chunks) > 1:

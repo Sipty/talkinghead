@@ -134,6 +134,8 @@ class RefinedWord:
     # no burst was found): the only places a sentence may be split by a pause.
     burst_last: bool = True
     burst_first: bool = True
+    # Speaker of the source word (transcribe.Word.speaker); None when unlabelled.
+    speaker: str | None = None
 
 
 def _attach(w: Word, bursts: list[tuple[float, float]]) -> int | None:
@@ -169,7 +171,7 @@ def refine_word_bounds(
     for i, w in enumerate(words):
         k = attached[i]
         if k is None:
-            out.append(RefinedWord(w.text, w.start, w.end, w.start, w.end, 0.0, True, True))
+            out.append(RefinedWord(w.text, w.start, w.end, w.start, w.end, 0.0, True, True, speaker=w.speaker))
             continue
         bs, be = bursts[k]
         first = i == 0 or attached[i - 1] != k
@@ -185,7 +187,8 @@ def refine_word_bounds(
                 start = max(bs, min(start, end - BURST_MIN_SEC))
             else:
                 start, end = min(max(w.start, bs), be - BURST_MIN_SEC), min(be, max(w.end, w.start + BURST_MIN_SEC))
-        out.append(RefinedWord(w.text, start, end, w.start, w.end, 0.5 + 0.25 * first + 0.25 * last, last, first))
+        out.append(RefinedWord(w.text, start, end, w.start, w.end,
+                               0.5 + 0.25 * first + 0.25 * last, last, first, speaker=w.speaker))
     # Monotonic: a word never starts before the previous one ends, and never
     # collapses below BURST_MIN_SEC.
     fixed: list[RefinedWord] = []
@@ -193,7 +196,7 @@ def refine_word_bounds(
         if fixed and r.start < fixed[-1].end:
             start = fixed[-1].end
             r = RefinedWord(r.text, start, max(r.end, start + BURST_MIN_SEC), r.asr_start, r.asr_end,
-                            r.confidence, r.burst_last, r.burst_first)
+                            r.confidence, r.burst_last, r.burst_first, speaker=r.speaker)
         fixed.append(r)
     return fixed
 

@@ -114,7 +114,7 @@ def test_the_owner_environment_keeps_the_judge_and_scribe_cache_keys(monkeypatch
     assert prompt_sha("PROMPT", judge.name) == "c7f31151999031a3ebf6910e"
     transcriber = build_transcriber(cfg.transcriber)
     assert (transcriber.name, transcriber.version) == (
-        "scribe", "scribe_v2;word;events;diarize=false;verbatim;parse=1")
+        "scribe", "scribe_v2;word;events;diarize=true;verbatim;parse=2")
 
 
 def test_transcriber_factory_never_falls_back_silently(monkeypatch: pytest.MonkeyPatch) -> None:

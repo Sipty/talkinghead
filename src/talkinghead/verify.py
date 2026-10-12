@@ -683,7 +683,7 @@ def project_words(plan: Plan, words: Sequence) -> list[Word]:
         b = plan.source_to_output(w.end - 1e-6)
         if a is None or b is None or abs((b - a) - (w.end - w.start - 2e-6)) > 1e-3:
             continue
-        out.append(Word(w.text, a - 1e-6, b + 1e-6, getattr(w, "probability", 1.0)))
+        out.append(Word(w.text, a - 1e-6, b + 1e-6, getattr(w, "probability", 1.0), getattr(w, "speaker", None)))
     return out
 
 

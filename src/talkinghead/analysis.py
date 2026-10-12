@@ -231,7 +231,7 @@ def analyze(
         audio_sha, "silences", {"frame_sec": 0.02}, ANALYSIS_VERSION, lambda: detect_silences(wav)
     )]
     words = refine_word_bounds(transcript.words, env, floor)
-    as_words = [Word(w.text, w.start, w.end, 1.0) for w in words]
+    as_words = [Word(w.text, w.start, w.end, 1.0, w.speaker) for w in words]
     env_lists = (env.db.tolist(), env.zcr.tolist())
     # Detector results depend on the (refined) words they were given, so the
     # cache key carries a digest of them, not just the backend name.
