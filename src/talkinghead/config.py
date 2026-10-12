@@ -119,6 +119,10 @@ class Config:
     panel: list[str] | None = None
     effort: str | None = None  # Claude Code only; the shell bridge ignores it
     transcriber: str | None = None  # "scribe" | "parakeet" | "whisper"; no default
+    # Scribe only: label each word with its speaker. Its own transcript cache key; off keeps the old one.
+    diarize: bool = False
+    # Expected speaker count; bounds reconciliation (OpenRouter ignores a speaker-count request). Needs diarize.
+    diarize_speakers: int | None = None
     guidelines: str = "editorial/guidelines.md"
     # Render: output frame rate; cut edges snap to this grid.
     fps: int = 30
@@ -208,10 +212,18 @@ class Config:
             raise ValueError(
                 f"visuals_corner {self.visuals_corner!r} is not one of "
                 f"{', '.join(sorted(OVERLAY_CORNERS))}")
+        if self.diarize_speakers is not None and (self.diarize_speakers < 1 or not self.diarize):
+            raise ValueError("diarize_speakers needs diarize = true and a speaker count of at least 1")
         return self
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        # Absent when unset, so the stage memos that key on the whole config keep their keys.
+        if not self.diarize:
+            del d["diarize"]
+        if self.diarize_speakers is None:
+            del d["diarize_speakers"]
+        return d
 
 
 def config_path_from_env() -> Path | None:

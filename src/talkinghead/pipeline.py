@@ -244,10 +244,19 @@ def _retake_policy() -> str:
     )] + [prompts.RETAKE_SCHEMA, prompts.MARKER_SCHEMA])
 
 
+def _words_sha(words) -> str:
+    """Digest of the words' text and bounds.
+
+    Speakers join the digest only when a word has one, so undiarized cooks keep their memo keys.
+    """
+    rows = [(w.text, round(w.start, 3), round(w.end, 3)) for w in words]
+    if any(w.speaker is not None for w in words):
+        rows = [(*row, w.speaker) for row, w in zip(rows, words)]
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()[:16]
+
+
 def _stage_inputs(ctx: Context, guidelines: str, extra: dict | None = None) -> dict:
-    words_sha = hashlib.sha256(
-        json.dumps([(w.text, round(w.start, 3), round(w.end, 3)) for w in ctx.words]).encode()
-    ).hexdigest()[:16]
+    words_sha = _words_sha(ctx.words)
     return {
         "audio": ctx.provenance.get("audio_sha256"),
         "analysis_version": ctx.provenance.get("analysis_version"),

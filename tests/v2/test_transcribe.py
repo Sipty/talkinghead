@@ -349,7 +349,7 @@ def test_scribe_treats_a_malformed_answer_as_an_error(tmp_path: Path, monkeypatc
     _tone_wav(wav)
     monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
     bad = {"words": [{"word": "x", "start": 5.0, "end": 6.0}]}
-    monkeypatch.setattr(module, "_openrouter_request", lambda audio, key: json.dumps(bad).encode())
+    monkeypatch.setattr(module, "_openrouter_request", lambda audio, key, **_: json.dumps(bad).encode())
     with pytest.raises(ValueError, match="lies outside"):
         ScribeTranscriber().transcribe(str(wav))
 
@@ -362,10 +362,10 @@ def test_the_cache_replays_the_answer_it_stored(tmp_path: Path, monkeypatch) -> 
     _tone_wav(wav)
     cache = Cache(tmp_path / "cache")
     monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
-    monkeypatch.setattr(module, "_openrouter_request", lambda audio, key: json.dumps(OPENROUTER_NATIVE).encode())
+    monkeypatch.setattr(module, "_openrouter_request", lambda audio, key, **_: json.dumps(OPENROUTER_NATIVE).encode())
     first = transcribe_cached(cache, "sha", ScribeTranscriber(), str(wav))
     assert first.version.endswith(";route=openrouter")
-    monkeypatch.setattr(module, "_openrouter_request", lambda *a: pytest.fail("cache miss for the same audio"))
+    monkeypatch.setattr(module, "_openrouter_request", lambda *a, **k: pytest.fail("cache miss for the same audio"))
     again = transcribe_cached(cache, "sha", ScribeTranscriber(), str(wav))
     assert again.version == first.version
 

@@ -153,7 +153,7 @@ def _scribe_stand_in(monkeypatch: pytest.MonkeyPatch, pcm: bytes, words, events,
     lock = threading.Lock()
     active = {"now": 0, "peak": 0}
 
-    def answer(wav_bytes: bytes, key: str) -> bytes:
+    def answer(wav_bytes: bytes, key: str, diarize: bool = False) -> bytes:
         with wave.open(io.BytesIO(wav_bytes), "rb") as w:
             sent = w.readframes(w.getnframes())
         offset = pcm.find(sent)
@@ -187,7 +187,7 @@ def _scribe_stand_in(monkeypatch: pytest.MonkeyPatch, pcm: bytes, words, events,
 @pytest.fixture
 def small_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
-    monkeypatch.setattr(module, "_max_request_frames", lambda: MAX_FRAMES)
+    monkeypatch.setattr(module, "_max_request_frames", lambda **_: MAX_FRAMES)
     monkeypatch.setattr(module, "_overlap_frames", lambda: OVERLAP)
     monkeypatch.setattr(module, "_SeamFinder", lambda wav: _clamp_seam)
 
@@ -255,7 +255,7 @@ def test_chunk_requests_never_exceed_the_parallel_cap(
 def test_seams_land_in_the_longest_silence_near_their_targets(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "route-test-key")
-    monkeypatch.setattr(module, "_max_request_frames", lambda: MAX_FRAMES)
+    monkeypatch.setattr(module, "_max_request_frames", lambda **_: MAX_FRAMES)
     monkeypatch.setattr(module, "_overlap_frames", lambda: OVERLAP)
     samples = _speech(50.0, [(15.5, 16.5), (30.2, 30.7)])
     wav = _write(tmp_path / "talk.wav", samples)

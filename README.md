@@ -247,6 +247,8 @@ A `talkinghead.toml` in the repository root is not loaded automatically.
 
 The settings most people change first are `votes` and `agree` (the vote size), `content_enabled`, `visuals_enabled`, `visuals_research`, `visuals_corner`, `crf` and `preset` (final quality), and `judge_timeout`.
 
+`diarize = true` in the config file (or `--diarize`) makes Scribe label every word with its speaker. Those transcripts have their own cache key, so cooks made without it keep their caches.
+
 ### Editorial guidelines
 
 `editorial/guidelines.md` is one creator's example rule set.

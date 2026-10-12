@@ -556,11 +556,14 @@ SCRIBE_SEAM_SEARCH_SEC = 120.0
 SCRIBE_QUIET_BLOCK_SEC = 0.05
 # Chunk requests in flight at once.
 SCRIBE_MAX_PARALLEL = 3
-# Bump when the response parser changes what words, events or speakers it yields.
-SCRIBE_PARSER_VERSION = 2
-# The cache key of every live Scribe transcript. Changing it re-keys every cached transcript.
-# The route and the chunk count are appended to the stored version, not to this key.
-SCRIBE_VERSION = f"scribe_v2;word;events;diarize=true;verbatim;parse={SCRIBE_PARSER_VERSION}"
+# Cache keys. An undiarized transcript keeps the key it has always had, so cooks made before
+# diarization still replay. Changing either key re-keys every transcript of that kind.
+# The route and the chunk count are appended to the stored version, not to these keys.
+SCRIBE_VERSION = "scribe_v2;word;events;diarize=false;verbatim;parse=1"
+# A diarized transcript carries speakers, so it has a key of its own.
+SCRIBE_DIARIZED_VERSION = "scribe_v2;word;events;diarize=true;verbatim;parse=2"
+# OpenRouter accepts a speaker count and ignores it (checked on a real sample: provider options and top level),
+# so diarize_speakers bounds the reconciliation instead of being forwarded.
 # Scribe stamps may trail the audio end by a few frames.
 SCRIBE_TIME_SLACK = 0.1
 SCRIBE_TIMEOUT_SEC = 1200
@@ -644,14 +647,17 @@ def parse_scribe_response(native: dict, *, duration: float) -> tuple[list[Word],
                         probability=_probability_from_logprob)
 
 
-def parse_openrouter_response(native: dict, *, duration: float) -> tuple[list[Word], list[AudioEvent]]:
+def parse_openrouter_response(native: dict, *, duration: float,
+                              diarized: bool = False) -> tuple[list[Word], list[AudioEvent]]:
     """OpenRouter STT verbose_json -> the same words and events.
 
     OpenRouter omits `type` on spoken words, so a missing type means "word" on this route only.
+    `diarized` reads each word's speaker; an undiarized request has none to read.
     """
     items = native.get("words") if isinstance(native, dict) else None
     return _parse_words(items, duration=duration, default_kind="word", text_key="word",
-                        probability=_probability_from_confidence, speaker_of=_speaker_from_item)
+                        probability=_probability_from_confidence,
+                        speaker_of=_speaker_from_item if diarized else None)
 
 
 def _wav_frames(path: str | Path) -> tuple[str, int] | None:
@@ -713,22 +719,24 @@ def _send(request: urllib.request.Request, key: str, label: str) -> bytes:
         raise ScribeRequestError(f"{label} request timed out") from None
 
 
-def _openrouter_body(wav: bytes) -> bytes:
-    return json.dumps({
+def _openrouter_body(wav: bytes, *, diarize: bool = False) -> bytes:
+    body = {
         "model": OPENROUTER_SCRIBE_MODEL,
         "input_audio": {"data": base64.b64encode(wav).decode("ascii"), "format": "wav"},
         "response_format": "verbose_json",
         "timestamp_granularities": ["word"],
-        # Labels every word with the speaker who said it (see parse_openrouter_response).
-        "diarize": True,
-    }).encode()
+    }
+    if diarize:
+        # Labels every word with the speaker who said it. Absent when off, so undiarized bodies are unchanged.
+        body["diarize"] = True
+    return json.dumps(body).encode()
 
 
-def _openrouter_request(wav: bytes, key: str) -> bytes:
+def _openrouter_request(wav: bytes, key: str, *, diarize: bool = False) -> bytes:
     """POST one WAV to OpenRouter's Scribe endpoint; the response body."""
     _ascii_key_or_raise(key, OPENROUTER_KEY_ENV)
     request = urllib.request.Request(
-        OPENROUTER_ENDPOINT, data=_openrouter_body(wav), method="POST",
+        OPENROUTER_ENDPOINT, data=_openrouter_body(wav, diarize=diarize), method="POST",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     return _send(request, key, "OpenRouter Scribe")
 
@@ -754,9 +762,9 @@ def _pcm_wav(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _max_request_frames() -> int:
+def _max_request_frames(*, diarize: bool = False) -> int:
     """Most PCM frames one request can carry while its whole JSON body stays within the budget."""
-    base64_room = SCRIBE_BODY_BUDGET_BYTES - len(_openrouter_body(b""))
+    base64_room = SCRIBE_BODY_BUDGET_BYTES - len(_openrouter_body(b"", diarize=diarize))
     wav_bytes = (base64_room // 4) * 3  # base64 writes 4 characters per 3 bytes
     return (wav_bytes - WAV_HEADER_BYTES) // 2
 
@@ -919,14 +927,14 @@ def _merge_chunks(parts: list[tuple[ScribeChunk, list[Word], list[AudioEvent]]],
 
 
 def _scribe_chunk(wav: Path, chunk: ScribeChunk, key: str, index: int,
-                  total: int) -> tuple[list[Word], list[AudioEvent]]:
+                  total: int, diarize: bool = False) -> tuple[list[Word], list[AudioEvent]]:
     """One request's words and events, on the chunk's own clock (zero at its request start)."""
     pcm = _read_frames(wav, chunk.request_start, chunk.request_end)
     seconds = (chunk.request_end - chunk.request_start) / PCM_RATE
     label = f" (chunk {index + 1} of {total})" if total > 1 else ""
     try:
-        native = json.loads(_openrouter_request(_pcm_wav(pcm), key))
-        return parse_openrouter_response(native, duration=seconds)
+        native = json.loads(_openrouter_request(_pcm_wav(pcm), key, diarize=diarize))
+        return parse_openrouter_response(native, duration=seconds, diarized=diarize)
     except ScribeRequestError as e:
         raise ScribeRequestError(f"{e}{label}") from None
     except ValueError as e:
@@ -936,11 +944,12 @@ def _scribe_chunk(wav: Path, chunk: ScribeChunk, key: str, index: int,
 _ChunkAnswer = tuple[ScribeChunk, list[Word], list[AudioEvent]]
 
 
-def _run_chunks(wav: Path, chunks: list[ScribeChunk], key: str) -> list[_ChunkAnswer]:
+def _run_chunks(wav: Path, chunks: list[ScribeChunk], key: str, diarize: bool = False) -> list[_ChunkAnswer]:
     """Every chunk's answer, in chunk order. The first failure fails the whole transcription."""
     pool = ThreadPoolExecutor(max_workers=min(SCRIBE_MAX_PARALLEL, len(chunks)))
     try:
-        futures = [pool.submit(_scribe_chunk, wav, c, key, i, len(chunks)) for i, c in enumerate(chunks)]
+        futures = [pool.submit(_scribe_chunk, wav, c, key, i, len(chunks), diarize)
+                   for i, c in enumerate(chunks)]
         return [(c, *f.result()) for c, f in zip(chunks, futures)]
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
@@ -950,6 +959,9 @@ def _run_chunks(wav: Path, chunks: list[ScribeChunk], key: str) -> list[_ChunkAn
 SPEAKER_MATCH_SEC = 0.5
 # Reconciliation tries every assignment of a chunk's labels, so it stays exhaustive only at this size.
 SPEAKER_MAX_PER_CHUNK = 6
+# A label is a sliver, absorbed into its neighbours, when it has fewer words than this and a share below the next.
+SPEAKER_MIN_WORDS = 20
+SPEAKER_MIN_SHARE = 0.01
 
 
 def _word_key(text: str) -> str:
@@ -1008,35 +1020,90 @@ def _mint_label(known: list[str]) -> str:
     return f"S{n}"
 
 
-def _reconcile_speakers(parts: list[_ChunkAnswer]) -> list[_ChunkAnswer]:
+def _absorb_slivers(words: list[Word]) -> list[Word]:
+    """Words of a label too small to be a speaker take the speaker of the nearest solid word.
+
+    A sliver has under SPEAKER_MIN_WORDS words and under SPEAKER_MIN_SHARE of the chunk's labelled words.
+    A chunk with no solid label is returned unchanged.
+    """
+    counts = Counter(w.speaker for w in words if w.speaker is not None)
+    total = sum(counts.values())
+    slivers = {s for s, n in counts.items() if n < SPEAKER_MIN_WORDS and n < SPEAKER_MIN_SHARE * total}
+    solid = [i for i, w in enumerate(words) if w.speaker is not None and w.speaker not in slivers]
+    if not slivers or not solid:
+        return words
+    out = list(words)
+    for i, w in enumerate(words):
+        if w.speaker in slivers:
+            mid = (w.start + w.end) / 2
+            j = min(solid, key=lambda k: (abs((words[k].start + words[k].end) / 2 - mid), k))
+            out[i] = replace(w, speaker=words[j].speaker)
+    return out
+
+
+def _adjacent_pairs(words: list[Word]) -> Counter:
+    """How often two different labels sit next to each other in time, as sorted pairs."""
+    labelled = sorted((w for w in words if w.speaker is not None), key=lambda w: w.start)
+    pairs: Counter = Counter()
+    for a, b in zip(labelled, labelled[1:]):
+        if a.speaker != b.speaker:
+            pairs[tuple(sorted((a.speaker, b.speaker)))] += 1
+    return pairs
+
+
+def _fold(label: str, mapping: dict[str, str | None], pairs: Counter) -> str:
+    """The global label for a label with no evidence once the speaker count is full.
+
+    It takes the global label of the matched local label it sits next to least in time. A backchannel
+    sits between the other speaker's turns, so this is the other speaker. Ties go to the lower label.
+    """
+    assigned = [m for m, g in mapping.items() if g is not None]
+    best = min(assigned, key=lambda m: (pairs[tuple(sorted((label, m)))], m))
+    return mapping[best]
+
+
+def _reconcile_speakers(parts: list[_ChunkAnswer], *, max_speakers: int | None = None) -> list[_ChunkAnswer]:
     """Every chunk's speaker labels under one set of global labels.
 
     A chunk labels its own speakers, so its "S0" may be the speaker an earlier chunk calls "S1".
     Each chunk is matched against the one before it through the words both heard in their overlap.
-    A local label without agreement takes the one leftover known label when exactly one of each is
-    left; otherwise it becomes a new label.
+    Labels with no evidence, without a bound: pair with the one leftover known label when exactly one of
+    each is left, otherwise mint. With max_speakers: take a leftover known label, else mint while under the
+    bound, else fold (_fold). Chunk 0 keeps its max_speakers most frequent labels and folds the rest.
+    Slivers are absorbed first (_absorb_slivers).
     """
     out: list[_ChunkAnswer] = []
     known: list[str] = []
-    for index, (chunk, words, events) in enumerate(parts):
+    for index, (chunk, raw, events) in enumerate(parts):
+        words = _absorb_slivers(raw)
         local = sorted({w.speaker for w in words if w.speaker is not None})
+        counts = Counter(w.speaker for w in words if w.speaker is not None)
+        pairs = _adjacent_pairs(words)
+        mapping: dict[str, str | None]
         if index == 0:
-            mapping: dict[str, str | None] = {label: label for label in local}
-            known.extend(local)
+            ranked = sorted(local, key=lambda label: (-counts[label], label))
+            keep = ranked if max_speakers is None else ranked[:max_speakers]
+            mapping = {label: label for label in keep}
+            known.extend(sorted(keep))
+            for label in ranked[len(keep):]:
+                mapping[label] = _fold(label, mapping, pairs)
         else:
             prev_chunk, prev_words, _ = out[-1]
             lo, hi = chunk.request_start / PCM_RATE, prev_chunk.request_end / PCM_RATE
-            counts = _overlap_evidence(_heard(prev_words, prev_chunk, lo, hi), _heard(words, chunk, lo, hi))
-            mapping = _best_matching(local, known, counts)
-            free = [g for g in known if g not in mapping.values()]
+            evidence = _overlap_evidence(_heard(prev_words, prev_chunk, lo, hi), _heard(words, chunk, lo, hi))
+            mapping = _best_matching(local, known, evidence)
             unmatched = [label for label in local if mapping[label] is None]
-            if len(free) == 1 and len(unmatched) == 1:
-                mapping[unmatched[0]] = free[0]
-            for label in local:
-                if mapping[label] is None:
+            free = [g for g in known if g not in mapping.values()]
+            pair_free = max_speakers is not None or (len(free) == 1 and len(unmatched) == 1)
+            for label in unmatched:
+                if pair_free and free:
+                    mapping[label] = free.pop(0)
+                elif max_speakers is None or len(known) < max_speakers:
                     mapping[label] = _mint_label(known)
                     known.append(mapping[label])
-            log.info("chunk %d speaker labels %s, agreement %s", index + 1, mapping, dict(counts))
+                else:
+                    mapping[label] = _fold(label, mapping, pairs)
+            log.info("chunk %d speaker labels %s, agreement %s", index + 1, mapping, dict(evidence))
         relabelled = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in words]
         out.append((chunk, relabelled, events))
     return out
@@ -1046,13 +1113,23 @@ def _reconcile_speakers(parts: list[_ChunkAnswer]) -> list[_ChunkAnswer]:
 class ScribeTranscriber:
     """Scribe v2 through OpenRouter, the only route; see the section header.
 
+    `diarize` asks for each word's speaker and stores the transcript under its own cache key.
+    `diarize_speakers` bounds how many speakers reconciliation may keep (see _reconcile_speakers).
     The stored version records the route, and the chunk count for a chunked recording.
     Keys are never logged.
     """
 
     name = "scribe"
-    version = SCRIBE_VERSION
     replays_fixed_source = False
+
+    def __init__(self, *, diarize: bool = False, diarize_speakers: int | None = None) -> None:
+        if diarize_speakers is not None and (not diarize or diarize_speakers < 1):
+            raise ValueError("diarize_speakers needs diarize and a speaker count of at least 1")
+        self.diarize = diarize
+        self.diarize_speakers = diarize_speakers
+        self.version = SCRIBE_DIARIZED_VERSION if diarize else SCRIBE_VERSION
+        if diarize_speakers is not None:
+            self.version += f";speakers={diarize_speakers}"
 
     def transcribe(self, wav_path: str) -> Transcript:
         key = require_scribe_key()
@@ -1061,9 +1138,11 @@ class ScribeTranscriber:
             wav = _canonical_pcm_wav(wav_path, Path(tmp))
             with wave.open(str(wav), "rb") as w:
                 frames = w.getnframes()
-            chunks = plan_scribe_chunks(frames, max_request_frames=_max_request_frames(),
+            chunks = plan_scribe_chunks(frames, max_request_frames=_max_request_frames(diarize=self.diarize),
                                         overlap_frames=_overlap_frames(), choose_seam=_SeamFinder(wav))
-            parts = _reconcile_speakers(_run_chunks(wav, chunks, key))
+            parts = _run_chunks(wav, chunks, key, self.diarize)
+            if self.diarize:
+                parts = _reconcile_speakers(parts, max_speakers=self.diarize_speakers)
         words, events = _merge_chunks(parts, frames)
         version = f"{self.version};route=openrouter"
         if len(chunks) > 1:

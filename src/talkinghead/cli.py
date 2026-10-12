@@ -117,17 +117,22 @@ def build_judge(spec: str, *, model: str | None, guidelines: str, effort: str | 
 
 
 def build_transcriber(spec: str, *, scribe_response: str | Path | None = None,
-                      scribe_audio: str | Path | None = None) -> Transcriber:
+                      scribe_audio: str | Path | None = None, diarize: bool = False,
+                      diarize_speakers: int | None = None) -> Transcriber:
     saved = scribe_response is not None or scribe_audio is not None
     if saved and spec != "scribe":
         raise ValueError("--scribe-response/--scribe-audio replay a Scribe response: use --transcriber scribe")
+    if (diarize or diarize_speakers is not None) and spec != "scribe":
+        raise ValueError("--diarize labels Scribe speakers: use --transcriber scribe")
+    if diarize and saved:
+        raise ValueError("a saved Scribe response is not diarized again: drop --diarize")
     if spec == "scribe":
         if saved:
             if scribe_response is None or scribe_audio is None:
                 raise ValueError("a saved Scribe response needs both the response JSON and its source audio")
             return SavedScribeTranscriber(response=Path(scribe_response), source_audio=Path(scribe_audio))
         require_scribe_key()
-        return ScribeTranscriber()
+        return ScribeTranscriber(diarize=diarize, diarize_speakers=diarize_speakers)
     if spec == "parakeet":
         if sys.platform != "darwin":
             raise RuntimeError("Parakeet (FluidAudio) runs on macOS only: use --transcriber whisper "
@@ -169,6 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--effort", default=None, help="effort level for the claude judge")
     run.add_argument("--transcriber", default=None, choices=["scribe", "parakeet", "whisper"],
                      help="default: TALKINGHEAD_TRANSCRIBER")
+    run.add_argument("--diarize", action="store_true",
+                     help="Scribe: label each word with its speaker (its own transcript cache)")
     run.add_argument("--audio-only", action="store_true",
                      help="VIDEO is an audio file: cut it and write final.wav (no picture, no overlays)")
     run.add_argument("--scribe-response", default=None, metavar="JSON",
@@ -455,7 +462,7 @@ def _refine_for_render(plan: Plan, cfg: Config, out: Path, *, audio_only: bool) 
         raise ValueError(NO_TRANSCRIBER)
     source = plan.sources[plan.main]
     run_dir = Path(DEFAULT_CACHE_DIR) / "refine" / source.sha256[:16]
-    real = build_transcriber(cfg.transcriber)
+    real = build_transcriber(cfg.transcriber, diarize=cfg.diarize, diarize_speakers=cfg.diarize_speakers)
     ctx = analyze_recording(source.path, run_dir, cfg, _CachedTranscriber(real), None, cache=Cache(),
                             guidelines="", audio_only=audio_only)
     refined, records = refine_joins(plan, edge_context(ctx, cfg, fps=None if audio_only else float(cfg.fps)))
@@ -544,6 +551,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
         visuals_corner=args.visuals_corner,
         visuals_scale_card=args.visuals_scale_card,
         visuals_scale_shot=args.visuals_scale_shot,
+        diarize=(True if args.diarize else None),
     )
     if cfg.judge is None:
         raise ValueError(NO_JUDGE)
@@ -582,7 +590,8 @@ def _run_cmd(args: argparse.Namespace) -> int:
     result = run_pipeline(
         str(video.resolve()), out_dir, cfg,
         transcriber=build_transcriber(
-            transcriber_spec, scribe_response=args.scribe_response, scribe_audio=args.scribe_audio),
+            transcriber_spec, scribe_response=args.scribe_response, scribe_audio=args.scribe_audio,
+            diarize=cfg.diarize, diarize_speakers=cfg.diarize_speakers),
         judge=judge,
         cache=Cache(), guidelines=guidelines, topic=args.topic, demo_minutes=args.demo,
         decisions=decisions or None, audio=audio, fix_drift=args.fix_drift,
