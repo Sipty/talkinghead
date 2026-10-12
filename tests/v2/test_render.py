@@ -176,6 +176,30 @@ def test_many_frame_grid_cuts_keep_the_exact_frames(tmp_path: Path) -> None:
     assert shown == [n for n in range(240) if n not in removed]
 
 
+def test_reordered_segments_keep_the_exact_frames(tmp_path: Path) -> None:
+    # A reordered plan reads each run through its own seeked input. Seeking must land on
+    # the same frame grid as an unseeked decode: no frame dropped, repeated or shifted.
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "lavfi", "-i", "nullsrc=size=64x64:rate=30:duration=8,geq=lum='N':cb=128:cr=128",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
+         "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p", "-g", "300", "-c:a", "aac", str(src)],
+        check=True)
+    spans = [(180, 210), (30, 60), (120, 150), (6, 18)]
+    plan = Plan(
+        sources={"main": SourceInfo("main", str(src), "x", 8.0)}, main="main", cuts=[],
+        segments=[Segment("main", a / 30, b / 30) for a, b in spans],
+    )
+    out = tmp_path / "out.mp4"
+    render_plan(plan, str(out), RenderSettings(crf=18, preset="ultrafast", fps=30, audio_filter="anull"))
+
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(out), "-fps_mode", "passthrough",
+                                   "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"])
+    frames = np.frombuffer(raw, np.uint8).reshape(-1, 64 * 64 * 3 // 2)[:, :64 * 64]
+    assert [round(f.mean()) for f in frames] == [n for a, b in spans for n in range(a, b)]
+
+
 def test_short_video_tail_preserves_next_run_sync(tmp_path: Path) -> None:
     src = tmp_path / "src.mp4"
     _clip(src, 2.0)

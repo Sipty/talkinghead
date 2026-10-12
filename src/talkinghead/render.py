@@ -10,6 +10,7 @@ preserved, and a completed mux replaces the destination atomically.
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -54,6 +55,9 @@ PAD_SEC = 0.1
 # guards against is a stall, not a slow encode.
 RENDER_MIN_TIMEOUT_SEC = 600.0
 RENDER_TIMEOUT_PER_OUTPUT_SEC = 3.0
+# A plan that revisits a source (reordered blocks) gives every run its own input, seeked this
+# far before the run: one shared decode feeding a later branch would buffer frames unboundedly.
+SEEK_MARGIN_SEC = 2.0
 
 
 @dataclass
@@ -118,32 +122,60 @@ def _runs(segments: list[Segment]) -> list[list[Segment]]:
     return runs
 
 
+def _picture_runs(segments: list[Segment], fps: int | None) -> list[list[Segment]]:
+    return _runs(segments) if fps else [[s] for s in segments]
+
+
+def _run_inputs(segments: list[Segment], order: list[str], fps: int | None) -> list[tuple[str, float]] | None:
+    """(source id, input seek) per picture run, or None when one unseeked input per source serves.
+
+    A plan that comes back to a source (a later run of a source already left) gets one
+    input per picture run, seeked to whole frames before it, so every decode is consumed
+    in order. Plans that visit each source once render exactly as before.
+    """
+    sources = [run[0].source for run in _runs(segments)]
+    if len(set(sources)) == len(sources):
+        return None
+    out = []
+    for run in _picture_runs(segments, fps):
+        t = max(0.0, run[0].start - SEEK_MARGIN_SEC)
+        out.append((run[0].source, math.floor(t * fps) / fps if fps else t))
+    return out
+
+
 def _video_graph(segments: list[Segment], input_index: dict[str, int],
-                 settings: RenderSettings, profile: ColorProfile) -> str:
-    """Select kept CFR frames per source run, avoiding per-segment branch fan-out."""
+                 settings: RenderSettings, profile: ColorProfile,
+                 run_inputs: list[tuple[int, float]] | None = None) -> str:
+    """Select kept CFR frames per source run, avoiding per-segment branch fan-out.
+
+    `run_inputs` gives each run its (input index, input seek); by default a run reads its
+    source's shared, unseeked input. Times inside a run's chain are relative to its seek.
+    """
     fps = settings.fps
     # Frame times sit on the k/fps grid after `fps`; comparing against edges moved
     # half a frame earlier makes each span half-open on that grid, so a kept
     # segment yields exactly length*fps frames (a closed `between` drops one more).
     half = 0.5 / fps if fps else 0.0
-    runs = _runs(segments) if fps else [[s] for s in segments]
+    runs = _picture_runs(segments, fps)
+    if run_inputs is None:
+        run_inputs = [(input_index[run[0].source], 0.0) for run in runs]
     parts: list[str] = []
-    for i, run in enumerate(runs):
+    for i, (run, (idx, o)) in enumerate(zip(runs, run_inputs)):
         if not fps:
             s = run[0]
-            parts.append(f"[{input_index[s.source]}:v]trim=start={s.start:.6f}:end={s.end:.6f},"
+            parts.append(f"[{idx}:v]trim=start={s.start - o:.6f}:end={s.end - o:.6f},"
                          f"setpts=PTS-STARTPTS[v{i}]")
             continue
-        gaps = [(0.0, run[0].start)] if run[0].start > 0 else []
-        gaps += [(a.end, b.start) for a, b in zip(run, run[1:]) if b.start > a.end]
+        gaps = [(0.0, run[0].start - o)] if run[0].start > o else []
+        gaps += [(a.end - o, b.start - o) for a, b in zip(run, run[1:]) if b.start > a.end]
         terms = [f"gte(t,{a - half:.6f})*lt(t,{b - half:.6f})" for a, b in gaps]
         # A finite trim stops decoding at the run endpoint instead of discarding to EOF.
         selects = [f"select='not({'+'.join(terms[j:j + SELECT_TERMS])})'"
                    for j in range(0, len(terms), SELECT_TERMS)]
         chain = ",".join([f"fps={fps}", f"tpad=stop_mode=clone:stop_duration={PAD_SEC}",
-                          f"trim=end={run[-1].end:.6f}",
+                          f"trim=end={run[-1].end - o:.6f}",
                           *selects, f"setpts=N/({fps}*TB)"])
-        parts.append(f"[{input_index[run[0].source]}:v]{chain}[v{i}]")
+        parts.append(f"[{idx}:v]{chain}[v{i}]")
     parts.append("".join(f"[v{i}]" for i in range(len(runs)))
                  + f"concat=n={len(runs)}:v=1:a=0[vcat]")
     vchain = []
@@ -365,11 +397,14 @@ def build_commands(plan: Plan, out_path: str, settings: RenderSettings) -> list[
     picture, audio, staged, pcm = _parts(out_path)
 
     head = ["ffmpeg", "-y", "-v", "error", "-nostdin"]
+    seeked = _run_inputs(segments, order, settings.fps)
+    inputs = seeked if seeked is not None else [(sid, 0.0) for sid in order]
     picture_cmd = head
-    for sid in order:
-        picture_cmd = picture_cmd + ["-i", plan.sources[sid].path]
+    for sid, seek in inputs:
+        picture_cmd = picture_cmd + (["-ss", f"{seek:.6f}"] if seek else []) + ["-i", plan.sources[sid].path]
+    per_run = [(i, seek) for i, (_, seek) in enumerate(seeked)] if seeked is not None else None
     picture_cmd = picture_cmd + [
-        "-filter_complex", _video_graph(segments, input_index, settings, profile),
+        "-filter_complex", _video_graph(segments, input_index, settings, profile, per_run),
         "-map", "[vout]", "-an",
         *encode_args(profile, crf=settings.crf, preset=settings.preset),
         picture,
