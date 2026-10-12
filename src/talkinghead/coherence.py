@@ -13,6 +13,7 @@ which `stages/content.py` applies:
 
 from __future__ import annotations
 
+from .prompts import speaker_tag
 from .semantic import Sentence
 from .types import CutSpan
 
@@ -68,7 +69,7 @@ def _script_lines(coverage: list[tuple[Sentence, int | None]], cuts: list[CutSpa
     previous: int | None = None
     for s, idx in coverage:
         if idx is None:
-            lines.append(f"{s.sid} | {s.text}")
+            lines.append(f"{s.sid} | {speaker_tag(s)}{s.text}")
         elif idx != previous:
             lines.append(f"[CUT #{idx} {cuts[idx].reason}]")
         previous = idx

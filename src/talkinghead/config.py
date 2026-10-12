@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 # The judge and the transcriber have no built-in default: the environment names them.
@@ -188,6 +188,9 @@ class Config:
     # regardless. A `None` confidence -- the two tracks share no signal -- is
     # refused whatever this is set to.
     align_min_confidence: float = 3.0
+    # Two-person recordings: diarized speaker label ("S0", "S1") -> display name the
+    # judges see. Unlisted labels show as-is. Empty for a single speaker.
+    speaker_names: dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> "Config":
         if self.agree > self.votes:
@@ -223,6 +226,9 @@ class Config:
             del d["diarize"]
         if self.diarize_speakers is None:
             del d["diarize_speakers"]
+        # Absent when unset: a speakerless cook's config digests and plan provenance stay as they were.
+        if not self.speaker_names:
+            del d["speaker_names"]
         return d
 
 

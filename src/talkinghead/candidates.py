@@ -47,6 +47,9 @@ def sentence_groups(
         ends = any(e in w.text for e in (".", "!", "?"))
         if not ends and split_pause is not None and i + 1 < len(words):
             ends = words[i + 1].start - w.end >= split_pause and (burst_last is None or burst_last[i])
+        # A turn change always starts a sentence: no sentence is said by two speakers.
+        if i + 1 < len(words) and words[i + 1].speaker != w.speaker:
+            ends = True
         if ends:
             groups.append(current)
             current = []
@@ -56,14 +59,22 @@ def sentence_groups(
 
 
 def sentence_table(
-    words: list[Word], split_pause: float | None = None, burst_last: list[bool] | None = None
+    words: list[Word], split_pause: float | None = None, burst_last: list[bool] | None = None,
+    speaker_names: dict[str, str] | None = None,
 ) -> list[Sentence]:
-    """Sentences with zero-padded ids S0000...; the unit of LLM judgment."""
-    return [
-        Sentence(sid=f"S{n:04d}", start=words[g[0]].start, end=words[g[-1]].end,
-                 text=" ".join(words[i].text for i in g))
-        for n, g in enumerate(sentence_groups(words, split_pause, burst_last))
-    ]
+    """Sentences with zero-padded ids S0000...; the unit of LLM judgment.
+
+    `speaker_names` maps a diarized label to the name judges see; with no speakers every sentence has None."""
+    names = speaker_names or {}
+    out: list[Sentence] = []
+    for n, g in enumerate(sentence_groups(words, split_pause, burst_last)):
+        speaker = words[g[0]].speaker
+        out.append(Sentence(
+            sid=f"S{n:04d}", start=words[g[0]].start, end=words[g[-1]].end,
+            text=" ".join(words[i].text for i in g),
+            speaker=None if speaker is None else names.get(speaker, speaker),
+        ))
+    return out
 
 
 def _number(cands: list[Candidate]) -> list[Candidate]:

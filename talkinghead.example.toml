@@ -73,3 +73,8 @@
 
 # The mascot drawn on quote cards and the plan card: a square PNG or JPEG. Unset: cards render without one.
 # visuals_avatar = "/path/to/avatar.png"
+
+# Two-person recordings: diarized speaker label -> the name the judges see. Leave unset for one speaker.
+# [speaker_names]
+# S0 = "Chavdar (host)"
+# S1 = "brother (DevOps engineer, guest)"

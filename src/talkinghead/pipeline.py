@@ -270,6 +270,9 @@ def _stage_inputs(ctx: Context, guidelines: str, extra: dict | None = None) -> d
         **({"preferences": _digest(ctx.preferences)} if ctx.preferences else {}),
         **({"protected": _digest([(round(a, 3), round(b, 3)) for a, b in ctx.protected_spans])}
            if ctx.protected_spans else {}),
+        # Speaker labels and names reshape the judged prompts, so they key the memos; absent for one speaker.
+        **({"speakers": _digest({"labels": [w.speaker for w in ctx.words], "names": ctx.config.speaker_names})}
+           if any(w.speaker is not None for w in ctx.words) else {}),
         **(extra or {}),
     }
 
@@ -377,7 +380,8 @@ def run_pipeline(
     notes["edges"] = {"raw": len(raw), "final": len(cuts), "removed_sec": round(sum(c.length for c in cuts), 2),
                       "voice_spans": len(ctx.voices), "speech_probes": len(ctx.speech_probes),
                       "voice_masked_non_speech": ctx.provenance.get("unclassified_voice", {}).get("masked_non_speech"),
-                      "dropped_fillers": edge_ctx.dropped_fillers, "refined_joins": sum(j["moved"] for j in joins)}
+                      "dropped_fillers": edge_ctx.dropped_fillers, "spared_other_speaker": edge_ctx.spared_other_speaker,
+                      "refined_joins": sum(j["moved"] for j in joins)}
     if run.superseded:
         # A re-key replaced memos that may hold hand edits: name them and where
         # the previous content was kept, rather than only reporting the new cut.
