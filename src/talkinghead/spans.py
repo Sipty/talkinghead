@@ -27,11 +27,31 @@ class Span:
         return len(self.voters)
 
 
+def _agreed_runs(cl: list[tuple[int, int, int]], agree: int) -> list[tuple[int, int, set[int]]]:
+    """Maximal runs of word ids that at least `agree` responses name, with the responses naming each run."""
+    lo, hi = min(x[0] for x in cl), max(x[1] for x in cl)
+    runs: list[tuple[int, int, set[int]]] = []
+    start: int | None = None
+    voters: set[int] = set()
+    for t in range(lo, hi + 1):
+        named = {r for a, b, r in cl if a <= t <= b}
+        if len(named) >= agree:
+            if start is None:
+                start, voters = t, set()
+            voters |= named
+        elif start is not None:
+            runs.append((start, t - 1, voters))
+            start = None
+    if start is not None:
+        runs.append((start, hi, voters))
+    return runs
+
+
 def cluster_spans(
     per_response: list[list[tuple[int, int]]], *, agree: int, mode: str = "narrow"
 ) -> list[Span]:
     """Cluster overlapping spans; keep clusters backed by `agree` responses."""
-    if mode not in ("narrow", "wide"):
+    if mode not in ("narrow", "wide", "agreed"):
         raise ValueError(f"unknown mode {mode!r}")
     flat: list[tuple[int, int, int]] = []
     for r, spans in enumerate(per_response):
@@ -48,6 +68,12 @@ def cluster_spans(
     for cl in clusters:
         voters = {r for _, _, r in cl}
         if len(voters) < agree:
+            continue
+        if mode == "agreed":
+            # A word is removed only when `agree` responses name it. Narrow intersects all responses and falls back
+            # to the union when they disagree, which removes words only one response named.
+            for run_a, run_b, run_voters in _agreed_runs(cl, agree):
+                out.append(Span(run_a, run_b, frozenset(run_voters)))
             continue
         if mode == "wide":
             a, b = min(x[0] for x in cl), max(x[1] for x in cl)

@@ -91,6 +91,9 @@ WORD_CUT_REASONS = frozenset({"retake", "restart", "filler", "content", "cold-op
 # An editorial cut (above) is a decision about content, so the waveform only
 # keeps its EDGES clear and what it removes is reported instead.
 VOICE_SAFE_REASONS = frozenset({"silence", "noise", "gap"})
+# Silence placed from word stamps with fixed pads (polish.gap_cuts): the envelope steps would pull these back into
+# the words they separate, so finalize only trims them around the cuts that exist after the other steps.
+PLACED_REASONS = frozenset({"gap"})
 # A word is removed by a word-cut when at least this fraction of it is covered.
 REMOVE_COVERAGE = 0.5
 # Kept-quiet split of a splice target: this share follows the left kept word,
@@ -881,9 +884,21 @@ def spare_other_speaker(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     return out
 
 
+def _fit_placed(placed: list[Cut], others: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    """Placed cuts trimmed around the other cuts, then snapped inward to whole frames."""
+    holes = [(c.start, c.end) for c in others]
+    out = [Cut(a, b, c.reason, c.text, c.provenance) for c in placed for a, b in _subtract(c.start, c.end, holes)]
+    out = [c for c in out if c.length >= ctx.min_cut]
+    if ctx.fps:
+        out = snap_to_frames(out, ctx.fps)
+    return [c for c in out if c.length >= ctx.min_cut]
+
+
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
+    placed = [c for c in cuts if c.reason in PLACED_REASONS]
+    cuts = [c for c in cuts if c.reason not in PLACED_REASONS]
     held = held_words(cuts, ctx.words)
     cuts = merge_cuts(cuts, ctx.duration)
     cuts = spare_other_speaker(cuts, ctx)
@@ -905,7 +920,8 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     cuts = flow_guard(cuts, ctx)
     cuts = settle_filler_edges(cuts, ctx)
     cuts = spare_other_speaker(cuts, ctx)
-    return merge_cuts(cuts, ctx.duration)
+    cuts = merge_cuts(cuts, ctx.duration)
+    return merge_cuts(cuts + _fit_placed(placed, cuts, ctx), ctx.duration)
 
 
 REFINED_JOINS = "refined_joins"

@@ -394,7 +394,8 @@ def run_pipeline(
         raw = raw + restructure.block_cuts(blocks)
     if config.polish:
         # After restructure, on the kept material: the gaps and disfluencies it leaves. The memo holds every cut
-        # with its reason, words and votes, so a hand edit is honoured on replay.
+        # with its reason, words and votes, so a hand edit is honoured on replay, and a re-key carries it over.
+        hand = polish.hand_cuts(run.memo_dir / f"{prefix}polish.json")
         value = run.memo(
             f"{prefix}polish",
             {**base_inputs, **_stage_config(ctx, "polish"),
@@ -402,7 +403,7 @@ def run_pipeline(
              "blocks": _digest([(b.first, b.last, b.start, b.end, b.decision) for b in blocks]),
              "policy": polish.policy()},
             STAGE_VERSION_OVERRIDES.get("polish", STAGE_VERSION),
-            lambda: polish.run(ctx, raw, blocks), fresh=fresh,
+            lambda: polish.run(ctx, raw, blocks, hand=hand), fresh=fresh,
         )
         notes["polish"] = value["notes"]
         raw = raw + polish.cuts_from(value)

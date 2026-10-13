@@ -21,12 +21,14 @@ from __future__ import annotations
 import bisect
 import hashlib
 import inspect
+import json
 import math
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from typing import Any
+from pathlib import Path
+from typing import Any, Sequence
 
 from ..context import Context
 from ..edges import WORD_CUT_REASONS
@@ -182,29 +184,41 @@ def _cap(cfg, at_block: bool, speaker_change: bool, sentence_end: bool) -> tuple
     return cfg.polish_gap_within, "within"
 
 
+# Fixed distances a gap cut keeps from the word edges it separates. Gap cuts are placed from the word stamps
+# alone: the envelope smears refined bounds into restaurant noise, so finalize does not steer them.
+GAP_PAD_AFTER = 0.06
+GAP_PAD_BEFORE = 0.05
+
+
+def _extent(w) -> tuple[float, float]:
+    """A word's audio extent: its refined bounds widened to its ASR stamps, which either can shorten."""
+    return min(w.start, w.asr_start), max(w.end, w.asr_end)
+
+
 def gap_cuts(ctx: Context, cuts: list[Cut], blocks: list[Block]) -> list[Cut]:
     """Silence cuts for every kept gap longer than its cap.
 
-    `cuts` are the raw cuts plus the disfluency cuts. A gap is considered when its two words are kept, it
-    is the silence between consecutive words, and no word-removing cut touches it. The kept audio in the
-    gap (what the other cuts left) is what gets capped: the cut leaves `cap / 2` of kept audio after the
-    outgoing word and `cap / 2` before the incoming one.
+    `cuts` are the raw cuts plus the disfluency cuts. A gap is the silence between consecutive word extents, and
+    both words are kept. No word-removing cut touches it, and no voiced or protected audio lies in the cut. The
+    kept audio in the gap (what the other cuts left) is what gets capped: the cut leaves `cap / 2` of kept audio
+    after the outgoing word and `cap / 2` before the incoming one, never less than the fixed pads.
     """
     cfg = ctx.config
     words = ctx.words
+    extent = [_extent(w) for w in words]
     removing = _Spans([(c.start, c.end) for c in cuts if c.reason in WORD_CUT_REASONS | JUDGED_REASONS])
     any_cut = _Spans([(c.start, c.end) for c in cuts])
-    protected = _Spans(list(ctx.protected_spans))
-    kept = [not removing.contains((w.start + w.end) / 2) for w in words]
+    blocked = _Spans(list(ctx.protected_spans) + list(ctx.voices))
+    kept = [not removing.contains((a + b) / 2) for a, b in extent]
     sentence_ends = {g[-1] for g in ctx.sentence_words() if g}
     block_ends = sorted(b.end for b in blocks[:-1])
-    order = sorted(range(len(words)), key=lambda i: (words[i].start, words[i].end))
+    order = sorted(range(len(words)), key=lambda i: extent[i])
     out: list[Cut] = []
     reach = -math.inf
     for k in range(1, len(order)):
         p, q = order[k - 1], order[k]
-        reach = max(reach, words[p].end)
-        lo, hi = reach, words[q].start
+        reach = max(reach, extent[p][1])
+        lo, hi = reach, extent[q][0]
         if not (kept[p] and kept[q]) or hi <= lo or removing.overlapping(lo, hi):
             continue
         pieces = any_cut.subtract(lo, hi)
@@ -216,9 +230,9 @@ def gap_cuts(ctx: Context, cuts: list[Cut], blocks: list[Block]) -> list[Cut]:
         cap, boundary = _cap(cfg, at_block, speaker_change, p in sentence_ends)
         if not pieces or total - cap < cfg.min_cut_sec:
             continue
-        a = _kept_at(pieces, cap / 2)
-        b = _kept_at(pieces, total - cap / 2)
-        for x, y in protected.subtract(a, b):
+        a = max(_kept_at(pieces, cap / 2), lo + GAP_PAD_AFTER)
+        b = min(_kept_at(pieces, total - cap / 2), hi - GAP_PAD_BEFORE)
+        for x, y in blocked.subtract(a, b):
             if y - x >= cfg.min_cut_sec:
                 out.append(Cut(x, y, GAP_REASON, "", {"cap": cap, "boundary": boundary, "words": [p, q]}))
     return out
@@ -287,7 +301,8 @@ def _judge_window(ctx: Context, sents: list[Sentence], groups: list[list[int]], 
             entries.append((lo_w, hi_w, str(item.get("kind") or ""), str(item.get("why") or "").strip()))
             stats["proposed"] += 1
         per_response.append(spans)
-    clusters = cluster_spans(per_response, agree=cfg.polish_agree, mode="narrow")
+    # A word is removed only when `agree` samples remove it (not the intersection of all of them).
+    clusters = cluster_spans(per_response, agree=cfg.polish_agree, mode="agreed")
     spans_out = []
     for sp in clusters:
         near = [e for e in entries if e[0] <= sp.b and e[1] >= sp.a]
@@ -322,14 +337,19 @@ def disfluency_cuts(ctx: Context, results: list[dict]) -> list[Cut]:
 # ------------------------------------------------------------- stage
 
 
-def run(ctx: Context, raw: list[Cut], blocks: list[Block]) -> dict:
-    """The stage value: `{"cuts": [Cut as dict], "notes": {...}}`, with every cut's reason, words and votes."""
+def run(ctx: Context, raw: list[Cut], blocks: list[Block], hand: Sequence[Cut] = ()) -> dict:
+    """The stage value: `{"cuts": [Cut as dict], "notes": {...}}`, with every cut's reason, words and votes.
+
+    `hand` are the hand-edited cuts of the stored memo: they are carried over unchanged and count as judged.
+    """
     cfg = ctx.config
-    removing = _Spans([(c.start, c.end) for c in raw if c.reason in WORD_CUT_REASONS | JUDGED_REASONS])
+    removing = _Spans([(c.start, c.end) for c in list(raw) + list(hand)
+                       if c.reason in WORD_CUT_REASONS | JUDGED_REASONS])
     sents, groups = kept_sentences(ctx, removing)
     wins = windows(sents, cfg.polish_window_sec, cfg.polish_context_sec)
     results = _judge_windows(ctx, sents, groups, wins) if wins else []
-    disf = disfluency_cuts(ctx, results)
+    judged = disfluency_cuts(ctx, results)
+    disf = sorted(judged + list(hand), key=lambda c: (c.start, c.end))
     gaps = gap_cuts(ctx, raw + disf, blocks)
     cuts = sorted(gaps + disf, key=lambda c: (c.start, c.end))
     stats: Counter = Counter()
@@ -339,17 +359,26 @@ def run(ctx: Context, raw: list[Cut], blocks: list[Block]) -> dict:
         "gaps": len(gaps),
         "gap_sec": round(sum(c.length for c in gaps), 2),
         "gap_boundaries": {k: sum(1 for c in gaps if c.provenance["boundary"] == k) for k in BOUNDARIES},
-        "disfluency": len(disf),
-        "disfluency_sec": round(sum(c.length for c in disf), 2),
-        "disfluency_words": sum(c.provenance["words"][1] - c.provenance["words"][0] + 1 for c in disf),
-        "disfluency_kinds": dict(Counter(c.provenance["kind"] for c in disf)),
+        "disfluency": len(judged),
+        "disfluency_sec": round(sum(c.length for c in judged), 2),
+        "disfluency_words": sum(c.provenance["words"][1] - c.provenance["words"][0] + 1 for c in judged),
+        "disfluency_kinds": dict(Counter(c.provenance["kind"] for c in judged)),
         "windows": len(wins),
         "proposed": stats["proposed"],
         "dropped_bad_ids": stats["bad_ids"],
         "dropped_overlong": stats["overlong"],
+        "hand": len(hand),
         "clusters": sum(res["clusters"] for res in results),
     }
     return {"cuts": [asdict(c) for c in cuts], "notes": notes}
+
+
+def hand_cuts(memo_path: Path) -> list[Cut]:
+    """The hand-edited cuts of a stored polish memo: a re-key carries them over, so they are never lost."""
+    if not memo_path.is_file():
+        return []
+    stored = json.loads(memo_path.read_text())
+    return [Cut(**c) for c in stored["value"]["cuts"] if "hand" in c.get("provenance", {})]
 
 
 def cuts_from(value: dict) -> list[Cut]:
