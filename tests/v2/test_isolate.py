@@ -144,10 +144,10 @@ def test_timing_reads_the_track_only_for_the_main_source():
 def test_isolation_alignment_fails_on_a_residual_past_one_sample():
     plan = _single_segment_plan(10.0)
     plan.isolation = {"lag_samples": 3664}
-    ok = {"isolation": {"lag_samples": 3664, "residual": [{"at": 1.0, "residual_samples": 1, "corr": 0.9}],
-                        "max_abs_residual": 1}}
-    bad = {"isolation": {"lag_samples": 3664, "residual": [{"at": 1.0, "residual_samples": 2, "corr": 0.9}],
-                         "max_abs_residual": 2}}
+    rows = lambda *off: [{"at": float(i), "residual_samples": d, "corr": 0.95, "qualified": True}  # noqa: E731
+                         for i, d in enumerate(off)]
+    ok = {"isolation": {"lag_samples": 3664, "residual": rows(1, 0, 1, 0), "max_abs_residual": 1}}
+    bad = {"isolation": {"lag_samples": 3664, "residual": rows(2, 0, 0, 0), "max_abs_residual": 2}}
     assert _isolation_alignment(plan, ok).ok
     result = _isolation_alignment(plan, bad)
     assert not result.ok and result.severity == "fatal"
@@ -232,7 +232,7 @@ def test_isolation_re_keys_the_render_and_nothing_editorial(tmp_path, monkeypatc
 
     def residual_stub(plan, *, expected_words, rendered_words, scratch):
         # The six-second clip is shorter than the latency measurement needs; its track is the original, so 0 is exact.
-        return {"lag_samples": 0, "residual": [{"at": 0.0, "residual_samples": 0, "corr": 1.0}],
+        return {"lag_samples": 0, "residual": [{"at": 0.0, "residual_samples": 0, "corr": 1.0, "qualified": True}],
                 "max_abs_residual": 0, "expected_words": expected_words, "rendered_words": rendered_words}
 
     monkeypatch.setattr(I, "ensure", unit_stub)
@@ -300,3 +300,86 @@ def test_frame_percentiles_read_the_room_tone_and_count_gated_frames():
     assert I.frame_percentiles(stereo) == got  # two equal channels measure as one
     with pytest.raises(I.IsolationError, match="too short"):
         I.frame_percentiles(np.zeros(10, np.float32))
+
+
+def _shifted_track(orig, lag):
+    return np.vstack([np.zeros((lag, orig.shape[1]), np.float32), orig])[:len(orig)]
+
+
+def test_a_short_recording_with_a_known_delay_is_measured_without_a_stub():
+    """Recordings of a few seconds still get a latency: the windows shrink to fit (no stubbing of measure_lag)."""
+    for seconds in (4.0, 12.0):
+        orig = _noise(seconds, seed=21)
+        raw = _delayed(orig, 3664, RATE)
+        lag, points = I.measure_lag(orig, raw)
+        assert lag == 3664, seconds
+        assert len(points) == I.LAG_POINTS
+
+
+def test_a_recording_too_short_for_any_window_is_refused():
+    with pytest.raises(I.IsolationError, match="too short"):
+        I.measure_lag(_noise(0.5), _delayed(_noise(0.5), 3664, RATE))
+
+
+def test_a_silent_check_window_is_not_an_alignment_failure():
+    """Correctly aligned speech with a silent stretch: the silent point is discounted, the track passes."""
+    from talkinghead.verify import _isolation_alignment
+
+    orig = _noise(20.0, seed=31)
+    orig[round(9.0 * RATE):round(13.0 * RATE)] = 0.0  # silence across the middle of the recording
+    track = orig.copy()
+    window = round(2.0 * RATE)
+    silent_start = round(9.5 * RATE)  # a check window wholly inside the silence
+    loud_starts = [round(s * RATE) for s in (1.0, 2.0, 3.0, 5.0, 15.0)]
+    rows = I.residual_lags(orig, track, window, [silent_start, *loud_starts])
+    assert not rows[0]["qualified"] and rows[0]["corr"] < I.LAG_STRONG_CORR  # the silent point is recognised
+    assert all(r["qualified"] and r["residual_samples"] == 0 for r in rows[1:])
+    plan = _single_segment_plan(20.0)
+    plan.isolation = {"lag_samples": 3664}
+    result = _isolation_alignment(plan, {"isolation": {"lag_samples": 3664, "residual": rows,
+                                                       "max_abs_residual": 0}})
+    assert result.ok, result.detail
+
+
+def test_a_real_offset_on_qualified_points_still_fails_the_alignment():
+    from talkinghead.verify import _isolation_alignment
+
+    orig = _noise(20.0, seed=32)
+    track = _shifted_track(orig, 3)  # the track is three samples late everywhere
+    window, starts = I._window_layout(orig)
+    rows = I.residual_lags(orig, track, window, starts)
+    assert all(r["qualified"] for r in rows)
+    plan = _single_segment_plan(20.0)
+    plan.isolation = {"lag_samples": 3664}
+    result = _isolation_alignment(plan, {"isolation": {"lag_samples": 3664, "residual": rows,
+                                                       "max_abs_residual": 3}})
+    assert not result.ok and result.severity == "fatal"
+
+
+def test_a_rebuild_from_the_record_writes_the_same_bytes_with_a_repair_and_an_odd_gain(tmp_path, monkeypatch):
+    """A missing track is rebuilt from the plan's record: the repaired samples must come back identical.
+
+    The unit is replaced by a prepared raw track whose level is 0.61234567 of the original, so the median gain
+    has more than four decimals, and one word is a dropout that gets spliced.
+    """
+    orig = _noise(30.0, seed=41)
+    raw = _delayed(orig * np.float32(0.61234567), 3664, RATE)
+    raw[round(10.0 * RATE):round(10.8 * RATE)] *= np.float32(0.01)  # the dropout
+    master = tmp_path / "master.wav"
+    master.write_bytes(I._wav_header(2, len(orig)) + np.ascontiguousarray(orig, dtype="<f4").tobytes())
+    raw_file = tmp_path / "raw.wav"
+    raw_file.write_bytes(I._wav_header(2, len(raw)) + np.ascontiguousarray(raw, dtype="<f4").tobytes())
+    monkeypatch.setattr(I, "raw_isolation", lambda wav_in, sha, cache: raw_file)
+
+    words = [Word("w", 10.0, 10.8, 1.0)] + [Word(f"v{i}", 1.0 + i * 3.0, 2.0 + i * 3.0, 1.0) for i in range(8)]
+    plan = Plan.from_cuts(SourceInfo(id="main", path=str(master), sha256=I.sha256_file(master), duration=30.0), [])
+    track = tmp_path / "isolated.wav"
+    record = I.ensure(plan, words, floor_db=-120.0, mix=1.0, track=track, cache_root=tmp_path / "cache",
+                      scratch=tmp_path / "scratch")
+    assert [r["text"] for r in record["repaired"]] == ["w"]
+    assert record["gain"] == pytest.approx(0.6123, abs=1e-4)  # the unrounded median is 0.6123457
+    plan.isolation = record
+    first = I.sha256_file(track)
+    track.unlink()
+    I.audio_path(plan, cache_root=tmp_path / "cache", scratch=tmp_path / "scratch")
+    assert I.sha256_file(track) == first == record["track"]["sha256"]

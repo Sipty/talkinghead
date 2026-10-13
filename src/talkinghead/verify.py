@@ -22,7 +22,7 @@ from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
 from .edges import is_intra_restart
-from .isolate import timing_audio
+from .isolate import LAG_MIN_STRONG, timing_audio
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
 from .residual import finding_source, same_occurrence
@@ -542,18 +542,22 @@ def _output_asr(plan: Plan, f: dict) -> CheckResult:
 def _isolation_alignment(plan: Plan, f: dict) -> CheckResult:
     """The written isolated track sits on the source's timeline: its residual lag at the check points is at most one sample.
 
-    Fatal: a track one sample off is still a fine track, but a larger offset means the trim was wrong somewhere in
-    the recording, so every word after that point would be heard from the wrong instant.
+    Fatal only on a measured offset: a qualified point (its correlation says there is a lag to read) that is off.
+    Points that do not correlate (silence, smeared speech) are not evidence either way; too few qualified points
+    is a warning of its own, so a quiet passage never fails a correct track.
     """
     iso = f.get("isolation")
     if iso is None:
         return CheckResult("isolation_alignment", "fatal", False, "not measured: the isolated track was not read back")
     rows = iso.get("residual") or []
-    if not rows:
-        return CheckResult("isolation_alignment", "fatal", False, "no check points could be measured")
-    bad = [r for r in rows if abs(r["residual_samples"]) > ISOLATION_RESIDUAL_MAX]
-    detail = (f"latency {iso['lag_samples']} samples trimmed; residual at {len(rows)} points, worst "
-              f"{iso['max_abs_residual']} sample(s) (limit {ISOLATION_RESIDUAL_MAX})")
+    qualified = [r for r in rows if r.get("qualified")]
+    if len(qualified) < LAG_MIN_STRONG:
+        return CheckResult("isolation_alignment", "warn", False,
+                           f"insufficient evidence: {len(qualified)} of {len(rows)} check points correlate "
+                           f"(need {LAG_MIN_STRONG}); alignment not decided")
+    bad = [r for r in qualified if abs(r["residual_samples"]) > ISOLATION_RESIDUAL_MAX]
+    detail = (f"latency {iso['lag_samples']} samples trimmed; residual at {len(qualified)} of {len(rows)} points, "
+              f"worst {iso['max_abs_residual']} sample(s) (limit {ISOLATION_RESIDUAL_MAX})")
     if bad:
         detail += "; off: " + ", ".join(f"{r['at']:.1f}s {r['residual_samples']:+d}" for r in bad[:6])
     return CheckResult("isolation_alignment", "fatal", not bad, detail)

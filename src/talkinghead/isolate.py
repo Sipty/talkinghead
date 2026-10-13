@@ -43,9 +43,13 @@ MAX_LAG_SEC = 0.5
 TAIL_SEC = 1.0
 # Latency points: this many loud windows, spread across the recording.
 LAG_POINTS = 6
+# Windows are this long on a long recording and shortened to fit a short one, down to MIN_WINDOW_SEC.
 LAG_WINDOW_SEC = 6.0
-# Residual check at the same kind of points, after trimming.
+MIN_WINDOW_SEC = 1.0
+# Residual check: the track is searched this many samples either side of each point.
 RESIDUAL_MAX_SAMPLES = 4
+# Equal-power dropout gain is stored and applied at this many decimals, so a rebuild writes the same bytes.
+GAIN_DECIMALS = 4
 # A point votes on the lag only when its normalised correlation reaches this: real speech through the unit gives
 # 0.95+, and a window of silence or of a passage the unit smeared gives little, which must not decide the trim.
 LAG_STRONG_CORR = 0.8
@@ -237,26 +241,36 @@ def _xcorr_peak(a: np.ndarray, b: np.ndarray, max_lag: int) -> tuple[int, float,
     return k, float(ncc[k]), runner
 
 
-def _loud_points(orig: np.ndarray, count: int, window: int, span: int) -> list[int]:
-    """One loud window in each of `count` equal stretches of the recording."""
-    stretch = (len(orig) - span) // count
-    if stretch < window:
-        raise IsolationError(f"recording too short to measure isolation latency ({len(orig) / RATE:.1f} s)")
-    points = []
-    for i in range(count):
-        lo = i * stretch
-        candidates = np.linspace(lo, lo + stretch - window, 20).astype(int)
+def _window_layout(orig: np.ndarray) -> tuple[int, list[int]]:
+    """Window length and the start of each measurement point, for this recording.
+
+    The window is LAG_WINDOW_SEC, shortened when the recording is too short to hold LAG_POINTS of it. The
+    starts span [0, n - window - max_lag] in LAG_POINTS stretches, and each point takes the loudest candidate
+    in its stretch. A silent window correlates with nothing, which the qualification below then discounts.
+    """
+    n = len(orig)
+    m = round(MAX_LAG_SEC * RATE)
+    window = min(round(LAG_WINDOW_SEC * RATE), (n - m) // 2)
+    if window < round(MIN_WINDOW_SEC * RATE):
+        raise IsolationError(f"recording too short to measure isolation latency ({n / RATE:.1f} s)")
+    last = n - m - window
+    starts = []
+    for i in range(LAG_POINTS):
+        # Clear of the start, so the residual search always has its full lead-in.
+        lo = max(RESIDUAL_MAX_SAMPLES, i * last // LAG_POINTS)
+        hi = max(lo, (i + 1) * last // LAG_POINTS - 1)
+        candidates = np.linspace(lo, hi, 20).astype(int)
         levels = [float(np.mean(np.square(_mono(orig[p:p + window])))) for p in candidates]
-        points.append(int(candidates[int(np.argmax(levels))]))
-    return points
+        starts.append(int(candidates[int(np.argmax(levels))]))
+    return window, starts
 
 
 def measure_lag(orig: np.ndarray, raw: np.ndarray) -> tuple[int, list[LagPoint]]:
-    """The unit's latency in samples: raw[t + lag] matches orig[t]. Every point must agree."""
+    """The unit's latency in samples: raw[t + lag] matches orig[t]. Every strong point must agree."""
     max_lag = round(MAX_LAG_SEC * RATE)
-    window = round(LAG_WINDOW_SEC * RATE)
+    window, starts = _window_layout(orig)
     points = []
-    for p in _loud_points(orig, LAG_POINTS, window, window + max_lag):
+    for p in starts:
         a = _mono(orig[p:p + window])
         b = _mono(raw[p:p + window + max_lag])
         k, corr, runner = _xcorr_peak(a, b, max_lag)
@@ -274,18 +288,20 @@ def measure_lag(orig: np.ndarray, raw: np.ndarray) -> tuple[int, list[LagPoint]]
     return lags[0], points
 
 
-def residual_lags(orig: np.ndarray, track: np.ndarray, points: list[int]) -> list[dict]:
-    """Per point, the lag left between the written track and the original (0 when aligned)."""
-    window = round(LAG_WINDOW_SEC * RATE)
-    r = RESIDUAL_MAX_SAMPLES
+def residual_lags(orig: np.ndarray, track: np.ndarray, window: int, starts: list[int]) -> list[dict]:
+    """Per point, the lag left between the written track and the original (0 when aligned).
+
+    A point is qualified only when its correlation reaches LAG_STRONG_CORR: a silent or smeared window has no
+    lag to read, and its argmax is noise, not an offset.
+    """
     rows = []
-    for p in points:
-        if p < r:
-            continue
+    r = RESIDUAL_MAX_SAMPLES
+    for p in starts:
         a = _mono(orig[p:p + window])
         b = _mono(track[p - r:p + window + r])
         k, corr, _ = _xcorr_peak(a, b, 2 * r)
-        rows.append({"at": round(p / RATE, 3), "residual_samples": k - r, "corr": round(corr, 3)})
+        rows.append({"at": round(p / RATE, 3), "residual_samples": k - r, "corr": round(corr, 3),
+                     "qualified": bool(corr >= LAG_STRONG_CORR)})
     return rows
 
 
@@ -403,6 +419,8 @@ def _build(source: str, source_sha: str, channels: int, plan: Plan, words, floor
         lag, points = measure_lag(orig_map, raw_map)
         if repair is None:
             repair, gain = find_dropouts(orig_map, raw_map[lag:lag + orig_map.shape[0]], plan, words, floor_db)
+        # The applied gain is the recorded one, so a rebuild from the record writes the same samples.
+        gain = round(float(gain), GAIN_DECIMALS)
         digest = write_track(orig_map, raw_map, lag, mix=mix, regions=_regions(repair), gain=float(gain), out=track)
         frames = orig_map.shape[0]
         del orig_map, raw_map
@@ -411,7 +429,7 @@ def _build(source: str, source_sha: str, channels: int, plan: Plan, words, floor
     return {
         "source_sha256": source_sha, "helper": helper_key(), "version": ISOLATE_VERSION,
         "mix": mix, "rate": RATE, "channels": channels, "lag_samples": lag,
-        "lag_points": [p.to_dict() for p in points], "gain": round(float(gain), 4),
+        "lag_points": [p.to_dict() for p in points], "gain": gain,
         "repaired": repair,
         "track": {"path": str(track), "sha256": digest, "frames": frames},
     }
@@ -497,15 +515,14 @@ def verify_facts(plan: Plan, *, expected_words: int, rendered_words: int, scratc
     try:
         orig = _memmap(wav_in)
         track = _memmap(Path(rec["track"]["path"]))
-        window = round(LAG_WINDOW_SEC * RATE)
-        stretch = (orig.shape[0] - window) // LAG_POINTS
-        points = [i * stretch + stretch // 2 for i in range(LAG_POINTS)]
-        rows = residual_lags(orig, track, points)
+        window, starts = _window_layout(orig)
+        rows = residual_lags(orig, track, window, starts)
     finally:
         wav_in.unlink(missing_ok=True)
-    worst = max((abs(r["residual_samples"]) for r in rows), default=0)
-    return {"lag_samples": rec["lag_samples"], "residual": rows, "max_abs_residual": worst,
-            "expected_words": expected_words, "rendered_words": rendered_words}
+    qualified = [r for r in rows if r["qualified"]]
+    worst = max((abs(r["residual_samples"]) for r in qualified), default=0)
+    return {"lag_samples": rec["lag_samples"], "residual": rows, "qualified": len(qualified),
+            "max_abs_residual": worst, "expected_words": expected_words, "rendered_words": rendered_words}
 
 
 def report_facts(plan: Plan) -> dict:
