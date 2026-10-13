@@ -4,13 +4,16 @@ import json
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from talkinghead.audio import FRAME_SEC, Envelope, RefinedWord
 from talkinghead.config import Config
+from talkinghead.edges import EdgeContext, finalize_cuts
 from talkinghead.judge import FakeJudge
 from talkinghead.pipeline import run_pipeline
 from talkinghead.store import Cache
-from talkinghead.timeline import Plan
+from talkinghead.timeline import Cut, Plan
 from talkinghead.transcribe import Transcript, Word
 
 # Five tones: "Second." is said twice in a row, 0.1 s apart (a stutter the source transcript can show). Each word
@@ -178,3 +181,20 @@ def test_the_output_round_memo_is_written_per_round(clip: Path, tmp_path: Path) 
     round1 = json.loads((out / "stages" / "polish-output-1.json").read_text())["value"]
     round2 = json.loads((out / "stages" / "polish-output-2.json").read_text())["value"]
     assert len(round1["cuts"]) == 1 and round2["cuts"] == []
+
+
+def test_an_output_cut_is_removed_whole_between_its_neighbours_not_shrunk_by_the_edge_chain() -> None:
+    # Shape of smack-958: the filler "uh" is a quiet gap between "itself," (kept, ends 4.34) and "just" (kept,
+    # starts 4.66). Round 1 confirms 4.30-4.78 on the render. The span must come back whole, bounded by the
+    # neighbours, so the filler is gone and the round-2 residual is clean.
+    db = np.full(int(10.0 / FRAME_SEC), -50.0)
+    env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
+    words = [RefinedWord(" itself,", 3.88, 4.34, 3.88, 4.34, 1.0),
+             RefinedWord(" just", 4.66, 5.34, 4.66, 5.34, 1.0)]
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None, word_extents=True)
+    confirmed = Cut(4.30, 4.78, "polish", "uh", {"pass": "output", "kind": "filler", "span": [4.30, 4.78]})
+    out = finalize_cuts([confirmed], ctx)
+    assert len(out) == 1 and out[0].reason == "polish"
+    assert out[0].start == pytest.approx(4.34, abs=1e-6)
+    assert out[0].end == pytest.approx(4.66, abs=1e-6)
+

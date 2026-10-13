@@ -37,7 +37,7 @@ from typing import Any, Sequence
 
 from .. import residual
 from ..context import Context
-from ..edges import WORD_CUT_REASONS
+from ..edges import WORD_CUT_REASONS, word_extent
 from ..judge import vote
 from ..prompts import retake_table, with_conversation, with_preferences
 from ..residual import Finding
@@ -216,8 +216,8 @@ GAP_PAD_BEFORE = 0.05
 
 
 def _extent(w) -> tuple[float, float]:
-    """A word's audio extent: its refined bounds widened to its ASR stamps, which either can shorten."""
-    return min(w.start, w.asr_start), max(w.end, w.asr_end)
+    """A word's audio extent: its refined bounds widened to its ASR stamps (the edge guards use the same one)."""
+    return word_extent(w)
 
 
 def gap_cuts(ctx: Context, cuts: list[Cut], blocks: list[Block]) -> list[Cut]:
@@ -519,7 +519,7 @@ def output_round(ctx: Context, plan, words: Sequence, round_no: int) -> dict:
                 cuts.append(Cut(src[0], src[1], POLISH_REASON, f.heard,
                                 {"pass": "output", "round": round_no, "kind": f.kind,
                                  "output": [round(f.start, 3), round(end, 3)], "votes": votes,
-                                 "why": whys.get(cid, "")}))
+                                 "why": whys.get(cid, ""), "span": [src[0], src[1]]}))
         rows.append(row)
     decided = Counter(r["decision"].split(":")[0] for r in rows)
     notes = {**counts, "findings": len(found), "cut": decided["cut"], "keep": decided["keep"],

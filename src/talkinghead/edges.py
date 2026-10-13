@@ -134,6 +134,9 @@ class EdgeContext:
     # audio no transcript accounts for, which only the waveform can protect.
     voices: list[tuple[float, float]] = field(default_factory=list)
     voice_guard: bool = True
+    # Guard kept words by their full extent (refined bounds widened to the ASR stamps, see word_extent), the
+    # extent the gap stage cuts against. Polish on turns it on; off keeps every other cook's edges as they were.
+    word_extents: bool = False
     # Minimum distance a silence/noise edge keeps from any kept word.
     pad: float = 0.05
     # Word-removing cuts: distance kept from a kept word, valley search reach,
@@ -207,6 +210,20 @@ def _coalesce(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return [(s, e) for s, e in out]
 
 
+def word_extent(w) -> tuple[float, float]:
+    """A word's audio extent: its refined bounds widened to its ASR stamps, which either can shorten.
+
+    The ASR stamps and the refined bounds disagree by up to half a second on a short word, so a cut guarded by one
+    alone can take part of the other. The gap stage and the edge guards both use this extent.
+    """
+    return min(w.start, getattr(w, "asr_start", w.start)), max(w.end, getattr(w, "asr_end", w.end))
+
+
+def _is_output_cut(c: Cut) -> bool:
+    """A cut the output pass confirmed on the render's transcript (a filler or a repeat the source did not show)."""
+    return c.reason == "polish" and c.provenance.get("pass") == "output"
+
+
 def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tuple[float, float]]:
     """The audio this cut keeps: the words it does not remove, the protected
     event intervals (whatever the cut's reason), plus (unless `voices` is off)
@@ -214,12 +231,15 @@ def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tupl
 
     `voices` comes from the waveform, so a dropped word is covered too: the
     reference recording had a 0.16 s utterance inside a pause trim that no
-    transcript entry named, and only the audio proved it was there.
+    transcript entry named, and only the audio proved it was there. An output-pass
+    cut is a judgment about audio that no source word names, so its own voices
+    never count as kept.
     """
     removed = {id(w) for w in removed_words(cut, ctx.words)}
-    spans = [(w.start, w.end) for w in ctx.words if id(w) not in removed]
+    extent = word_extent if ctx.word_extents else (lambda w: (w.start, w.end))
+    spans = [extent(w) for w in ctx.words if id(w) not in removed]
     spans += [(s, e) for s, e in ctx.protected_spans if e > s]
-    if voices and ctx.voice_guard:
+    if voices and ctx.voice_guard and not _is_output_cut(cut):
         spans += ctx.voices
     return _coalesce(spans)
 
@@ -227,7 +247,8 @@ def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tupl
 def _kept_bounds(cut: Cut, ctx: EdgeContext) -> tuple[float, float]:
     """(left, right): the furthest an edge may reach without touching kept audio."""
     left, right = 0.0, ctx.duration
-    pad = _pad(cut.reason, ctx)
+    # An output-pass cut removes audio no kept word claims, so it may reach the neighbours' stamped extents.
+    pad = 0.0 if _is_output_cut(cut) else _pad(cut.reason, ctx)
     for s, e in _kept_spans(cut, ctx):
         if e <= cut.start + 1e-9 or (s < cut.end and e > cut.start and s < cut.start):
             left = max(left, e + pad)
@@ -799,6 +820,30 @@ def _is_filler_cut(c: Cut) -> bool:
     return c.reason == "polish" and c.provenance.get("pass") == "output" and c.provenance.get("kind") == "filler"
 
 
+def settle_output_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    """Output-pass cuts keep their confirmed span whole, then settle outward onto quiet audio.
+
+    The output pass confirmed the span on the render's transcript, where the sound is audible even when no source word
+    names it, so the edge chain may not shrink it. The span goes back in full, clamped to the kept neighbours (the cut
+    never reaches into a kept word), and each edge then walks outward over the voiced audio beside it until quiet.
+    """
+    out: list[Cut] = []
+    for c in cuts:
+        if not _is_output_cut(c):
+            out.append(c)
+            continue
+        s0, s1 = c.provenance.get("span", (c.start, c.end))
+        left, right = _kept_bounds(Cut(s0, s1, c.reason, c.text, dict(c.provenance)), ctx)
+        start = _grid_outward(max(left, min(c.start, s0)), ctx.fps, left, later=False)
+        end = _grid_outward(min(right, max(c.end, s1)), ctx.fps, right, later=True)
+        if end - start < ctx.min_cut:
+            out.append(c)   # the neighbours leave no room for the span: keep what the edge chain placed
+            continue
+        settled = Cut(start, end, c.reason, c.text, dict(c.provenance))
+        out.append(_claim_voiced_run(settled, ctx) if len(ctx.env.db) else settled)
+    return out
+
+
 def settle_filler_edges(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     """Filler cuts whose edge still sits on voiced audio: take the voiced run into the cut.
 
@@ -929,6 +974,7 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     # The held words can leave a kept sliver between two cuts (a few frames of a removed word's tail):
     # fuse again, as flow_guard would have had the words been removed in the first place.
     cuts = flow_guard(cuts, ctx)
+    cuts = settle_output_cuts(cuts, ctx)
     cuts = settle_filler_edges(cuts, ctx)
     cuts = spare_other_speaker(cuts, ctx)
     cuts = merge_cuts(cuts, ctx.duration)
@@ -983,6 +1029,10 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
                   if abs(c.start - prev.end) <= EDGE_CUT_MATCH_SEC and abs(c.end - seg.start) <= EDGE_CUT_MATCH_SEC),
                  None)
         source_cut = cuts[k] if k is not None else Cut(prev.end, seg.start, "content")
+        if k is not None and _is_output_cut(source_cut):
+            # Already settled whole onto quiet audio inside its neighbours (settle_output_cuts); a join move would shrink it.
+            rec["skipped"] = "output-pass cut already settled"
+            continue
         c = Cut(prev.end, seg.start, source_cut.reason, source_cut.text, dict(source_cut.provenance))
         removed = removed_words(c, _near(c, ctx))
         left, right = _kept_bounds(c, ctx)
