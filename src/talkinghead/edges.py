@@ -94,6 +94,8 @@ VOICE_SAFE_REASONS = frozenset({"silence", "noise", "gap"})
 # Silence placed from word stamps with fixed pads (polish.gap_cuts): the envelope steps would pull these back into
 # the words they separate, so finalize only trims them around the cuts that exist after the other steps.
 PLACED_REASONS = frozenset({"gap"})
+# A cut this close to a placed gap takes the ASR-stamped word extent (see asr_guarded), so the pair cannot clip a word.
+ASR_GUARD_REACH = 0.5
 # A word is removed by a word-cut when at least this fraction of it is covered.
 REMOVE_COVERAGE = 0.5
 # Kept-quiet split of a splice target: this share follows the left kept word,
@@ -134,9 +136,6 @@ class EdgeContext:
     # audio no transcript accounts for, which only the waveform can protect.
     voices: list[tuple[float, float]] = field(default_factory=list)
     voice_guard: bool = True
-    # Guard kept words by their full extent (refined bounds widened to the ASR stamps, see word_extent), the
-    # extent the gap stage cuts against. Polish on turns it on; off keeps every other cook's edges as they were.
-    word_extents: bool = False
     # Minimum distance a silence/noise edge keeps from any kept word.
     pad: float = 0.05
     # Word-removing cuts: distance kept from a kept word, valley search reach,
@@ -224,6 +223,27 @@ def _is_output_cut(c: Cut) -> bool:
     return c.reason == "polish" and c.provenance.get("pass") == "output"
 
 
+def asr_guarded(c: Cut) -> bool:
+    """Whether this cut's guards use the ASR-stamped word extent: output-pass cuts, and cuts marked by mark_asr_guard."""
+    return _is_output_cut(c) or bool(c.provenance.get("asr_guard"))
+
+
+def mark_asr_guard(cuts: list[Cut], placed: list[Cut]) -> list[Cut]:
+    """Mark the cuts that sit beside a placed gap, so they are guarded like the gap is.
+
+    The gap stage cuts against a word's ASR-stamped extent, while the other cuts use the refined bounds. Where the
+    two sit side by side, they fuse into one gap-labelled cut, and that cut can clip a word the stamps place
+    earlier than the audio does. Marking them keeps the pair on one rule.
+    """
+    if not placed:
+        return cuts
+    out: list[Cut] = []
+    for c in cuts:
+        near = any(g.start - ASR_GUARD_REACH <= c.end and c.start <= g.end + ASR_GUARD_REACH for g in placed)
+        out.append(Cut(c.start, c.end, c.reason, c.text, {**c.provenance, "asr_guard": True}) if near else c)
+    return out
+
+
 def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tuple[float, float]]:
     """The audio this cut keeps: the words it does not remove, the protected
     event intervals (whatever the cut's reason), plus (unless `voices` is off)
@@ -236,7 +256,7 @@ def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tupl
     never count as kept.
     """
     removed = {id(w) for w in removed_words(cut, ctx.words)}
-    extent = word_extent if ctx.word_extents else (lambda w: (w.start, w.end))
+    extent = word_extent if asr_guarded(cut) else (lambda w: (w.start, w.end))
     spans = [extent(w) for w in ctx.words if id(w) not in removed]
     spans += [(s, e) for s, e in ctx.protected_spans if e > s]
     if voices and ctx.voice_guard and not _is_output_cut(cut):
@@ -955,6 +975,7 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.spared_other_speaker = 0
     placed = [c for c in cuts if c.reason in PLACED_REASONS]
     cuts = [c for c in cuts if c.reason not in PLACED_REASONS]
+    cuts = mark_asr_guard(cuts, placed)
     held = held_words(cuts, ctx.words)
     cuts = merge_cuts(cuts, ctx.duration)
     cuts = spare_other_speaker(cuts, ctx)

@@ -77,7 +77,7 @@ def edge_context(ctx: Context, config: Config, *, fps: float | None) -> EdgeCont
         splice_lead_in=config.splice_lead_in,
         quiet_above_floor_db=config.quiet_above_floor_db, filler_keep_voiced_max=config.filler_keep_voiced_max,
         flow_min_kept=config.flow_min_kept, min_cut=config.min_cut_sec,
-        fps=fps, protected_spans=ctx.protected_spans, word_extents=config.polish,
+        fps=fps, protected_spans=ctx.protected_spans,
     )
 
 

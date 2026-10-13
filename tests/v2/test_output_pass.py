@@ -191,7 +191,7 @@ def test_an_output_cut_is_removed_whole_between_its_neighbours_not_shrunk_by_the
     env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
     words = [RefinedWord(" itself,", 3.88, 4.34, 3.88, 4.34, 1.0),
              RefinedWord(" just", 4.66, 5.34, 4.66, 5.34, 1.0)]
-    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None, word_extents=True)
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None)
     confirmed = Cut(4.30, 4.78, "polish", "uh", {"pass": "output", "kind": "filler", "span": [4.30, 4.78]})
     out = finalize_cuts([confirmed], ctx)
     assert len(out) == 1 and out[0].reason == "polish"

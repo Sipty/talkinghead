@@ -314,7 +314,7 @@ def test_no_cut_takes_part_of_a_word_whose_asr_stamp_runs_ahead_of_its_refined_b
     env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
     words = [RefinedWord(" tasks", 4.9, 5.3, 4.9, 5.3, 1.0),
              RefinedWord(" And", 7.745, 7.875, 7.30, 8.00, 1.0)]
-    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None, word_extents=True)
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None)
     out = finalize_cuts([Cut(5.315, 7.15, "gap", None, {"boundary": "sentence"}),
                          Cut(7.334, 7.766, "silence")], ctx)
     assert out, "the gap must still be cut"
