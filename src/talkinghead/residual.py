@@ -43,7 +43,7 @@ class Finding:
     filler's own end.
     """
 
-    kind: str  # "filler" | "repeat" | "restart"
+    kind: str  # "filler" | "repeat" | "restart" | "fragment"
     first: int
     last: int
     start: float
@@ -88,12 +88,17 @@ def _restart_at(words: Sequence, toks: list[tuple[int, str]], p: int) -> bool:
     return RESTART_STEM[0] <= len(stem) <= RESTART_STEM[1] and len(nxt) > len(stem)
 
 
+def _dashed(text: str) -> bool:
+    """A token the speaker broke off with a dash ("also--", "to-"): an abandoned fragment unless it restarts."""
+    return text.strip().endswith("-")
+
+
 def _finding(words: Sequence, kind: str, toks: list[tuple[int, str]], p: int, n: int) -> Finding:
     """The finding whose removed words are toks[p]..toks[p+n-1]; the kept word is the next token, if any."""
     first, last = toks[p][0], toks[p + n - 1][0]
     heard = _span_text(words, first, last)
     # A filler is identified by its own sound; a repeat or restart also by the copy that stays after it.
-    copies = {"filler": 0, "restart": 1, "repeat": n}[kind]
+    copies = {"filler": 0, "restart": 1, "repeat": n, "fragment": 0}[kind]
     if p + n < len(toks):
         end, follows = words[toks[p + n][0]].start, True
     else:
@@ -106,8 +111,9 @@ def scan(words: Sequence) -> list[Finding]:
     """Every filler, repeated phrase and restart in the transcript, in time order.
 
     A repeat removes its first copy and the gap before the second copy, so chained repeats ("I, I, I") give
-    adjacent findings that do not overlap. Words are compared after normalisation; punctuation-only tokens
-    are skipped. A repeat never crosses a speaker change.
+    adjacent findings that do not overlap. Every dashed token that is not a restart is a fragment: its default span is
+    the dashed word alone, and the output pass may widen it back to the start of the abandoned words. Words are
+    compared after normalisation; punctuation-only tokens are skipped. A repeat never crosses a speaker change.
     """
     toks = [(i, norm(w.text)) for i, w in enumerate(words)]
     toks = [(i, t) for i, t in toks if t]
@@ -126,6 +132,8 @@ def scan(words: Sequence) -> list[Finding]:
             continue
         if _restart_at(words, toks, p):
             out.append(_finding(words, "restart", toks, p, 1))
+        elif _dashed(words[toks[p][0]].text):
+            out.append(_finding(words, "fragment", toks, p, 1))
         p += 1
     return out
 

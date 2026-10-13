@@ -523,7 +523,7 @@ def run_pipeline(
                 fresh=fresh,
             )
         rounds.append({**value["notes"], "rows": value["findings"]})
-        keep.extend(value["keep"])
+        keep = polish.merge_keeps(keep, value["findings"], value["keep"])
         if not value["cuts"]:
             break
         applied += polish.output_cuts_from(value)

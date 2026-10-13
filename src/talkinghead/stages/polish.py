@@ -29,9 +29,9 @@ import inspect
 import json
 import math
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -92,7 +92,13 @@ OUTPUT_RULES = (
     "the silence before the words that stay) or keep (the words are deliberate emphasis, or carry the meaning). "
     "Judge against these kinds. Their examples name source words, so judge the flagged words in their context.\n\n"
     "Kinds:\n" + POLISH_KINDS + POLISH_NEVER
-    + "Answer one verdict per candidate id: cut or keep, and why in a few words. A candidate you do not name counts "
+    + "A fragment candidate is speech the speaker broke off with a dash, such as \"there's also--\" followed by a "
+    "new thought. Its context numbers the words of the current sentence (#0, #1, ...), ending at the dashed word, and "
+    "then gives the words after it. For a fragment, answer cut with from_index: the number of the first word to "
+    "remove. The cut takes the abandoned words and ends at the dashed word; the words after it stay. Choose the "
+    "fewest abandoned words that leave a clean sentence. Answer keep when nothing is abandoned. from_index is "
+    "ignored for every other kind.\n"
+    "Answer one verdict per candidate id: cut or keep, and why in a few words. A candidate you do not name counts "
     "as keep.\n"
 )
 
@@ -420,6 +426,7 @@ OUTPUT_SCHEMA = {
             "id": {"type": "string"},
             "verdict": {"type": "string", "enum": ["cut", "keep"]},
             "why": {"type": "string"},
+            "from_index": {"type": "integer"},
         },
         "required": ["id", "verdict", "why"],
     }}},
@@ -429,6 +436,13 @@ OUTPUT_SCHEMA = {
 OUTPUT_CONTEXT_SEC = 10.0
 # A cut that stops this long before the kept word leaves the kept word's onset clear of the cut's edge.
 OUTPUT_KEPT_PAD = 0.05
+
+
+# A fragment's abandoned words reach back at most this many words, and never past the sentence's start.
+FRAGMENT_WINDOW_WORDS = 8
+# Words shown after a fragment's dashed word, so the judge hears what the speaker went on to say.
+FRAGMENT_AFTER_WORDS = 4
+SENTENCE_END = (".", "?", "!")
 
 
 def _candidate_id(k: int) -> str:
@@ -446,10 +460,63 @@ def _context(words: Sequence, f: Finding) -> str:
     return " ".join(parts)
 
 
+def fragment_window(words: Sequence, f: Finding) -> list[int]:
+    """The word indices a fragment's cut may start at, in order, ending at its dashed word.
+
+    The window reaches back at most FRAGMENT_WINDOW_WORDS words and stops at the current sentence's start: a
+    sentence-final word before it closes the sentence.
+    """
+    lo = max(0, f.last - FRAGMENT_WINDOW_WORDS)
+    for i in range(f.last - 1, lo - 1, -1):
+        if words[i].text.strip().endswith(SENTENCE_END):
+            return list(range(i + 1, f.last + 1))
+    return list(range(lo, f.last + 1))
+
+
+def _fragment_context(words: Sequence, f: Finding) -> str:
+    window = fragment_window(words, f)
+    before = " ".join(f"#{k} {words[i].text.strip()}" for k, i in enumerate(window))
+    after = " ".join(w.text.strip() for w in words[f.last + 1: f.last + 1 + FRAGMENT_AFTER_WORDS])
+    return before + (f" | after: {after}" if after else "")
+
+
+def fragment_cut(words: Sequence, f: Finding, picks: Counter) -> Finding:
+    """The fragment with the span the judge picked: from its most-picked word (the later one on a tie) to the dashed word.
+
+    A pick outside the window, or no pick (a cut without an index), leaves the dashed word alone.
+    """
+    window = fragment_window(words, f)
+    k = len(window) - 1
+    if picks:
+        top = max(picks.values())
+        k = max(i for i, n in picks.items() if n == top)
+    if not 0 <= k < len(window):
+        k = len(window) - 1
+    first = window[k]
+    return replace(f, first=first, start=words[first].start,
+                   heard=" ".join(words[i].text.strip() for i in range(first, f.last + 1)))
+
+
+def merge_keeps(prev: list[dict], rows: list[dict], new: list[dict]) -> list[dict]:
+    """The judged keeps after a round, each occurrence once, with the latest round's verdict.
+
+    An occurrence this round judged again (kept, cut or skipped) drops its earlier keep; the round's own keeps replace
+    it. The final check trusts this list, so an occurrence no longer kept must not stay in it.
+    """
+    return [k for k in prev if not any(residual.same_occurrence(k, r) for r in rows)] + new
+
+
+def _candidate_context(words: Sequence, f: Finding) -> str:
+    if f.kind == "fragment":
+        return "abandoned speech, answer with from_index: " + _fragment_context(words, f)
+    return _context(words, f)
+
+
 def output_prompt(words: Sequence, found: list[Finding], topic: str | None) -> str:
     """One prompt for the whole round: every finding with its context, judged together."""
     topic_line = f"Video topic (from the owner): {topic}\n\n" if topic else ""
-    lines = [f"{_candidate_id(k)} ({f.kind} at {f.start:.1f} s): {_context(words, f)}" for k, f in enumerate(found)]
+    lines = [f"{_candidate_id(k)} ({f.kind} at {f.start:.1f} s): {_candidate_context(words, f)}"
+             for k, f in enumerate(found)]
     return ("TASK: OUTPUT PASS\n" + topic_line + OUTPUT_RULES
             + "\n--- CANDIDATES (answer for these ids only) ---\n" + "\n".join(lines) + "\n")
 
@@ -484,6 +551,7 @@ def output_round(ctx: Context, plan, words: Sequence, round_no: int) -> dict:
                               ctx.preferences)
     result = vote(ctx.judge, prompt, OUTPUT_SCHEMA, k=cfg.polish_votes, cache=ctx.llm_cache)
     cut_votes: Counter = Counter()
+    cut_from: dict[str, Counter] = defaultdict(Counter)
     whys: dict[str, str] = {}
     for resp in result.responses:
         seen: set[str] = set()
@@ -496,6 +564,9 @@ def output_round(ctx: Context, plan, words: Sequence, round_no: int) -> dict:
             seen.add(cid)
             if item.get("verdict") == "cut":
                 cut_votes[cid] += 1
+                idx = item.get("from_index")
+                if isinstance(idx, int) and not isinstance(idx, bool):
+                    cut_from[cid][idx] += 1
                 if item.get("why"):
                     whys.setdefault(cid, str(item["why"]).strip())
     cuts: list[Cut] = []
@@ -504,23 +575,26 @@ def output_round(ctx: Context, plan, words: Sequence, round_no: int) -> dict:
     for k, f in enumerate(found):
         cid = _candidate_id(k)
         votes = cut_votes[cid]
-        row = {"id": cid, **f.to_dict(), "votes": votes, "why": whys.get(cid, "")}
+        source = residual.finding_source(plan, f)
+        row = {"id": cid, **f.to_dict(), "source": source, "votes": votes, "why": whys.get(cid, "")}
         if votes < cfg.polish_agree:
             row["decision"] = "keep"
             keep.append({"key": f.key, "text": f.heard, "start": round(f.start, 3), "kind": f.kind,
-                         "source": residual.finding_source(plan, f)})
+                         "source": source})
         else:
-            end = f.end - (OUTPUT_KEPT_PAD if f.follows else 0.0)
-            src = residual.to_source(plan, f.start, end)
+            cut_f = fragment_cut(words, f, cut_from[cid]) if f.kind == "fragment" else f
+            row.update(first=cut_f.first, start=cut_f.start, heard=cut_f.heard)
+            end = cut_f.end - (OUTPUT_KEPT_PAD if cut_f.follows else 0.0)
+            src = residual.to_source(plan, cut_f.start, end)
             if src is None:
                 row["decision"] = "skipped: crosses a join"
             elif src[1] - src[0] < cfg.min_cut_sec:
                 row["decision"] = "skipped: too short"
             else:
                 row["decision"] = "cut"
-                cuts.append(Cut(src[0], src[1], POLISH_REASON, f.heard,
-                                {"pass": "output", "round": round_no, "kind": f.kind,
-                                 "output": [round(f.start, 3), round(end, 3)], "votes": votes,
+                cuts.append(Cut(src[0], src[1], POLISH_REASON, cut_f.heard,
+                                {"pass": "output", "round": round_no, "kind": cut_f.kind,
+                                 "output": [round(cut_f.start, 3), round(end, 3)], "votes": votes,
                                  "why": whys.get(cid, ""), "span": [src[0], src[1]]}))
         rows.append(row)
     decided = Counter(r["decision"].split(":")[0] for r in rows)

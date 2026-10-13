@@ -6,8 +6,9 @@ import pytest
 
 from talkinghead.config import Config
 from talkinghead.judge import FakeJudge
-from talkinghead.residual import scan, to_source
+from talkinghead.residual import finding_source, scan, to_source
 from talkinghead.stages import polish
+from talkinghead.stages.polish import fragment_window, merge_keeps
 from talkinghead.timeline import Cut, Plan, Segment, SourceInfo
 from talkinghead.transcribe import Word
 from talkinghead.verify import _residual_disfluencies, residual_findings
@@ -197,4 +198,79 @@ def test_a_finding_that_cannot_be_placed_in_the_source_is_never_suppressed_by_a_
     facts = {"disfluency_findings": [_finding(3.0, None)],
              "disfluency_keep": [{"key": "repeat very very", "source": None}]}
     assert len(residual_findings(facts)) == 1
+
+
+# ------------------------------------------------------------- abandoned fragments
+
+# Scribe marks cut-off speech with a dash. Shape 1: "there's also--" abandoned, then a new thought.
+ABANDONED = _words(("and", 0.0), ("that", 0.3), ("means", 0.6), ("there's", 0.9), ("also--", 1.2),
+                   ("it's", 1.5), ("gonna", 1.8), ("blow", 2.1), ("up", 2.4))
+# Shape 2: a false start, "to--", before "for a harness".
+FALSE_START = _words(("things", 0.0), ("are", 0.3), ("too", 0.6), ("volatile", 0.9), ("to--", 1.2),
+                     ("for", 1.5), ("a", 1.8), ("harness", 2.1))
+GAP = _plan((0.5, 0.6), duration=5.0)  # a 0.1 s cut before the fragments: output 0.5 onwards is source 0.6 onwards
+
+
+def _pick(from_index: int | None, verdict: str = "cut") -> dict:
+    item = {"id": "c0", "verdict": verdict, "why": "test"}
+    if from_index is not None:
+        item["from_index"] = from_index
+    return {"verdicts": [item]}
+
+
+def test_every_dashed_token_is_a_fragment_and_a_restart_stays_a_restart() -> None:
+    assert [(f.kind, f.heard) for f in scan(ABANDONED)] == [("fragment", "also--")]
+    assert [(f.kind, f.heard) for f in scan(FALSE_START)] == [("fragment", "to--")]
+    assert [(f.kind, f.heard) for f in scan(_words(("adver-", 0), ("advertising", 1)))] == [("restart", "adver-")]
+    assert scan(_words(("Hello.", 0), ("Goodbye.", 1))) == []
+
+
+def test_a_judged_fragment_cut_maps_its_chosen_span_to_the_source() -> None:
+    # The judge picks index 3 of the window (#0 and ... #3 there's #4 also--): cut from "there's" to the kept "it's".
+    judge = FakeJudge([_pick(3)] * 3)
+    value = polish.output_round(_ctx(judge, polish_votes=3, polish_agree=2), GAP, ABANDONED, 1)
+    (cut,) = value["cuts"]
+    assert (cut["start"], cut["end"]) == pytest.approx((1.0, 1.55))  # output 0.9-1.45 is source 1.0-1.55
+    assert cut["provenance"]["kind"] == "fragment" and cut["text"] == "there's also--"
+    assert value["findings"][0]["decision"] == "cut"
+
+
+def test_a_judged_false_start_that_picks_only_the_dashed_word_cuts_only_that_word() -> None:
+    judge = FakeJudge([_pick(4)] * 3)  # index 4 is "to--" itself; output 1.2-1.45 is source 1.3-1.55
+    value = polish.output_round(_ctx(judge, polish_votes=3, polish_agree=2), GAP, FALSE_START, 1)
+    (cut,) = value["cuts"]
+    assert (cut["start"], cut["end"]) == pytest.approx((1.3, 1.55))
+    assert cut["text"] == "to--"
+
+
+def test_a_judged_keep_leaves_the_fragment_in_and_the_final_check_accepts_that_occurrence() -> None:
+    judge = FakeJudge([_pick(None, verdict="keep")] * 3)
+    value = polish.output_round(_ctx(judge, polish_votes=3, polish_agree=2), GAP, ABANDONED, 1)
+    assert value["cuts"] == []
+    assert [(k["key"], k["source"]) for k in value["keep"]] == [("fragment also", pytest.approx(1.3))]
+    facts = {"disfluency_findings": [{**f.to_dict(), "source": finding_source(GAP, f)} for f in scan(ABANDONED)],
+             "disfluency_keep": value["keep"]}
+    assert residual_findings(facts) == []
+
+
+def test_a_fragment_window_stops_at_the_sentence_start() -> None:
+    words = _words(("Done.", 0.0), ("so", 0.3), ("ran", 0.6), ("off", 0.9), ("on--", 1.2), ("next", 1.5))
+    (frag,) = scan(words)
+    assert fragment_window(words, frag) == [1, 2, 3, 4]  # "Done." closes the sentence before "so"
+    judge = FakeJudge([_pick(0)] * 3)  # index 0 is "so": the abandoned words begin after "Done."
+    value = polish.output_round(_ctx(judge, polish_votes=3, polish_agree=2), GAP, words, 1)
+    (cut,) = value["cuts"]
+    assert (cut["start"], cut["end"]) == pytest.approx((0.3, 1.55))
+
+
+def test_the_judged_keeps_list_shows_each_occurrence_once_with_the_latest_verdict() -> None:
+    keep_round = polish.output_round(_ctx(FakeJudge([_pick(None, "keep")] * 3), polish_votes=3, polish_agree=2),
+                                     GAP, ABANDONED, 1)
+    again_keep = polish.output_round(_ctx(FakeJudge([_pick(None, "keep")] * 3), polish_votes=3, polish_agree=2),
+                                     GAP, ABANDONED, 2)
+    once = merge_keeps(keep_round["keep"], again_keep["findings"], again_keep["keep"])
+    assert len(once) == 1
+    later_cut = polish.output_round(_ctx(FakeJudge([_pick(3)] * 3), polish_votes=3, polish_agree=2),
+                                    GAP, ABANDONED, 3)
+    assert merge_keeps(once, later_cut["findings"], later_cut["keep"]) == []  # cut later: no longer a keep
 
