@@ -250,3 +250,22 @@ def test_a_changed_render_chain_rejudges_the_output_round(clip: Path, tmp_path: 
                          judge=FakeJudge([_verdict("cut")] * 3), cache=cache, guidelines="G", topic="t")
     assert "polish-output-1" in again.notes["memos"]["recomputed"]
 
+
+
+def test_fused_output_cuts_keep_the_union_of_their_confirmed_spans() -> None:
+    # Shape of the 683 s judged span: two confirmed output cuts overlap ("I--" and "I just--"). Fused, the cut
+    # must keep both spans, or the edge chain re-settles it from the first span and leaves "just" and "uh" in.
+    db = np.full(int(10.0 / FRAME_SEC), -50.0)
+    env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
+    words = [RefinedWord(" I", 3.60, 3.69, 3.60, 3.69, 1.0),
+             RefinedWord(" just", 3.75, 4.20, 3.75, 4.20, 1.0),
+             RefinedWord(" uh", 4.30, 4.60, 4.30, 4.60, 1.0),
+             RefinedWord(" it,", 4.70, 5.10, 4.70, 5.10, 1.0),
+             RefinedWord(" now", 5.30, 5.80, 5.30, 5.80, 1.0)]
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None)
+    first = Cut(3.60, 3.69, "polish", "I--", {"pass": "output", "span": [3.60, 3.69]})
+    second = Cut(3.64, 5.12, "polish", "I just--", {"pass": "output", "span": [3.64, 5.12]})
+    out = finalize_cuts([first, second], ctx)
+    assert len(out) == 1
+    assert out[0].start <= 3.60 + 1e-6 and out[0].end >= 5.10 - 1e-6  # "it," is removed, not kept
+    assert out[0].provenance["span"] == pytest.approx([3.60, 5.12])

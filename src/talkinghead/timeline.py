@@ -72,15 +72,30 @@ class Segment:
         return self.end - self.start
 
 
+def _union_span(last: Cut, c: Cut) -> list[float] | None:
+    """The union of the two cuts' confirmed spans, when either carries one (an output-pass cut's `span`).
+
+    A fused cut keeps the extent of every cut it absorbed: the edge pass re-settles a confirmed span from its
+    recorded `span`, so a span that dropped a fused cut would cut back the words that cut removed.
+    """
+    a, b = last.provenance.get("span"), c.provenance.get("span")
+    if a is None and b is None:
+        return None
+    a = a or (last.start, last.end)
+    b = b or (c.start, c.end)
+    return [min(a[0], b[0]), max(a[1], b[1])]
+
+
 def fuse_into(last: Cut, c: Cut, *, by_rank: bool) -> None:
     """Fold `c` into `last`, which starts no later than `c`: the span grows to cover both, the winning
-    reason survives with its provenance, and the texts are joined.
+    reason survives with its provenance (its confirmed span widened to cover `c`'s too), and the texts are joined.
 
     `by_rank` (merge_cuts): the higher REASON_RANK wins, and between equal ranks a judged reason wins.
     Otherwise (flow_guard, which fuses across quiet): the first cut's reason stands unless `c` is judged
     and `last` is not, so a judged decision is never lost to a mechanical cut that comes first, which
     is what let the speaker guard shrink a tangent. Mechanical fusions keep their historical label.
     """
+    span = _union_span(last, c)
     last.end = max(last.end, c.end)
     if by_rank:
         wins = (REASON_RANK.get(c.reason, 1), c.reason in JUDGED_REASONS) > \
@@ -90,6 +105,8 @@ def fuse_into(last: Cut, c: Cut, *, by_rank: bool) -> None:
     if wins:
         last.reason = c.reason
         last.provenance = {**last.provenance, **c.provenance}
+    if span is not None:
+        last.provenance = {**last.provenance, "span": span}
     if c.text and c.text not in last.text:
         last.text = f"{last.text} {c.text}".strip()
 
