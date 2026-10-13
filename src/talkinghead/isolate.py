@@ -458,6 +458,35 @@ def timing_audio(plan: Plan, source_id: str) -> str:
     return plan.sources[source_id].path
 
 
+# -- noise measurement ------------------------------------------------------------------------------
+
+# Frame length of the noise measurement: 10 ms, mono.
+NOISE_FRAME_SEC = 0.010
+# Frames below this are digital or gated silence; they are counted apart rather than taken as a floor.
+NOISE_GATED_DB = -60.0
+
+
+def frame_percentiles(x: np.ndarray, percentiles: tuple[float, ...] = (10, 20, 50, 90)) -> dict:
+    """Percentiles of 10 ms frame RMS (dBFS, mono) over a whole span, plus the share of frames gated below -60 dBFS.
+
+    Word-to-word gaps measure less than this: a gap also holds the speech's own tails. Frame percentiles read
+    the whole span, so the low percentiles show the room tone the listener hears between phrases.
+    """
+    mono = np.asarray(x, dtype=np.float64)
+    if mono.ndim > 1:
+        mono = mono.mean(axis=1)
+    frame = round(NOISE_FRAME_SEC * RATE)
+    n = len(mono) // frame
+    if n == 0:
+        raise IsolationError("too short to measure frame noise: less than one 10 ms frame")
+    blocks = mono[: n * frame].reshape(n, frame)
+    rms = np.sqrt(np.mean(blocks * blocks, axis=1))
+    db = 20 * np.log10(np.maximum(rms, 1e-12))
+    out = {f"p{int(p)}": round(float(np.percentile(db, p)), 2) for p in percentiles}
+    out["gated_share"] = round(float(np.mean(db < NOISE_GATED_DB)), 4)
+    return out
+
+
 # -- verification facts -----------------------------------------------------------------------------
 
 def verify_facts(plan: Plan, *, expected_words: int, rendered_words: int, scratch: Path) -> dict:

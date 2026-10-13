@@ -285,3 +285,18 @@ def test_a_word_spanning_a_phrase_is_not_repaired():
     iso = orig * 0.01
     repaired, _ = I.find_dropouts(orig, iso, plan, [long_word], floor_db=-120.0)
     assert repaired == []
+
+
+def test_frame_percentiles_read_the_room_tone_and_count_gated_frames():
+    rng = np.random.default_rng(4)
+    # Room tone at about -40 dBFS RMS for 8 s, then 2 s of digital silence.
+    tone = (rng.standard_normal(8 * RATE) * 0.01).astype(np.float32)
+    x = np.concatenate([tone, np.zeros(2 * RATE, np.float32)])
+    got = I.frame_percentiles(x)
+    assert got["p10"] < -100  # digital silence sits in the low tail
+    assert got["gated_share"] == pytest.approx(0.2, abs=0.01)
+    assert got["p50"] == pytest.approx(-40.0, abs=0.5)  # median is the tone, not the silence
+    stereo = np.stack([x, x], axis=1)
+    assert I.frame_percentiles(stereo) == got  # two equal channels measure as one
+    with pytest.raises(I.IsolationError, match="too short"):
+        I.frame_percentiles(np.zeros(10, np.float32))
