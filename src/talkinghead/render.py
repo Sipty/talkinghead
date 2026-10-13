@@ -18,7 +18,9 @@ from pathlib import Path
 
 import numpy as np
 
+from . import isolate
 from .color import HDR_PIX_FMT, ColorProfile, encode_args, probe_color
+from .store import DEFAULT_CACHE_DIR
 from .timeline import Plan, Segment
 
 # Bumped whenever this module's pixels or audio would differ for an identical
@@ -350,11 +352,20 @@ def join_audio(sources: dict[str, np.ndarray], segments: list[Segment], crossfad
     return out
 
 
+def _audio_sources(plan: Plan) -> dict[str, str]:
+    """The file each source's audio is read from: the isolated track for the main source when isolation is on.
+
+    The track is verified (or rebuilt from the plan's record) once here, so one render reads one checked file.
+    """
+    return {sid: (isolate.audio_path(plan, cache_root=DEFAULT_CACHE_DIR) if plan.isolation and sid == plan.main
+                  else plan.sources[sid].path) for sid in _source_order(plan)}
+
+
 def _write_joined_audio(plan: Plan, order: list[str], segments: list[Segment],
-                        settings: RenderSettings, pcm: str, scratch: list[str]) -> None:
+                        settings: RenderSettings, pcm: str, scratch: list[str], audio: dict[str, str]) -> None:
     timeout = _timeout(plan)
-    channels = _channels(plan.sources[order[0]].path, timeout)
-    sources = {sid: _decode(plan.sources[sid].path, channels, tmp, timeout) for sid, tmp in zip(order, scratch)}
+    channels = _channels(audio[order[0]], timeout)
+    sources = {sid: _decode(audio[sid], channels, tmp, timeout) for sid, tmp in zip(order, scratch)}
     join_audio(sources, segments, settings.crossfade_sec).tofile(pcm)
 
 
@@ -366,12 +377,12 @@ def _source_order(plan: Plan) -> list[str]:
     return order
 
 
-def _mastering_command(plan: Plan, order: list[str], settings: RenderSettings, pcm: str,
-                       codec: list[str], dest: str) -> list[str]:
+def _mastering_command(settings: RenderSettings, pcm: str, codec: list[str], dest: str,
+                       channels: int) -> list[str]:
     """The final-chain pass over the joined PCM, encoded by `codec` into `dest`."""
     return [
         "ffmpeg", "-y", "-v", "error", "-nostdin",
-        "-f", "f32le", "-ar", str(AUDIO_RATE), "-ac", str(_channels(plan.sources[order[0]].path, _timeout(plan))),
+        "-f", "f32le", "-ar", str(AUDIO_RATE), "-ac", str(channels),
         "-i", pcm,
         "-filter_complex", f"[0:a]{settings.audio_filter}[aout]",
         "-map", "[aout]", "-vn",
@@ -380,21 +391,24 @@ def _mastering_command(plan: Plan, order: list[str], settings: RenderSettings, p
     ]
 
 
-def build_commands(plan: Plan, out_path: str, settings: RenderSettings) -> list[list[str]]:
+def build_commands(plan: Plan, out_path: str, settings: RenderSettings,
+                   audio: dict[str, str] | None = None) -> list[list[str]]:
     """The picture pass, the audio pass, and the stream-copy mux, in order.
 
     The audio pass reads the already-joined PCM that `render_plan` writes first
-    (see `_write_joined_audio`); it only runs the final chain and encodes.
+    (see `_write_joined_audio`); it only runs the final chain and encodes. `audio` names the
+    file each source's audio is read from (default: `_audio_sources`).
     """
     if not plan.segments:
         raise RuntimeError("nothing to render: the plan removes the whole video")
     if settings.strategy != "concat":
         raise NotImplementedError(f"render strategy {settings.strategy!r}")
     order = _source_order(plan)
+    audio = _audio_sources(plan) if audio is None else audio
     input_index = {sid: i for i, sid in enumerate(order)}
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
     profile = plan_color(plan, order)
-    picture, audio, staged, pcm = _parts(out_path)
+    picture, audio_tmp, staged, pcm = _parts(out_path)
 
     head = ["ffmpeg", "-y", "-v", "error", "-nostdin"]
     seeked = _run_inputs(segments, order, settings.fps)
@@ -409,10 +423,11 @@ def build_commands(plan: Plan, out_path: str, settings: RenderSettings) -> list[
         *encode_args(profile, crf=settings.crf, preset=settings.preset),
         picture,
     ]
-    audio_cmd = _mastering_command(plan, order, settings, pcm, ["-c:a", "aac", "-b:a", "192k"], audio)
+    audio_cmd = _mastering_command(settings, pcm, ["-c:a", "aac", "-b:a", "192k"], audio_tmp,
+                                   _channels(audio[order[0]], _timeout(plan)))
     mux_cmd = [
         "ffmpeg", "-y", "-v", "error", "-nostdin",
-        "-i", picture, "-i", audio,
+        "-i", picture, "-i", audio_tmp,
         "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
         "-map_metadata", "-1", "-movflags", "+faststart",
         staged,
@@ -435,18 +450,19 @@ def _run(cmd: list[str], timeout: float) -> None:
 
 def render_plan(plan: Plan, out_path: str, settings: RenderSettings) -> str:
     """Render and return the command lines used (for the report)."""
-    cmds = build_commands(plan, out_path, settings)
-    picture, audio, staged, pcm = _parts(out_path)
+    audio = _audio_sources(plan)
+    cmds = build_commands(plan, out_path, settings, audio)
+    picture, audio_tmp, staged, pcm = _parts(out_path)
     order = _source_order(plan)
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
     scratch = [f"{out_path}.src{i}.pcm" for i in range(len(order))]
     try:
-        _write_joined_audio(plan, order, segments, settings, pcm, scratch)
+        _write_joined_audio(plan, order, segments, settings, pcm, scratch, audio)
         for cmd in cmds:
             _run(cmd, _timeout(plan))
         os.replace(staged, out_path)
     finally:
-        for part in (picture, audio, staged, pcm, *scratch):
+        for part in (picture, audio_tmp, staged, pcm, *scratch):
             Path(part).unlink(missing_ok=True)
     return " && ".join(" ".join(str(c) for c in cmd) for cmd in cmds)
 
@@ -468,12 +484,13 @@ def render_audio_plan(plan: Plan, out_path: str, settings: RenderSettings) -> st
     if settings.strategy != "concat":
         raise NotImplementedError(f"render strategy {settings.strategy!r}")
     order = _source_order(plan)
+    audio = _audio_sources(plan)
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
     staged, pcm = _audio_parts(out_path)
     scratch = [f"{out_path}.src{i}.pcm" for i in range(len(order))]
-    cmd = _mastering_command(plan, order, settings, pcm, ["-c:a", "pcm_s16le"], staged)
+    cmd = _mastering_command(settings, pcm, ["-c:a", "pcm_s16le"], staged, _channels(audio[order[0]], _timeout(plan)))
     try:
-        _write_joined_audio(plan, order, segments, settings, pcm, scratch)
+        _write_joined_audio(plan, order, segments, settings, pcm, scratch, audio)
         _run(cmd, _timeout(plan))
         os.replace(staged, out_path)
     finally:

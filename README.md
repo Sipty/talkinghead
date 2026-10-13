@@ -251,6 +251,20 @@ A `talkinghead.toml` in the repository root is not loaded automatically.
 
 The settings most people change first are `votes` and `agree` (the vote size), `content_enabled`, `visuals_enabled`, `visuals_research`, `visuals_corner`, `crf` and `preset` (final quality), and `judge_timeout`.
 
+#### Voice isolation (macOS only, opt-in)
+
+`isolate_voice = true` in the config file, or `--isolate-voice` on the command line, renders the audio through Apple's voice isolation (AUSoundIsolation).
+It is for noisy places: a hotel lobby, a restaurant, a handheld mic.
+Transcription, judging and edge placement keep reading the original audio, so turning it on re-judges nothing.
+Only the rendered track, its loudness mastering and the output transcript use the isolated audio.
+
+- `isolate_mix` (default `1.0`) is the isolated share of the track, from `0` (the original microphone audio) to `1` (fully isolated). `--isolate-mix F` sets it.
+- The unit delays its output. talkinghead measures that delay by cross-correlating the output with the original at six loud points, and trims it. The points must agree, or the run stops.
+- Words the unit swallows (their isolated level falls far below the recording's median) are replaced by the original audio, scaled to the isolated level and joined with 10 ms equal-power crossfades. The report lists them with their output times.
+- The helper is a Swift file in the package, compiled once with `xcrun swiftc` into the cache. The isolated track is cached per source file and helper version. The plan records the track's sha256, mix, latency and repaired words, so `talkinghead render PLAN` rebuilds the same audio.
+- On any other platform, or where the unit is missing, a run with the flag stops before doing any work.
+- The report's `## Isolation` section and the `isolation_alignment` and `isolation_words` checks show the result.
+
 `diarize = true` in the config file (or `--diarize`) makes Scribe label every word with its speaker. Those transcripts have their own cache key, so cooks made without it keep their caches.
 
 ### Editorial guidelines

@@ -147,6 +147,8 @@ class Plan:
     decisions: dict = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
+    # The isolated audio the render reads for the main source (isolate.py's record); empty when isolation is off.
+    isolation: dict = field(default_factory=dict)
 
     @classmethod
     def from_cuts(cls, source: SourceInfo, cuts: list[Cut]) -> "Plan":
@@ -221,6 +223,9 @@ class Plan:
             "decisions": self.decisions,
             "provenance": self.provenance,
         }
+        if self.isolation:
+            # Absent when off, so a plan without isolation serialises exactly as before.
+            payload["isolation"] = self.isolation
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
     @classmethod
@@ -237,4 +242,5 @@ class Plan:
             decisions=dict(d.get("decisions", {})),
             provenance=dict(d.get("provenance", {})),
             schema_version=d["schema_version"],
+            isolation=dict(d.get("isolation", {})),
         )

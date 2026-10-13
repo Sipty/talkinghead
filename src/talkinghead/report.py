@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+from .isolate import report_facts as isolation_facts
 from .timeline import Plan
 from .verify import CheckResult
 
@@ -40,6 +41,26 @@ def _polish(plan: Plan, notes: dict) -> list[str]:
     if "output" in judged:
         rows += _output_pass(judged["output"])
     return rows + [""]
+
+
+def _isolation(plan: Plan) -> list[str]:
+    """The isolated track: the trim, the mix and every word the unit swallowed and the original put back."""
+    if not plan.isolation:
+        return []
+    data = isolation_facts(plan)
+    rows = ["## Isolation", "",
+            f"- latency trimmed: {data['lag_samples']} samples ({data['lag_ms']:.2f} ms), measured at "
+            f"{len(data['points'])} points",
+            f"- mix: {data['mix']:.2f} isolated, {1 - data['mix']:.2f} original; dropout gain {data['gain']:.3f}",
+            f"- helper {data['helper']}; track sha256 {plan.isolation['track']['sha256'][:16]}",
+            f"- repaired words: {len(data['repaired'])}", ""]
+    if data["repaired"]:
+        rows += ["| source | output | word | ratio |", "|---|---|---|---|"]
+        for r in data["repaired"]:
+            out = "cut" if r["output_start"] is None else _fmt(r["output_start"])
+            rows.append(f"| {_fmt(r['start'])} | {out} | {r['text']} | {r['ratio']:.3f} |")
+        rows.append("")
+    return rows
 
 
 def _table(head: list[str], items: list[list[str]], limit: int = 15) -> list[str]:
@@ -243,6 +264,8 @@ def build_report(
     rows.append("")
     rows += ["## Stage notes", ""]
     for stage, n in notes.items():
+        if stage == "isolation":
+            continue
         rows.append(f"- {stage}: " + ", ".join(f"{k}={v}" for k, v in n.items() if k not in ("prompt_sha", "coherence_prompt_sha")))
     rows.append("")
     rows += _plan_card(notes)
@@ -254,6 +277,7 @@ def build_report(
     rows += _pacing(pacing)
     rows += _blocks(plan)
     rows += _polish(plan, notes)
+    rows += _isolation(plan)
     rows += ["## Cuts", "", "| start | end | dur | reason | votes | text |", "|---|---|---|---|---|---|"]
     for c in plan.cuts:
         votes = c.provenance.get("votes", "")

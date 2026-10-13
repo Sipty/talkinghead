@@ -12,10 +12,10 @@ import subprocess
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from . import prompts
+from . import isolate, prompts
 from .align import AlignResult, align
 from .analysis import analyze
-from .config import Config
+from .config import ISOLATE_KEYS, Config
 from .context import Context, NeedsDecision
 from .edges import EdgeContext, finalize_cuts, is_intra_restart, refine_joins
 from .judge import Judge
@@ -27,7 +27,7 @@ from .store import Cache, RunDir, sha256_file, stable_key
 from .timeline import Cut, Plan
 from .transcribe import Transcriber
 from .types import JUDGED_REASONS
-from .verify import CheckResult, collect_facts, residual_findings, run_checks, visuals_resolution
+from .verify import CheckResult, collect_facts, project_words, residual_findings, run_checks, visuals_resolution
 from .visuals.cards import avatar_fingerprint
 from .visuals.headclip import check_head_clip
 from .visuals.render import render_visuals
@@ -110,6 +110,8 @@ def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = 
         "renderer": RENDERER_VERSION,
         # Only an audio-only render adds the key, so existing video memos still replay.
         **({"audio_only": True} if audio_only else {}),
+        # The isolated track's bytes: a render that reads it must re-render when it changes. Absent when isolation is off.
+        **({"isolation": plan.isolation["track"]["sha256"]} if plan.isolation else {}),
     }, 2)
 
 
@@ -236,7 +238,9 @@ def _stage_config(ctx: Context, stage: str) -> dict:
     if keys is None:
         # The polish knobs (and the output pass's round count) change no other stage's output, so they stay out of
         # every other stage's key: turning polish on or tuning it re-keys only the polish stages and their plan.
-        full = {k: v for k, v in cfg.to_dict().items() if k != "polish" and not k.startswith("polish_")}
+        # The isolation knobs likewise: they change the rendered audio, which only the plan's record carries.
+        full = {k: v for k, v in cfg.to_dict().items()
+                if k != "polish" and not k.startswith("polish_") and k not in ISOLATE_KEYS}
         return {"config": full}
     return {"config": {k: getattr(cfg, k) for k in keys}}
 
@@ -469,6 +473,14 @@ def run_pipeline(
         elif config.polish_output_rounds == 0:
             output["skipped"] = "polish_output_rounds is 0"
     rounds_max = config.polish_output_rounds if config.polish and verify_output_asr else 0
+    def attach_isolation(plan: Plan) -> None:
+        # The rendered audio only: transcription, judging and the edge pass above read the original.
+        if config.isolate_voice:
+            plan.isolation = isolate.ensure(
+                plan, ctx.words, floor_db=ctx.floor, mix=config.isolate_mix,
+                track=run.root / f"{prefix}isolated.wav", cache_root=cache.root,
+                scratch=run.root / f"{prefix}isolation")
+
     cur = raw
     applied: list[Cut] = []
     keep: list[dict] = []
@@ -480,6 +492,7 @@ def run_pipeline(
         # The judged word-removing decisions as the edge pass received them: verify checks the plan keeps none.
         judged = [(c.start, c.end, c.reason) for c in cur if c.reason in JUDGED_REASONS and not is_intra_restart(c)]
         plan, cuts, joins = assemble(cur)
+        attach_isolation(plan)
         plan_path.write_text(plan.to_json())
         render_key = render_memo_key(plan, settings, audio_only=audio_only)
         round_inputs = {**base_inputs, **_stage_config(ctx, "polish_output"),
@@ -552,6 +565,13 @@ def run_pipeline(
         # The judged-keep findings of every round, all judged on renders the final check may still see.
         facts["disfluency_keep"] = keep
         output["residual"] = residual_findings(facts)
+    if plan.isolation:
+        # Facts of the final round's render: the written track's trim, and the words it should still carry.
+        expected = len(project_words(plan, ctx.words))
+        facts["isolation"] = isolate.verify_facts(
+            plan, expected_words=expected, rendered_words=len(facts["words"]) if verify_output_asr else None,
+            scratch=run.verify_dir / f"{prefix}isolation")
+        notes["isolation"] = isolate.report_facts(plan)
 
     checks = run_checks(plan, facts)
     run.write_json(run.verify_dir / f"{prefix}facts.json",

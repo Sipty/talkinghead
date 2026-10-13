@@ -67,6 +67,11 @@
 # Output frame rate. Cut edges snap to this grid.
 # fps = 30
 
+# Voice isolation (macOS only): render the audio through Apple's voice isolation. Transcription and judging keep the
+# original audio. isolate_mix is the isolated share, 0 to 1.
+# isolate_voice = false
+# isolate_mix = 1.0
+
 # Final render quality: x264 CRF (lower is larger and sharper) and encoder preset.
 # crf = 18
 # preset = "medium"

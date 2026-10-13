@@ -34,7 +34,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from . import __version__
+from . import __version__, isolate
 from .align import AlignResult, align, analyze
 from .analysis import analyze as analyze_recording
 from .color import hdr_codec, probe_color
@@ -198,6 +198,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--fresh", action="store_true", help="ignore stage memos (LLM answers stay cached)")
     run.add_argument("--allow-av-mismatch", action="store_true")
     run.add_argument("--no-content", action="store_true", help="skip content cuts for this run")
+    run.add_argument("--isolate-voice", action="store_true",
+                     help="render the audio through Apple's voice isolation (macOS only); transcription and "
+                          "judging stay on the original audio")
+    run.add_argument("--isolate-mix", type=float, default=None, metavar="F",
+                     help="with --isolate-voice: wet fraction of the isolated audio, 0 to 1 (default 1)")
     run.add_argument("--no-visuals", action="store_true", help="skip the visuals overlay pass")
     run.add_argument("--no-research", action="store_true",
                      help="skip fetching reference screenshots; cards only")
@@ -576,9 +581,14 @@ def _run_cmd(args: argparse.Namespace) -> int:
         visuals_scale_card=args.visuals_scale_card,
         visuals_scale_shot=args.visuals_scale_shot,
         diarize=(True if args.diarize else None),
+        isolate_voice=(True if args.isolate_voice else None),
+        isolate_mix=args.isolate_mix,
     )
     if cfg.judge is None:
         raise ValueError(NO_JUDGE)
+    if cfg.isolate_voice:
+        # Refuse here, before any judge or transcriber spend, when the unit cannot run on this machine.
+        isolate.preflight(Cache().root)
     # A saved Scribe response is always replayed through the Scribe transcriber.
     transcriber_spec = "scribe" if args.scribe_response and args.transcriber is None else cfg.transcriber
     if transcriber_spec is None:

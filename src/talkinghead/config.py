@@ -15,6 +15,9 @@ ENV_JUDGE = "TALKINGHEAD_JUDGE"
 ENV_TRANSCRIBER = "TALKINGHEAD_TRANSCRIBER"
 ENV_CONFIG = "TALKINGHEAD_CONFIG"
 
+# The voice-isolation knobs: they shape only the rendered audio, so no editorial stage's memo keys on them.
+ISOLATE_KEYS = ("isolate_voice", "isolate_mix")
+
 # Corner name -> ffmpeg overlay expressions for (x, y), with `{m}` the margin.
 OVERLAY_CORNERS: dict[str, tuple[str, str]] = {
     "top-right": ("W-w-{m}", "{m}"),
@@ -227,6 +230,11 @@ class Config:
     # source transcript could not show. Each round judges the findings, cuts the confirmed ones and re-renders.
     # 0 disables the pass; a cook whose output was never transcribed skips it whatever this is set to.
     polish_output_rounds: int = 2
+    # Voice isolation (macOS only, opt-in): the rendered audio, its output transcript and loudness mastering use
+    # Apple's voice isolation. Transcription, judging and edge placement keep the original audio.
+    isolate_voice: bool = False
+    # Wet fraction of the isolated track: 1 is fully isolated, 0 is the original microphone audio.
+    isolate_mix: float = 1.0
 
     def validate(self) -> "Config":
         if self.agree > self.votes:
@@ -269,6 +277,8 @@ class Config:
             raise ValueError("polish gap caps and polish_max_sec cannot be negative")
         if self.polish_output_rounds < 0:
             raise ValueError("polish_output_rounds cannot be negative")
+        if not 0.0 <= self.isolate_mix <= 1.0:
+            raise ValueError(f"isolate_mix ({self.isolate_mix}) must be between 0 and 1")
         return self
 
     def to_dict(self) -> dict:
@@ -288,6 +298,10 @@ class Config:
         if not self.polish:
             # The same rule for polish: a cook without it keeps the plans and memo keys it always had.
             for k in [k for k in d if k == "polish" or k.startswith("polish_")]:
+                del d[k]
+        if not self.isolate_voice:
+            # Isolation off leaves plan provenance as it was; the mix means nothing without it.
+            for k in ISOLATE_KEYS:
                 del d[k]
         return d
 

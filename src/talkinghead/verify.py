@@ -22,6 +22,7 @@ from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
 from .edges import is_intra_restart
+from .isolate import timing_audio
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
 from .residual import finding_source, same_occurrence
@@ -67,6 +68,10 @@ SOURCE_TIMING_MIN_RMS_DB = -50.0
 # Smaller overlap than this between a cut and an unclassified voiced span is
 # edge rounding, not a swallowed word.
 UNCLASSIFIED_REPORT_MIN = 0.05
+# The isolated track must sit on the source's timeline to within this many samples at the check points.
+ISOLATION_RESIDUAL_MAX = 1
+# Output words of the isolated render against the kept source words; below this the unit ate speech.
+ISOLATION_WORDS_MIN = 0.90
 
 
 @dataclass
@@ -534,9 +539,48 @@ def _output_asr(plan: Plan, f: dict) -> CheckResult:
                        "words projected through the plan (an expectation, not an independent measurement)")
 
 
+def _isolation_alignment(plan: Plan, f: dict) -> CheckResult:
+    """The written isolated track sits on the source's timeline: its residual lag at the check points is at most one sample.
+
+    Fatal: a track one sample off is still a fine track, but a larger offset means the trim was wrong somewhere in
+    the recording, so every word after that point would be heard from the wrong instant.
+    """
+    iso = f.get("isolation")
+    if iso is None:
+        return CheckResult("isolation_alignment", "fatal", False, "not measured: the isolated track was not read back")
+    rows = iso.get("residual") or []
+    if not rows:
+        return CheckResult("isolation_alignment", "fatal", False, "no check points could be measured")
+    bad = [r for r in rows if abs(r["residual_samples"]) > ISOLATION_RESIDUAL_MAX]
+    detail = (f"latency {iso['lag_samples']} samples trimmed; residual at {len(rows)} points, worst "
+              f"{iso['max_abs_residual']} sample(s) (limit {ISOLATION_RESIDUAL_MAX})")
+    if bad:
+        detail += "; off: " + ", ".join(f"{r['at']:.1f}s {r['residual_samples']:+d}" for r in bad[:6])
+    return CheckResult("isolation_alignment", "fatal", not bad, detail)
+
+
+def _isolation_words(plan: Plan, f: dict) -> CheckResult:
+    """The isolated render still carries the speech: its transcript has about as many words as the kept source words."""
+    iso = f.get("isolation") or {}
+    rendered, expected = iso.get("rendered_words"), iso.get("expected_words")
+    if rendered is None:
+        return CheckResult("isolation_words", "warn", True, "not measured: the render was not transcribed")
+    if not expected:
+        return CheckResult("isolation_words", "warn", True, "no kept source words to compare against")
+    ratio = rendered / expected
+    return CheckResult("isolation_words", "warn", ratio >= ISOLATION_WORDS_MIN,
+                       f"{rendered} words in the isolated render vs {expected} kept source words "
+                       f"({ratio:.0%}; floor {ISOLATION_WORDS_MIN:.0%})")
+
+
+ISOLATION_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [_isolation_alignment, _isolation_words]
+
+
 def run_checks(plan: Plan, facts: dict) -> list[CheckResult]:
     """The video table, or the audio table (no picture: no AV sync, colour or resolution)."""
     table = AUDIO_CHECKS if facts.get("mode") == "audio" else CHECKS
+    if plan.isolation:
+        table = [*table, *ISOLATION_CHECKS]
     results = [check(plan, facts) for check in table]
     if facts.get("output_asr") == "source-projection":
         results.append(_output_asr(plan, facts))
@@ -637,8 +681,8 @@ def measure_source_timing(
             sample = min(window, segment.length / 2)
             t = segment.length / 2 - sample / 2
             rendered = _decode_pcm(render_path, offset + t, sample, sr)
-            source = plan.sources[segment.source]
-            original = _decode_pcm(source.path, segment.start + t - source_pad, sample + 2 * source_pad, sr)
+            original = _decode_pcm(timing_audio(plan, segment.source), segment.start + t - source_pad,
+                                   sample + 2 * source_pad, sr)
             entry: dict = {"output_seconds": round(offset + t, 3), "source": segment.source,
                            "window_sec": round(sample, 3)}
             level = _rms_db(rendered)
