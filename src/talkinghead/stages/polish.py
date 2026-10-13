@@ -460,7 +460,8 @@ def output_policy() -> str:
     The output round's memo is keyed on it, so a changed rule, scan or mapping recomputes the round.
     """
     sources = [inspect.getsource(fn) for fn in (output_prompt, _context, output_round, residual.scan,
-                                                residual.to_source)]
+                                                residual.to_source, residual.to_source_point,
+                                                residual.finding_source, residual.same_occurrence)]
     text = "\n".join(sources + [repr(OUTPUT_SCHEMA), OUTPUT_RULES, repr((OUTPUT_CONTEXT_SEC, OUTPUT_KEPT_PAD))])
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
@@ -506,7 +507,8 @@ def output_round(ctx: Context, plan, words: Sequence, round_no: int) -> dict:
         row = {"id": cid, **f.to_dict(), "votes": votes, "why": whys.get(cid, "")}
         if votes < cfg.polish_agree:
             row["decision"] = "keep"
-            keep.append({"key": f.key, "text": f.heard, "start": round(f.start, 3), "kind": f.kind})
+            keep.append({"key": f.key, "text": f.heard, "start": round(f.start, 3), "kind": f.kind,
+                         "source": residual.finding_source(plan, f)})
         else:
             end = f.end - (OUTPUT_KEPT_PAD if f.follows else 0.0)
             src = residual.to_source(plan, f.start, end)

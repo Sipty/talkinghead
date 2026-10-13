@@ -23,6 +23,7 @@ from .config import Config
 from .derive import pause_boundary, pause_cap
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
+from .residual import finding_source, same_occurrence
 from .residual import scan as scan_disfluencies
 from .store import Cache
 from .timeline import Plan, Segment
@@ -477,12 +478,16 @@ def visuals_resolution(base: str, out: str) -> CheckResult:
 
 
 def residual_findings(f: dict) -> list[dict] | None:
-    """The render's disfluency findings the output pass did not judge keep; None when the render was not transcribed."""
+    """The render's disfluency findings the output pass did not judge keep; None when the render was not transcribed.
+
+    A keep suppresses only its own occurrence (same text, same main-source instant): a second "very, very" the judge
+    never saw, or one that cannot be placed in the source, stays listed.
+    """
     found = f.get("disfluency_findings")
     if found is None:
         return None
-    keep = set(f.get("disfluency_keep") or ())
-    return [x for x in found if x["key"] not in keep]
+    keep = f.get("disfluency_keep") or []
+    return [x for x in found if not any(same_occurrence(x, k) for k in keep)]
 
 
 def _residual_disfluencies(plan: Plan, f: dict) -> CheckResult:
@@ -889,7 +894,8 @@ def collect_facts(
         "render_silences": render_silences(wav, quiet_silence_min(config)),
         "render_transcript": transcript.to_dict(),
         # None = the render was not transcribed, so nothing in it can be scanned.
-        "disfluency_findings": None if not output_asr else [f.to_dict() for f in scan_disfluencies(words)],
+        "disfluency_findings": None if not output_asr else [
+            {**f.to_dict(), "source": finding_source(plan, f)} for f in scan_disfluencies(words)],
         # None = the evidence was never asked for (a hand render, unit facts);
         # [] = asked for and unavailable, which the check reports as a warning.
         "source_timing": measure_source_timing(plan, render_path) if source_path else None,

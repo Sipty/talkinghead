@@ -256,13 +256,23 @@ def _retake_policy() -> str:
     )] + [prompts.RETAKE_SCHEMA, prompts.MARKER_SCHEMA])
 
 
-def _stored_memo(run: RunDir, stage: str, inputs: dict, version: int):
-    """A stage's stored value when its key still matches `inputs`, else None. Plan-only rebuilds replay through this."""
+def _stored_round(run: RunDir, stage: str, inputs: dict, version: int):
+    """A stored output round for this plan and render, replayed with the rendered transcript it was judged on.
+
+    A round's key includes the rendered transcript's digest, which a plan-only rebuild never renders. So the round
+    records its own identity: the digest of its inputs without the transcript, and the transcript digest. A plan-only
+    replay accepts it only when the inputs (plan, render settings, raw cuts, policy) match now and the key the stored
+    transcript digest produces is the stored key, so the transcript it replays is the one it was judged on.
+    """
     path = run.memo_dir / f"{stage}.json"
     if not path.is_file():
         return None
     stored = json.loads(path.read_text())
-    return stored["value"] if stored.get("key") == stable_key(inputs, version) else None
+    identity = (stored.get("value") or {}).get("identity")
+    if not identity or identity.get("inputs") != _digest(inputs):
+        return None
+    full = {**inputs, "transcript": identity.get("transcript")}
+    return stored["value"] if stored.get("key") == stable_key(full, version) else None
 
 
 def _words_sha(words) -> str:
@@ -471,22 +481,22 @@ def run_pipeline(
         judged = [(c.start, c.end, c.reason) for c in cur if c.reason in JUDGED_REASONS]
         plan, cuts, joins = assemble(cur)
         plan_path.write_text(plan.to_json())
+        render_key = render_memo_key(plan, settings, audio_only=audio_only)
         round_inputs = {**base_inputs, **_stage_config(ctx, "polish_output"),
                         "raw": _digest([(c.start, c.end, c.reason) for c in cur]),
                         "blocks": _digest([(b.first, b.last, b.start, b.end, b.decision) for b in blocks]),
-                        "round": round_no + 1, "policy": polish.output_policy()}
+                        "round": round_no + 1, "policy": polish.output_policy(), "render": render_key}
         if plan_only:
             # Offline rebuild: nothing is rendered, so a round can only replay what a full run stored for this plan.
             if round_no >= rounds_max:
                 break
-            value = _stored_memo(run, f"{prefix}polish-output-{round_no + 1}", round_inputs,
-                                 STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION))
+            value = _stored_round(run, f"{prefix}polish-output-{round_no + 1}", round_inputs,
+                                  STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION))
             if value is None:
                 output.setdefault("skipped", "plan-only: no stored output round for this plan; a full run "
                                              "transcribes the render and stores it")
                 break
         else:
-            render_key = render_memo_key(plan, settings, audio_only=audio_only)
             memo_path = run.root / f"{prefix}render.json"
             memo = run.read_json(memo_path, default={})
             if final.is_file() and memo.get("key") == render_key and not fresh:
@@ -504,10 +514,13 @@ def run_pipeline(
                                   judged=judged)
             if round_no >= rounds_max:
                 break
+            transcript = _digest(facts["render_transcript"])
             value = run.memo(
-                f"{prefix}polish-output-{round_no + 1}", round_inputs,
+                f"{prefix}polish-output-{round_no + 1}", {**round_inputs, "transcript": transcript},
                 STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION),
-                lambda: polish.output_round(ctx, plan, facts["words"], round_no + 1), fresh=fresh,
+                lambda: {**polish.output_round(ctx, plan, facts["words"], round_no + 1),
+                         "identity": {"inputs": _digest(round_inputs), "transcript": transcript}},
+                fresh=fresh,
             )
         rounds.append({**value["notes"], "rows": value["findings"]})
         keep.extend(value["keep"])
@@ -537,7 +550,7 @@ def run_pipeline(
         return RunResult(plan_path, final, report_path, notes=notes)
     if config.polish:
         # The judged-keep findings of every round, all judged on renders the final check may still see.
-        facts["disfluency_keep"] = [k["key"] for k in keep]
+        facts["disfluency_keep"] = keep
         output["residual"] = residual_findings(facts)
 
     checks = run_checks(plan, facts)

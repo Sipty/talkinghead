@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import talkinghead.pipeline as pipeline
 from talkinghead.audio import FRAME_SEC, Envelope, RefinedWord
 from talkinghead.config import Config
 from talkinghead.edges import EdgeContext, finalize_cuts
@@ -197,4 +198,55 @@ def test_an_output_cut_is_removed_whole_between_its_neighbours_not_shrunk_by_the
     assert len(out) == 1 and out[0].reason == "polish"
     assert out[0].start == pytest.approx(4.34, abs=1e-6)
     assert out[0].end == pytest.approx(4.66, abs=1e-6)
+
+
+def test_an_unchanged_resume_replays_the_judged_rounds_without_a_judge_call(clip: Path, tmp_path: Path) -> None:
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    first = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                         judge=FakeJudge(_sources() + SOURCE_POLISH + [_verdict("cut")] * 3),
+                         cache=cache, guidelines="G", topic="t")
+    strict = FakeJudge([])
+    again = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=strict,
+                         cache=cache, guidelines="G", topic="t")
+    assert strict.calls == 0 and again.ok
+    # Nothing judged was superseded: every output round replayed from its stored memo.
+    assert "polish-output" not in again.notes.get("memos", {}).get("recomputed", "")
+    assert _output_cuts(Plan.from_json(again.plan_path.read_text())) == _output_cuts(
+        Plan.from_json(first.plan_path.read_text()))
+
+
+class EditedRenderTranscriber(PlanAwareTranscriber):
+    """The same render, heard differently: the output ASR now reads "Third." as "Thirty."."""
+
+    version = "2"  # a changed transcriber is a new version: the transcript cache must not return the old words
+
+    def transcribe(self, wav_path: str) -> Transcript:
+        t = super().transcribe(wav_path)
+        if Path(wav_path).parent.name == "audio":
+            return t
+        words = [Word(w.text.replace("Third.", "Thirty."), w.start, w.end, w.probability) for w in t.words]
+        return Transcript(t.backend, t.version, t.duration, words)
+
+
+def test_a_changed_rendered_transcript_rejudges_the_output_round(clip: Path, tmp_path: Path) -> None:
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                 judge=FakeJudge(_sources() + SOURCE_POLISH + [_verdict("cut")] * 3),
+                 cache=cache, guidelines="G", topic="t")
+    again = run_pipeline(str(clip), out, _cfg(), transcriber=EditedRenderTranscriber(out),
+                         judge=FakeJudge([_verdict("cut")] * 3), cache=cache, guidelines="G", topic="t")
+    # Round 1 saw a different render transcript, so its stored memo is superseded and the round runs again.
+    assert "polish-output-1" in again.notes["memos"]["recomputed"]
+
+
+def test_a_changed_render_chain_rejudges_the_output_round(clip: Path, tmp_path: Path, monkeypatch) -> None:
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                 judge=FakeJudge(_sources() + SOURCE_POLISH + [_verdict("cut")] * 3),
+                 cache=cache, guidelines="G", topic="t")
+    # A changed ffmpeg chain renders the same plan to different pixels and audio: the round must not replay.
+    monkeypatch.setattr(pipeline, "RENDERER_VERSION", pipeline.RENDERER_VERSION + 1)
+    again = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                         judge=FakeJudge([_verdict("cut")] * 3), cache=cache, guidelines="G", topic="t")
+    assert "polish-output-1" in again.notes["memos"]["recomputed"]
 

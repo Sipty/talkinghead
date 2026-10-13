@@ -24,6 +24,8 @@ RESTART_STEM = (2, 4)
 HYPHENS = ("-", "\u2013", "\u2014")
 # Output times closer than this count as the same instant when mapping through the plan.
 EPS = 1e-6
+# Two findings are one occurrence when their main-source instants lie this close (a judged keep and a render finding).
+SAME_OCCURRENCE_SEC = 0.25
 
 
 def norm(text: str) -> str:
@@ -128,13 +130,51 @@ def scan(words: Sequence) -> list[Finding]:
     return out
 
 
+def to_source_point(plan: Plan, t: float) -> float | None:
+    """The main-source time of one output instant, or None when it plays a non-main source or lies outside the output.
+
+    At a join the instant belongs to the segment that starts there, as the renderer plays it.
+    """
+    offset = 0.0
+    for seg in plan.segments:
+        stop = offset + seg.length
+        if offset - EPS <= t < stop - EPS:
+            return seg.start + (t - offset) if seg.source == plan.main else None
+        offset = stop
+    return None
+
+
+def finding_source(plan: Plan, f: Finding) -> float | None:
+    """A finding's main-source instant, rounded: its identity across renders (see same_occurrence)."""
+    t = to_source_point(plan, f.start)
+    return None if t is None else round(t, 3)
+
+
+def same_occurrence(a: dict, b: dict) -> bool:
+    """Whether a judged keep and a render finding are one occurrence: the same text and the same main-source instant.
+
+    The text alone is not identity ("uh" or "very, very" recur through a recording), and an instant that cannot be
+    placed in the main source (`source` None) never matches, so an unplaceable occurrence stays flagged.
+    """
+    if a["key"] != b["key"] or a.get("source") is None or b.get("source") is None:
+        return False
+    return abs(a["source"] - b["source"]) <= SAME_OCCURRENCE_SEC
+
+
+def _main_material_between(plan: Plan, lo: float, hi: float) -> bool:
+    """Whether any main-source segment of the plan plays source time strictly inside (lo, hi)."""
+    return any(seg.source == plan.main and seg.start < hi - EPS and seg.end > lo + EPS for seg in plan.segments)
+
+
 def to_source(plan: Plan, start: float, end: float) -> tuple[float, float] | None:
     """The main-source span of an output span, or None when the mapping is ambiguous.
 
     A span may cross a join. Where the join runs forward in the source (a cut sits between the two sides), the
-    span's two pieces meet through material the plan already removed, so one source span covers both pieces and
-    the removed gap in between. A join that runs backward (a moved block) has no such span: the source order breaks,
-    so the caller reports the finding instead of cutting. None also when the span leaves the main source.
+    span's two pieces meet through material the plan removed, so one source span covers both pieces and the gap in
+    between. That holds only when the gap holds nothing else the plan keeps: a segment played from inside the gap
+    (a moved opener, for one) would be cut away with it. A join that runs backward (a moved block) has no such span
+    either: the source order breaks, so the caller reports the finding instead of cutting. None also when the span
+    leaves the main source.
     """
     spans: list[tuple[Segment, float]] = []  # (segment, output time where it starts)
     offset = 0.0
@@ -149,6 +189,9 @@ def to_source(plan: Plan, start: float, end: float) -> tuple[float, float] | Non
     last, last_at = spans[-1]
     if first_at > start + EPS or last_at + last.length < end - EPS:
         return None
-    if any(b.start < a.end - EPS for (a, _), (b, _) in zip(spans, spans[1:])):
-        return None
+    for (a, _), (b, _) in zip(spans, spans[1:]):
+        if b.start < a.end - EPS:
+            return None
+        if _main_material_between(plan, a.end, b.start):
+            return None
     return first.start + (start - first_at), last.start + (end - last_at)

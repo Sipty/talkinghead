@@ -10,6 +10,7 @@ from talkinghead.residual import scan, to_source
 from talkinghead.stages import polish
 from talkinghead.timeline import Cut, Plan, Segment, SourceInfo
 from talkinghead.transcribe import Word
+from talkinghead.verify import _residual_disfluencies, residual_findings
 
 
 def _words(*spec: tuple[str, float]) -> list[Word]:
@@ -142,9 +143,11 @@ def test_a_round_with_no_findings_makes_no_judge_call() -> None:
     assert judge.calls == 0 and value["cuts"] == [] and value["keep"] == []
 
 
-def test_the_output_policy_is_a_fingerprint_that_changes_with_the_rules() -> None:
-    assert polish.output_policy() == polish.output_policy()
-    assert "NEVER remove a laugh" in polish.OUTPUT_RULES and "- filler:" in polish.OUTPUT_RULES
+def test_the_output_policy_changes_when_the_rules_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    before = polish.output_policy()
+    assert before == polish.output_policy()  # the same rules give the same fingerprint
+    monkeypatch.setattr(polish, "OUTPUT_RULES", polish.OUTPUT_RULES + "\n- an added rule.")
+    assert polish.output_policy() != before
 
 
 def test_only_a_filler_the_output_pass_or_the_source_named_settles_its_voiced_edges() -> None:
@@ -154,3 +157,44 @@ def test_only_a_filler_the_output_pass_or_the_source_named_settles_its_voiced_ed
     assert _is_filler_cut(Cut(0.0, 1.0, "polish", "", {"pass": "output", "kind": "filler"}))
     assert not _is_filler_cut(Cut(0.0, 1.0, "polish", "", {"kind": "filler"}))  # a source-side judged cut
     assert not _is_filler_cut(Cut(0.0, 1.0, "polish", "", {"pass": "output", "kind": "repeat"}))
+
+
+# ------------------------------------------------------------- reordered plans and occurrences
+
+REORDERED = Plan(sources={"main": SourceInfo("main", "/v/in.mp4", "sha", 30.0)}, main="main", cuts=[],
+                 segments=[Segment("main", 10.0, 20.0), Segment("main", 0.0, 10.0), Segment("main", 20.0, 30.0)])
+
+
+def test_a_forward_join_that_skips_an_opener_kept_elsewhere_has_no_single_source_span() -> None:
+    # The opener (source 10-20) plays first, at output 0-10. Output 19.8-20.3 is the end of source 0-10 and the
+    # start of source 20-30: one span over the join would also cut the opener, which the plan keeps.
+    assert to_source(REORDERED, 19.8, 20.3) is None
+    assert to_source(REORDERED, 10.5, 11.0) == (0.5, 1.0)  # a span inside one segment still maps
+
+
+def test_a_confirmed_repeat_across_that_join_is_skipped_and_the_opener_is_not_cut() -> None:
+    judge = FakeJudge([_verdicts(("c0", "cut"))] * 3)
+    words = _words(("we,", 19.8), ("we", 20.1), ("know", 20.4))  # a repeat whose kept copy starts at 20.1
+    value = polish.output_round(_ctx(judge, polish_votes=3, polish_agree=2), REORDERED, words, 1)
+    assert judge.calls == 3 and value["cuts"] == []
+    assert value["findings"][0]["decision"] == "skipped: crosses a join"
+
+
+def _finding(start: float, source: float | None) -> dict:
+    return {"key": "repeat very very", "heard": "very, very", "kind": "repeat", "start": start, "source": source}
+
+
+def test_a_judged_keep_suppresses_only_its_own_occurrence_not_every_one_with_the_same_text() -> None:
+    # Two identical "very, very" repeats: the judge kept the one at source 5.0 and never saw the one at 12.0.
+    facts = {"disfluency_findings": [_finding(3.0, 5.0), _finding(8.0, 12.0)],
+             "disfluency_keep": [{"key": "repeat very very", "source": 5.0}]}
+    assert [x["source"] for x in residual_findings(facts)] == [12.0]
+    check = _residual_disfluencies(None, facts)
+    assert check.severity == "warn" and not check.ok and "very, very" in check.detail
+
+
+def test_a_finding_that_cannot_be_placed_in_the_source_is_never_suppressed_by_a_keep() -> None:
+    facts = {"disfluency_findings": [_finding(3.0, None)],
+             "disfluency_keep": [{"key": "repeat very very", "source": None}]}
+    assert len(residual_findings(facts)) == 1
+
