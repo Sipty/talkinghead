@@ -472,19 +472,20 @@ def _audio_parts(out_path: str) -> tuple[str, str]:
     return f"{out_path}.staged.wav", f"{out_path}.joined.pcm"
 
 
-def render_audio_plan(plan: Plan, out_path: str, settings: RenderSettings) -> str:
+def render_audio_plan(plan: Plan, out_path: str, settings: RenderSettings, *, original: bool = False) -> str:
     """Render an audio-only plan to a 48 kHz PCM WAV and return the command (for the report).
 
     The same overlap-add join and mastering chain as the video render's audio
     pass, without a picture. The WAV is staged and replaced atomically, so
-    `out_path` never holds a half-written file.
+    `out_path` never holds a half-written file. `original` reads the source audio
+    instead of the isolated track (what the output pass transcribes under isolation).
     """
     if not plan.segments:
         raise RuntimeError("nothing to render: the plan removes the whole recording")
     if settings.strategy != "concat":
         raise NotImplementedError(f"render strategy {settings.strategy!r}")
     order = _source_order(plan)
-    audio = _audio_sources(plan)
+    audio = {sid: si.path for sid, si in plan.sources.items()} if original else _audio_sources(plan)
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
     staged, pcm = _audio_parts(out_path)
     scratch = [f"{out_path}.src{i}.pcm" for i in range(len(order))]

@@ -230,6 +230,19 @@ def analyze(
     silences = [tuple(s) for s in cache.get_or_compute(
         audio_sha, "silences", {"frame_sec": 0.02}, ANALYSIS_VERSION, lambda: detect_silences(wav)
     )]
+    # The pauses stage and the dead-air check read silence as the viewer hears it. With isolation that is the isolated
+    # track, where the unit gates room tone to digital silence; the detectors above keep the original's silences.
+    pause_silences, silence_source = silences, None
+    if config.isolate_voice:
+        from . import isolate
+
+        source_sha = sha256_file(video)
+        track = isolate.silence_track(video, source_sha, mix=config.isolate_mix, cache_root=cache.root,
+                                      scratch=run.root / "isolation-silence")
+        pause_silences = [tuple(s) for s in cache.get_or_compute(
+            sha256_file(track), "silences", {"frame_sec": 0.02}, ANALYSIS_VERSION,
+            lambda: detect_silences(str(track)))]
+        silence_source = "isolated"
     words = refine_word_bounds(transcript.words, env, floor)
     as_words = [Word(w.text, w.start, w.end, 1.0, w.speaker) for w in words]
     env_lists = (env.db.tolist(), env.zcr.tolist())
@@ -286,7 +299,7 @@ def analyze(
     if ev_key is not None:
         transcript_info["events"] = ev_key
     ctx = Context(
-        config=config, source=source, words=words, env=env, floor=floor, silences=silences, moans=moans,
+        config=config, source=source, words=words, env=env, floor=floor, silences=pause_silences, moans=moans,
         judge=judge, llm_cache=LLMCache(run.llm_dir), guidelines=guidelines, topic=topic, preferences=preferences,
         decisions=run.read_json(run.decisions, default={}),
         noise_cuts=noise_cuts, voices=voices, speech_probes=speech_probes, protected_spans=protected,
@@ -294,6 +307,7 @@ def analyze(
             "talkinghead": __version__, "analysis_version": ANALYSIS_VERSION,
             "audio_sha256": audio_sha, "video_sha256": source.sha256, "audio_only": audio_only,
             "transcript": transcript_info,
+            **({"silences": silence_source} if silence_source else {}),
             "floor_dbfs": round(floor, 2), "video_duration": v_dur, "audio_duration": a_dur,
             "unclassified_voice": {"spans": len(voices), "masked_non_speech": masked},
             "audio_events": event_rows,

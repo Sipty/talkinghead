@@ -1,6 +1,8 @@
 """Voice isolation: latency measurement, dropout repair, the plan record and the memo keys it must leave alone."""
 
+import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,7 +12,7 @@ from talkinghead import isolate as I
 from talkinghead.config import ISOLATE_KEYS, Config
 from talkinghead.pipeline import STAGE_CONFIG_KEYS, _stage_config
 from talkinghead.timeline import Cut, Plan, SourceInfo
-from talkinghead.transcribe import Word
+from talkinghead.transcribe import Word, prepare_audio
 from talkinghead.verify import ISOLATION_RESIDUAL_MAX, _isolation_alignment, _isolation_words
 
 RATE = I.RATE
@@ -235,8 +237,22 @@ def test_isolation_re_keys_the_render_and_nothing_editorial(tmp_path, monkeypatc
         return {"lag_samples": 0, "residual": [{"at": 0.0, "residual_samples": 0, "corr": 1.0, "qualified": True}],
                 "max_abs_residual": 0, "expected_words": expected_words, "rendered_words": rendered_words}
 
+    def silence_stub(source, source_sha, *, mix, cache_root, scratch):
+        # The analysis track: the 16 kHz source (no unit on a six-second tone). Silence detection reads it as usual.
+        return Path(prepare_audio(source, scratch)[0])
+
+    class Recording(PlanAwareTranscriber):
+        def __init__(self, run_dir):
+            super().__init__(run_dir)
+            self.wavs: list[str] = []
+
+        def transcribe(self, wav_path):
+            self.wavs.append(wav_path)
+            return super().transcribe(wav_path)
+
     monkeypatch.setattr(I, "ensure", unit_stub)
     monkeypatch.setattr(I, "verify_facts", residual_stub)
+    monkeypatch.setattr(I, "silence_track", silence_stub)
     clip = tmp_path / "clip.mp4"
     _clip(clip)
     out = tmp_path / "out"
@@ -246,11 +262,24 @@ def test_isolation_re_keys_the_render_and_nothing_editorial(tmp_path, monkeypatc
     plain_plan = Plan.from_json(first.plan_path.read_text())
     assert not plain_plan.isolation
 
+    keys = lambda: {p.stem: json.loads(p.read_text())["key"]  # noqa: E731
+                    for p in (out / "stages").glob("*.json") if ".superseded" not in p.name}
+    before = keys()
     strict = FakeJudge([])  # any editorial call would raise StopIteration
     iso_cfg = Config(**{**_cfg().__dict__, "isolate_voice": True, "isolate_mix": 1.0})
-    second = run_pipeline(str(clip), out, iso_cfg, transcriber=PlanAwareTranscriber(out), judge=strict,
+    recorder = Recording(out)
+    second = run_pipeline(str(clip), out, iso_cfg, transcriber=recorder, judge=strict,
                           cache=cache, guidelines="G")
     assert strict.calls == 0
+    # The judged transcript is the original-audio render; the isolated render is transcribed for its own count only.
+    assert any("judge" in w for w in recorder.wavs) and any("verify" in w for w in recorder.wavs)
+    assert second.facts["isolated_words"] is not None
+    # Only the pauses memo re-keys on isolation (its silence now comes from the isolated track); the editorial
+    # stages above it keep their memo keys, so a cook that turns isolation on replays them.
+    after = keys()
+    assert after["pauses"] != before["pauses"]
+    for stage in ("structure", "retakes", "content"):
+        assert after[stage] == before[stage], stage
     plan = Plan.from_json(second.plan_path.read_text())
     assert plan.isolation and plan.isolation["track"]["sha256"]
     assert [(c.start, c.end, c.reason) for c in plan.cuts] == \
@@ -383,3 +412,73 @@ def test_a_rebuild_from_the_record_writes_the_same_bytes_with_a_repair_and_an_od
     track.unlink()
     I.audio_path(plan, cache_root=tmp_path / "cache", scratch=tmp_path / "scratch")
     assert I.sha256_file(track) == first == record["track"]["sha256"]
+
+
+def _room_tone_master(tmp_path, seconds=30.0):
+    """Speech bursts over a 4 s stretch of room tone at about -34 dBFS, as a master WAV and its raw unit output.
+
+    The unit keeps the speech and gates the room tone to near-digital silence (what AUSoundIsolation does between
+    phrases on the restaurant recording), delayed by the measured latency.
+    """
+    rng = np.random.default_rng(51)
+    n = round(seconds * RATE)
+    speech = (rng.standard_normal((n, 2)) * 0.2).astype(np.float32)
+    gate = np.zeros(n, np.float32)
+    t = 0
+    while t < n:  # speech-like bursts, 0.6 s on, 0.4 s off, everywhere except the room-tone stretch
+        on = round(0.6 * RATE)
+        gate[t:t + on] = 1.0
+        t += on + round(0.4 * RATE)
+    room = slice(round(12.0 * RATE), round(16.0 * RATE))
+    gate[room] = 0.0
+    orig = speech * gate[:, None]
+    orig[room] = (rng.standard_normal((room.stop - room.start, 2)) * 0.02).astype(np.float32)  # about -34 dBFS
+    raw = orig.copy()
+    raw[room] *= np.float32(1e-4)  # the unit's gated room tone
+    raw = _delayed(raw, 3664, RATE)
+    master = tmp_path / "master.wav"
+    master.write_bytes(I._wav_header(2, len(orig)) + np.ascontiguousarray(orig, dtype="<f4").tobytes())
+    raw_file = tmp_path / "raw.wav"
+    raw_file.write_bytes(I._wav_header(2, len(raw)) + np.ascontiguousarray(raw, dtype="<f4").tobytes())
+    return master, raw_file, room
+
+
+def test_room_tone_the_unit_gates_is_silence_on_the_isolated_track(tmp_path, monkeypatch):
+    """Root of the render_silence regression: the pauses stage must see the isolated track's silence.
+
+    The original's room tone reads as speech level, so detect_silences keeps it; the isolated track's gated room
+    tone is silence, and detect_silences reports it. The pauses stage reads the isolated silences.
+    """
+    from talkinghead.transcribe import detect_silences
+
+    master, raw_file, room = _room_tone_master(tmp_path)
+    monkeypatch.setattr(I, "raw_isolation", lambda wav_in, sha, cache_root: raw_file)
+    cache_root = tmp_path / "cache"
+    original = I.silence_track(str(master), I.sha256_file(master), mix=0.0, cache_root=cache_root,
+                               scratch=tmp_path / "s0")
+    isolated = I.silence_track(str(master), I.sha256_file(master), mix=1.0, cache_root=cache_root,
+                               scratch=tmp_path / "s1")
+    assert Path(original).is_file() and Path(isolated).is_file()
+
+    def covered(wav):
+        spans = detect_silences(str(wav))
+        lo, hi = room.start / RATE, room.stop / RATE
+        return sum(max(0.0, min(e, hi) - max(s, lo)) for s, e in spans)
+
+    assert covered(original) < 0.5  # the original's room tone is not silence to the detector
+    assert covered(isolated) > 3.0  # the isolated track's room tone is silence: most of its 4 seconds
+
+
+def test_isolated_silence_track_is_cached_and_16k_mono(tmp_path, monkeypatch):
+    import wave
+
+    master, raw_file, _ = _room_tone_master(tmp_path, seconds=20.0)
+    monkeypatch.setattr(I, "raw_isolation", lambda wav_in, sha, cache_root: raw_file)
+    path = I.silence_track(str(master), I.sha256_file(master), mix=1.0, cache_root=tmp_path / "c",
+                           scratch=tmp_path / "s")
+    with wave.open(str(path)) as w:
+        assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (1, 2, 16000)
+        assert abs(w.getnframes() - 20 * 16000) <= 16000 // 10
+    again = I.silence_track(str(master), I.sha256_file(master), mix=1.0, cache_root=tmp_path / "c",
+                            scratch=tmp_path / "s2")
+    assert again == path  # content-addressed: the same source, helper and mix reuse the file

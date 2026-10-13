@@ -876,6 +876,7 @@ def project_words(plan: Plan, words: Sequence) -> list[Word]:
 
 def collect_facts(
     plan: Plan, render_path: str, *, transcriber: Transcriber | None = None, cache: Cache, workdir: Path,
+    judge_audio: str | None = None,
     source_duration: float, source_silences: list[tuple[float, float]], lufs_target: float = -16.0,
     source_path: str | None = None, voices: Sequence[tuple[float, float]] = (),
     speech_probes: Sequence[dict] = (), config: Config | None = None,
@@ -915,8 +916,15 @@ def collect_facts(
                 f"transcriber {transcriber.name!r} replays one saved source response and cannot "
                 "transcribe the edited output; use a live transcriber or disable output ASR (--no-output-asr)")
         transcript = transcribe_cached(cache, sha, transcriber, wav)
+        isolated_transcript = None
+        if judge_audio is not None:
+            # The judged transcript comes from the un-isolated render; the render's own transcript only counts its words.
+            judge_wav, judge_sha = prepare_audio(judge_audio, workdir / "judge", force=True)
+            isolated_transcript = transcript
+            transcript = transcribe_cached(cache, judge_sha, transcriber, judge_wav)
     else:
         transcript = Transcript("source-projection", "1", plan.output_duration, project_words(plan, source_words))
+        isolated_transcript = None
     joins = [t for t in plan.joins() if t > 0.05]
     grades = [check_join(render_path, t) for t in joins]
     out = subprocess.run(
@@ -947,6 +955,8 @@ def collect_facts(
         "quiet_silence_min": quiet_silence_min(config),
         "render_silences": render_silences(wav, quiet_silence_min(config)),
         "render_transcript": transcript.to_dict(),
+        # The isolated render's own word count, when the judged transcript came from another audio (isolation).
+        "isolated_words": None if isolated_transcript is None else len(isolated_transcript.words),
         # None = the render was not transcribed, so nothing in it can be scanned.
         "disfluency_findings": None if not output_asr else [
             {**f.to_dict(), "source": finding_source(plan, f)} for f in scan_disfluencies(words)],

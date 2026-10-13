@@ -399,8 +399,11 @@ def run_pipeline(
     notes.update(n)
     content_cuts, n = memo_cuts("content", lambda: content.run(ctx, existing=structural + retake_cuts))
     notes.update(n)
-    pause_cuts, n = memo_cuts("pauses", lambda: pauses.run(ctx, ctx.noise_cuts),
-                              {"noise_cuts": _digest([(c.start, c.end, c.reason, c.text) for c in ctx.noise_cuts])})
+    # With isolation the pauses stage reads silence from the isolated track, so its memo keys on that silence. Only
+    # the pauses memo (and the polish stages that build on its cuts) re-key; transcription, retakes and content do not.
+    pause_key = {"noise_cuts": _digest([(c.start, c.end, c.reason, c.text) for c in ctx.noise_cuts]),
+                 **({"silences": _digest(ctx.silences)} if config.isolate_voice else {})}
+    pause_cuts, n = memo_cuts("pauses", lambda: pauses.run(ctx, ctx.noise_cuts), pause_key)
     notes.update(n)
 
     edge_ctx = edge_context(ctx, config, fps=None if audio_only else settings_fps(config))
@@ -517,8 +520,14 @@ def run_pipeline(
             else:
                 render_cmd = (render_audio_plan if audio_only else render_plan)(plan, str(final), settings)
                 run.write_json(memo_path, {"key": render_key, "cmd": render_cmd})
+            # With isolation the transcript the output pass judges (and the residual check reads) comes from the
+            # original-audio render: the isolated render is what the viewer hears and is measured for its own words.
+            judge_audio = None
+            if config.isolate_voice and verify_output_asr:
+                judge_audio = str(run.verify_dir / f"{prefix}judge-render.wav")
+                render_audio_plan(plan, judge_audio, settings, original=True)
             facts = collect_facts(plan, str(final), transcriber=transcriber if verify_output_asr else None,
-                                  cache=cache, workdir=run.verify_dir,
+                                  cache=cache, workdir=run.verify_dir, judge_audio=judge_audio,
                                   source_duration=ctx.duration, source_silences=ctx.silences,
                                   lufs_target=config.loudness_lufs, source_path=plan.sources[plan.main].path,
                                   voices=ctx.voices, speech_probes=ctx.speech_probes,
@@ -569,7 +578,7 @@ def run_pipeline(
         # Facts of the final round's render: the written track's trim, and the words it should still carry.
         expected = len(project_words(plan, ctx.words))
         facts["isolation"] = isolate.verify_facts(
-            plan, expected_words=expected, rendered_words=len(facts["words"]) if verify_output_asr else None,
+            plan, expected_words=expected, rendered_words=facts.get("isolated_words") if verify_output_asr else None,
             scratch=run.verify_dir / f"{prefix}isolation")
         notes["isolation"] = isolate.report_facts(plan)
 

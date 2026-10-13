@@ -25,6 +25,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -474,6 +475,51 @@ def timing_audio(plan: Plan, source_id: str) -> str:
     if plan.isolation and source_id == plan.main:
         return plan.isolation["track"]["path"]
     return plan.sources[source_id].path
+
+
+# -- silence track ---------------------------------------------------------------------------------
+
+def silence_track(source: str, source_sha: str, *, mix: float, cache_root: Path, scratch: Path) -> Path:
+    """The aligned isolated track as 16 kHz mono 16-bit WAV, the form silence detection reads.
+
+    This is the audio the viewer hears, so the pauses stage must measure silence on it: room tone the unit
+    gates to digital silence is silence to the viewer, though the original recording reads it as speech level.
+    No repairs: they only restore words, which are speech. Cached per source file, helper and mix.
+    """
+    key = stable_key({"helper": helper_key(), "tail": _tail_frames(), "mix": mix, "lag": "measured"}, ISOLATE_VERSION)
+    out = Path(cache_root) / source_sha / f"isolated-silence16k-{key}.wav"
+    if out.is_file():
+        return out
+    scratch.mkdir(parents=True, exist_ok=True)
+    wav_in = decode_input(source, _channels(source), scratch / "silence-input.wav")
+    try:
+        raw = raw_isolation(wav_in, source_sha, cache_root)
+        orig_map = _memmap(wav_in)
+        raw_map = _memmap(raw)
+        lag, _ = measure_lag(orig_map, raw_map)
+        frames = orig_map.shape[0]
+        # 3:1 box decimation to 16 kHz: a 20 ms RMS envelope is what silence detection reads, and this keeps it.
+        decim = RATE // 16000
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(f"{out.stem}.{os.getpid()}.tmp.wav")
+        try:
+            with wave.open(str(tmp), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                for start in range(0, frames - frames % decim, CHUNK_FRAMES):
+                    n = min(CHUNK_FRAMES, frames - frames % decim - start)
+                    o = np.asarray(orig_map[start:start + n], dtype=np.float64).mean(axis=1)
+                    r = np.asarray(raw_map[lag + start:lag + start + n], dtype=np.float64).mean(axis=1)
+                    mono = (mix * r + (1.0 - mix) * o).reshape(-1, decim).mean(axis=1)
+                    w.writeframes(np.clip(np.round(mono * 32767.0), -32768, 32767).astype("<i2").tobytes())
+            os.replace(tmp, out)
+        finally:
+            tmp.unlink(missing_ok=True)
+        del orig_map, raw_map
+    finally:
+        wav_in.unlink(missing_ok=True)
+    return out
 
 
 # -- noise measurement ------------------------------------------------------------------------------
