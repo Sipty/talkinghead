@@ -492,7 +492,9 @@ def _quiet_point(ctx: EdgeContext, lo: float, hi: float) -> float:
 #      before the gap is unfinished resumes within the window with a continuation.
 #   4. the gap is cut at a removed span when one lies between the two sentences (the cut is the boundary, so no
 #      kept segment is split); otherwise at the quietest point, and only where both kept pieces at that point
-#      are at least SEAM_MIN_PIECE long (a sliver of one frame at a block edge is never left).
+#      are at least SEAM_MIN_PIECE long (a sliver of one frame at a block edge is never left). When the two
+#      sentences touch (under two frames apart) the search runs from the outgoing last word's ASR start to the
+#      incoming first word's ASR start, so the seam never lands after the first sound of the incoming word.
 # The first sentence of an opener therefore starts a thought and its last sentence ends one.
 
 SEAM_SEARCH = 6
@@ -535,6 +537,28 @@ def complete_gap(sents: list[Sentence], g: int) -> bool:
     return ends_thought(sents[g].text) and starts_thought(sents[g + 1].text) and not _splits_a_thought(sents, g)
 
 
+def _touching(ctx: EdgeContext, lo: float, hi: float) -> bool:
+    """Whether two sentences meet: less than two frames of refined audio between them."""
+    frame = 1.0 / ctx.fps if ctx.fps else ctx.env.frame_sec
+    return hi - lo < 2 * frame
+
+
+def _search_window(ctx: EdgeContext, sents: list[Sentence], g: int) -> tuple[float, float]:
+    """Where a boundary between sents[g] and sents[g + 1] may sit: the gap, or for touching sentences the span
+    from the outgoing last word's ASR start to the incoming first word's ASR start.
+
+    The refined edges of touching words sit on the voiced audio, so a seam at the incoming refined start drops
+    the incoming word's first sound (B69/B70: "I just have" lost its "I")."""
+    lo, hi = sents[g].end, sents[g + 1].start
+    if not _touching(ctx, lo, hi):
+        return lo, hi
+    out = [w for w in ctx.words if w.end == lo]
+    inc = [w for w in ctx.words if w.start == hi]
+    if not out or not inc or inc[0].asr_start <= out[-1].asr_start:
+        return lo, hi
+    return out[-1].asr_start, inc[0].asr_start
+
+
 def _gap_time(ctx: EdgeContext, plan: Plan, sents: list[Sentence], g: int) -> float | None:
     """Rule 4: the quietest boundary instant in gap g that leaves both kept pieces long enough, or None."""
     lo, hi = sents[g].end, sents[g + 1].start
@@ -543,7 +567,8 @@ def _gap_time(ctx: EdgeContext, plan: Plan, sents: list[Sentence], g: int) -> fl
         cut = max(removed, key=lambda c: c.end - c.start)
         return _quiet_point(ctx, cut.start, cut.end)
     kept = [s for s in plan.segments if s.source == plan.main]
-    for t in _quiet_points(ctx, lo, hi):
+    a, b = _search_window(ctx, sents, g)
+    for t in _quiet_points(ctx, a, b):
         if all(not (s.start < t < s.end) or (t - s.start >= SEAM_MIN_PIECE and s.end - t >= SEAM_MIN_PIECE)
                for s in kept):
             return t
@@ -580,7 +605,7 @@ def seam_bounds(plan: Plan, blocks: list[Block], sents: list[Sentence], ctx: Edg
             chosen = stored
             t = _gap_time(ctx, plan, sents, stored)
             if t is None:
-                t = _quiet_point(ctx, sents[stored].end, sents[stored + 1].start)
+                t = _quiet_point(ctx, *_search_window(ctx, sents, stored))
         bounds.append(t)
         notes.append({"block": blocks[k].id, "stored_gap": stored, "gap": chosen,
                       "moved": None if chosen == stored else chosen - stored, "at": round(t, 3)})

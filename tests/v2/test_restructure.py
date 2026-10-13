@@ -220,6 +220,25 @@ def test_the_split_lands_at_the_quietest_point_between_two_sentences() -> None:
     assert out.segments[1] == Segment("main", 0.0, out.segments[0].start)
 
 
+def test_touching_sentences_split_before_the_incoming_onset_not_at_its_refined_start() -> None:
+    # "off." ends where "I" starts (touching, refined). The ASR onset of "I" is 2.97 and the envelope
+    # dips at 2.95..2.97, between the two onsets. The seam must land there: at 3.00 it drops the "I".
+    fs = 0.005
+    db = np.full(int(10.0 / fs), -50.0)
+    db[int(2.95 / fs):int(2.97 / fs)] = -90.0
+    words = [RefinedWord("off.", 2.5, 3.0, 2.5, 3.0, 1.0), RefinedWord("I", 3.0, 3.4, 2.97, 3.4, 1.0)]
+    ctx = EdgeContext(duration=10.0, env=Envelope(db, np.zeros_like(db), fs, 16000), floor=-50.0,
+                      words=words, fps=None)
+    plan = _plan([Segment("main", 0.0, 10.0)], cuts=[])
+    sents_ = timed((0.0, 3.0, "To pull it off.", None), (3.0, 10.0, "I just have a view.", None))
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 3.0, {"decision": "keep"}),
+                            ("B02", 1, 1, 3.0, 10.0, {"decision": "keep", "front_rank": 1}))
+    out = rs.reorder(plan, blocks, ctx, sents_)
+    assert 2.94 <= out.segments[0].start <= 2.975
+    assert out.segments[1] == Segment("main", 0.0, out.segments[0].start)
+
+
+
 def test_lead_in_cut_inside_an_opener_keeps_both_pieces_in_order() -> None:
     plan = _plan([Segment("main", 0.0, 4.0), Segment("main", 4.5, 10.0)], cuts=[Cut(4.0, 4.5, "lead-in")])
     sents_ = timed((0.0, 3.0, "One.", None), (3.0, 10.0, "Two.", None))
