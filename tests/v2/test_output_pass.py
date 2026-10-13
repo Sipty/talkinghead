@@ -10,7 +10,7 @@ import pytest
 import talkinghead.pipeline as pipeline
 from talkinghead.audio import FRAME_SEC, Envelope, RefinedWord
 from talkinghead.config import Config
-from talkinghead.edges import EdgeContext, finalize_cuts
+from talkinghead.edges import EdgeContext, finalize_cuts, removed_words
 from talkinghead.judge import FakeJudge
 from talkinghead.pipeline import run_pipeline
 from talkinghead.store import Cache
@@ -271,10 +271,10 @@ def test_fused_output_cuts_keep_the_union_of_their_confirmed_spans() -> None:
     assert out[0].provenance["span"] == pytest.approx([3.60, 5.12])
 
 
-def test_an_output_cut_removes_a_word_whose_asr_extent_it_covers() -> None:
-    # Shape of the "if," at 658 s: the refined bounds end at 658.22, the ASR stamp runs to 658.33, and the render
-    # plays the word over 658.24-658.43. The cut covers the ASR extent, so the word is removed and the cut is not
-    # shrunk by its guard. Measured on the refined bounds alone it removed nothing and was dropped as a sliver.
+def test_an_output_cut_keeps_its_span_when_a_neighbours_asr_stamp_runs_into_it() -> None:
+    # Shape of the "if," at 658 s: the refined bounds end at 3.22, the ASR stamp runs to 3.33, and the render plays
+    # the repeat over 3.24-3.43. The neighbour is not touched by the cut's audio at its refined bounds, so it claims
+    # nothing there: the cut keeps its whole confirmed span rather than being shrunk to a sliver and dropped.
     db = np.full(int(10.0 / FRAME_SEC), -50.0)
     env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
     word = RefinedWord(" if,", 3.17, 3.22, 3.17, 3.33, 1.0)
@@ -283,5 +283,22 @@ def test_an_output_cut_removes_a_word_whose_asr_extent_it_covers() -> None:
     cut = Cut(3.237, 3.427, "polish", "if,", {"pass": "output", "span": [3.237, 3.427]})
     out = finalize_cuts([cut], ctx)
     assert len(out) == 1
-    assert out[0].start <= 3.17 + 1e-6 and out[0].end >= 3.33 - 1e-6  # the first "if," is gone
-    assert out[0].end <= 3.455 + 1e-6  # the second "if" is kept
+    assert out[0].start == pytest.approx(3.237, abs=1e-6) and out[0].end == pytest.approx(3.427, abs=1e-6)
+
+
+@pytest.mark.parametrize("provenance", [
+    {"pass": "output", "span": [1.20, 1.50]},
+    {"asr_guard": True},
+])
+def test_a_cut_after_an_acoustically_disjoint_kept_word_never_removes_that_word(provenance) -> None:
+    # The kept word's refined audio is [1.00, 1.10]; its ASR stamp runs to 1.50, into the cut at [1.20, 1.50].
+    # The cut touches none of the word's refined audio, so the word is kept and its extent is not cut away.
+    db = np.full(int(10.0 / FRAME_SEC), -50.0)
+    env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
+    neighbour = RefinedWord(" next", 1.00, 1.10, 1.00, 1.50, 1.0)
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=[neighbour], fps=None)
+    cut = Cut(1.20, 1.50, "polish", "uh", provenance)
+    assert removed_words(cut, ctx.words) == []
+    out = finalize_cuts([cut], ctx)
+    for c in out:
+        assert not (c.start < 1.10 and c.end > 1.00), "a kept neighbour's refined audio was cut"

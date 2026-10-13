@@ -192,20 +192,13 @@ def _pad(reason: str, ctx: EdgeContext) -> float:
 def removed_words(cut: Cut, words: list[RefinedWord]) -> list[RefinedWord]:
     """Words this cut removes: none for silence/noise cuts, majority-covered ones otherwise.
 
-    An output-pass cut was confirmed on the render's transcript, so its coverage uses each word's ASR-widened extent,
-    the same extent its guards use. Measured on the refined bounds alone, a word the render still plays (its ASR end
-    runs past the refined end) counts as kept, and its guard then shrinks the cut to nothing.
+    Coverage is measured on the refined bounds only: a word is removed by the audio the cut covers, never by ASR
+    padding alone (a neighbour whose ASR stamp runs into the cut is still a kept word).
     """
     if cut.reason not in WORD_CUT_REASONS:
         return []
     out = []
-    asr = asr_guarded(cut)
     for w in words:
-        if asr and word_extent(w)[1] > word_extent(w)[0]:
-            w_start, w_end = word_extent(w)
-            if _overlap(cut.start, cut.end, w_start, w_end) / (w_end - w_start) >= REMOVE_COVERAGE:
-                out.append(w)
-            continue
         if w.end <= w.start:
             # Degenerate token refined to a point (whisper emits these): it
             # carries no audio, so any word-cut spanning its timestamp removes
@@ -265,6 +258,17 @@ def mark_asr_guard(cuts: list[Cut], placed: list[Cut]) -> list[Cut]:
     return out
 
 
+def _guard_extent(cut: Cut, w: RefinedWord) -> tuple[float, float]:
+    """The audio a kept word claims against `cut`.
+
+    An ASR-guarded cut claims the word's ASR-widened extent, but only where the word's refined audio meets the cut:
+    a stamp that runs into the cut from a word the cut does not touch claims nothing there.
+    """
+    if asr_guarded(cut) and _overlap(cut.start, cut.end, w.start, w.end) > 0:
+        return word_extent(w)
+    return (w.start, w.end)
+
+
 def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tuple[float, float]]:
     """The audio this cut keeps: the words it does not remove, the protected
     event intervals (whatever the cut's reason), plus (unless `voices` is off)
@@ -277,8 +281,7 @@ def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tupl
     never count as kept.
     """
     removed = {id(w) for w in removed_words(cut, ctx.words)}
-    extent = word_extent if asr_guarded(cut) else (lambda w: (w.start, w.end))
-    spans = [extent(w) for w in ctx.words if id(w) not in removed]
+    spans = [_guard_extent(cut, w) for w in ctx.words if id(w) not in removed]
     spans += [(s, e) for s, e in ctx.protected_spans if e > s]
     if voices and ctx.voice_guard and not _is_output_cut(cut):
         spans += ctx.voices

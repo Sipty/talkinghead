@@ -524,8 +524,9 @@ def _place_intra(plan, f: Finding, cfg, round_no: int, votes: int, why: str) -> 
     src = residual.to_source(plan, f.start, f.end)
     if src is None:
         return None, "skipped: crosses a join", {}
-    found = intraword.locate(intraword.load_span(plan.sources[plan.main].path, src[0], src[1],
-                                                 lead=intraword.ALIGN_SEC), lead=intraword.ALIGN_SEC)
+    # The audio before the stamp is only as long as the source is: a token near the source's start has less lead-in.
+    lead = min(intraword.ALIGN_SEC, src[0])
+    found = intraword.locate(intraword.load_span(plan.sources[plan.main].path, src[0], src[1], lead=lead), lead=lead)
     if found is None:
         return None, "skipped: too short for a restart", {}
     notes = {"tau": round(src[0] + found.tau, 3), "cut_end": round(src[0] + found.cut_end, 3),

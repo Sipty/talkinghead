@@ -173,3 +173,26 @@ def test_an_intra_restart_is_not_a_judged_removal_or_a_clipped_word() -> None:
     plan = Plan.from_cuts(SourceInfo("main", "/v/in.mp4", "sha", 10.0), [])
     plan = Plan(sources=plan.sources, main=plan.main, cuts=[cut], segments=plan.segments)
     assert _word_cuts(plan).cuts == []
+
+
+def test_a_restart_in_a_token_near_the_source_start_is_aligned_with_the_lead_it_has(monkeypatch) -> None:
+    # The word is stamped 20 ms into the source, so only 20 ms of audio precede it: load_span clamps the lead to what
+    # the source has. The alignment must be told that same lead, or the onset and cut come out 60 ms early.
+    token = stutter()
+    lead_real = 0.02
+    room = np.random.default_rng(5).normal(0.0, 1e-3, round(lead_real * SR)).astype(token.dtype)
+    seen = {}
+
+    def clamped_load(path, s, e, lead=0.0):
+        seen["lead"] = lead
+        return np.concatenate([room[:round(min(lead, s) * SR)], token])
+
+    monkeypatch.setattr(intraword, "load_span", clamped_load)
+    words = [Word("impl-implement", 0.02, 0.02 + token.size / SR, 1.0), Word("next", 3.0, 3.3, 1.0)]
+    value = polish.output_round(_ctx(FakeJudge([_verdict("cut")] * 3)), _plan(), words, 1)
+    (cut,) = value["cuts"]
+    assert seen["lead"] == pytest.approx(lead_real)
+    expected = intraword.locate(np.concatenate([room, token]), lead=lead_real)
+    assert cut["start"] == pytest.approx(0.02 + expected.start, abs=1e-6)
+    assert cut["end"] == pytest.approx(0.02 + expected.cut_end, abs=1e-6)
+    assert cut["start"] >= 0.0 and 0.02 + 0.35 <= cut["end"] <= 0.02 + RESTART_AT + 1e-9
