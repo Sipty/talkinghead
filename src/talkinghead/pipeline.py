@@ -22,7 +22,7 @@ from .judge import Judge
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
 from .report import build_report
-from .stages import content, pauses, restructure, retakes, structure
+from .stages import content, pauses, polish, restructure, retakes, structure
 from .store import Cache, RunDir, sha256_file, stable_key
 from .timeline import Cut, Plan
 from .transcribe import Transcriber
@@ -223,6 +223,9 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...] | None] = {
                "pause_cap_sentence", "pause_cap_topic", "pause_topic_above", "min_filler_dur"),
     "restructure": ("restructure_brief", "restructure_window_sec", "restructure_context_sec",
                     "restructure_votes", "restructure_front", "sentence_split_pause"),
+    "polish": ("polish_gap_block", "polish_gap_speaker", "polish_gap_sentence", "polish_gap_within",
+               "polish_window_sec", "polish_context_sec", "polish_votes", "polish_agree", "polish_max_sec",
+               "min_cut_sec", "sentence_split_pause"),
 }
 
 
@@ -389,6 +392,20 @@ def run_pipeline(
         # The sentences the restructure judge saw (before its own cuts): the seams are placed in them.
         kept_sents = restructure.kept_sentences(ctx, raw)
         raw = raw + restructure.block_cuts(blocks)
+    if config.polish:
+        # After restructure, on the kept material: the gaps and disfluencies it leaves. The memo holds every cut
+        # with its reason, words and votes, so a hand edit is honoured on replay.
+        value = run.memo(
+            f"{prefix}polish",
+            {**base_inputs, **_stage_config(ctx, "polish"),
+             "kept": _digest([(c.start, c.end, c.reason) for c in raw]),
+             "blocks": _digest([(b.first, b.last, b.start, b.end, b.decision) for b in blocks]),
+             "policy": polish.policy()},
+            STAGE_VERSION_OVERRIDES.get("polish", STAGE_VERSION),
+            lambda: polish.run(ctx, raw, blocks), fresh=fresh,
+        )
+        notes["polish"] = value["notes"]
+        raw = raw + polish.cuts_from(value)
     # The judged word-removing decisions as the edge pass received them: verify checks the plan keeps none.
     judged = [(c.start, c.end, c.reason) for c in raw if c.reason in JUDGED_REASONS]
     cuts = finalize_cuts(raw, edge_ctx)

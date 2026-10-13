@@ -33,7 +33,7 @@ FUSE_GAP = 0.0
 # over a word-level judgment over a mechanical trim. Between equal ranks a judged
 # reason beats a mechanical one (a restart fused with a tangent is still a tangent).
 REASON_RANK = {"cold-open": 3, "outro": 3, "retake": 2, "content": 2, "restart": 2, "join": 2,
-               "tangent": 2, "lead-in": 2, "filler": 1, "noise": 1, "silence": 0}
+               "tangent": 2, "lead-in": 2, "polish": 2, "filler": 1, "noise": 1, "silence": 0, "gap": 0}
 
 
 @dataclass

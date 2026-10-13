@@ -205,6 +205,23 @@ class Config:
     restructure_front: int = 3
     # Windows judged at once, only with a judge that is safe to call concurrently.
     restructure_parallel: int = 4
+    # Polish (opt-in, after restructure). Gap tightening: the silence left between two consecutive kept words is
+    # cut down to a cap set by the boundary the gap sits on, most specific first: block boundary, speaker change,
+    # sentence end, then inside a sentence. Gaps are cut only in one kept stretch, never across a word.
+    polish: bool = False
+    polish_gap_block: float = 0.45
+    polish_gap_speaker: float = 0.20
+    polish_gap_sentence: float = 0.30
+    polish_gap_within: float = 0.15
+    # Disfluency judge: windows of kept sentences (read-only context either side), k samples, spans that agree.
+    polish_window_sec: float = 240.0
+    polish_context_sec: float = 20.0
+    polish_votes: int = 3
+    polish_agree: int = 2
+    # The longest span a disfluency may name; a longer one is an overreach and is dropped.
+    polish_max_sec: float = 15.0
+    # Windows judged at once, only with a judge that is safe to call concurrently.
+    polish_parallel: int = 4
 
     def validate(self) -> "Config":
         if self.agree > self.votes:
@@ -236,6 +253,15 @@ class Config:
                 raise ValueError("restructure_window_sec must exceed twice restructure_context_sec")
         if self.restructure_votes < 1 or self.restructure_parallel < 1 or self.restructure_front < 0:
             raise ValueError("restructure_votes and restructure_parallel must be at least 1; restructure_front at least 0")
+        if not 1 <= self.polish_agree <= self.polish_votes:
+            raise ValueError(f"polish_agree ({self.polish_agree}) must be between 1 and polish_votes ({self.polish_votes})")
+        if self.polish_votes < 1 or self.polish_parallel < 1:
+            raise ValueError("polish_votes and polish_parallel must be at least 1")
+        if self.polish_window_sec <= 2 * self.polish_context_sec:
+            raise ValueError("polish_window_sec must exceed twice polish_context_sec")
+        if min(self.polish_gap_block, self.polish_gap_speaker, self.polish_gap_sentence, self.polish_gap_within,
+               self.polish_max_sec) < 0:
+            raise ValueError("polish gap caps and polish_max_sec cannot be negative")
         return self
 
     def to_dict(self) -> dict:
@@ -251,6 +277,10 @@ class Config:
         if not self.restructure:
             # A disabled feature leaves no trace: plan provenance and memo keys stay as they were.
             for k in [k for k in d if k == "restructure" or k.startswith("restructure_")]:
+                del d[k]
+        if not self.polish:
+            # The same rule for polish: a cook without it keeps the plans and memo keys it always had.
+            for k in [k for k in d if k == "polish" or k.startswith("polish_")]:
                 del d[k]
         return d
 

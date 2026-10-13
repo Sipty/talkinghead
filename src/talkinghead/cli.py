@@ -55,6 +55,7 @@ from .pipeline import PipelineError, edge_context, run_pipeline, settings_fps
 from .profile import profile_dir, read_preferences
 from .prompts import system_prompt
 from .render import RenderSettings, render_audio_plan, render_plan
+from .stages.polish import POLISH_SCHEMA
 from .store import DEFAULT_CACHE_DIR, Cache
 from .timeline import Plan
 from .transcribe import (
@@ -188,7 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "words projected through the plan, not an independent measurement")
     run.add_argument("--plan-only", action="store_true",
                      help="stop after plan.json: no render, verification or visuals. Every stage memo must hit, "
-                          "so no judge or transcriber call is made (a miss fails)")
+                          "so no judge or transcriber call is made (a miss fails); the polish judge is the one "
+                          "stage allowed to call out, since its memo is built on this rebuild")
     run.add_argument("--config", default=None,
                      help="TOML file with overrides (default: $TALKINGHEAD_CONFIG)")
     run.add_argument("--guidelines", default=None, help="editorial guidelines markdown")
@@ -459,12 +461,20 @@ class _CachedTranscriber:
 
 
 class _MemoOnlyJudge:
-    """Plan-only rebuilds: a judge call means a stage memo missed, which is an error, not a silent recompute."""
+    """Plan-only rebuilds: a judge call means a stage memo missed, which is an error, not a silent recompute.
 
-    def __init__(self, real) -> None:
+    The exception is a schema named in `allow`: the polish judge, a stage whose memo the first plan-only rebuild
+    of a cook may have to build. Every other stage must replay.
+    """
+
+    def __init__(self, real, allow: tuple = ()) -> None:
         self.name = real.name
+        self._real = real
+        self._allow = allow
 
-    def decide(self, *args, **kwargs):
+    def decide(self, prompt, schema, *args, **kwargs):
+        if any(schema is s for s in self._allow):
+            return self._real.decide(prompt, schema, *args, **kwargs)
         raise RuntimeError("plan-only: a stage memo missed and would call the judge; run `talkinghead run` first")
 
 
@@ -603,7 +613,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
         transcriber_spec, scribe_response=args.scribe_response, scribe_audio=args.scribe_audio,
         diarize=cfg.diarize, diarize_speakers=cfg.diarize_speakers)
     if args.plan_only:  # no judge preflight, and a memo miss fails instead of calling out
-        judge, transcriber = _MemoOnlyJudge(judge), _CachedTranscriber(transcriber)
+        judge, transcriber = _MemoOnlyJudge(judge, allow=(POLISH_SCHEMA,)), _CachedTranscriber(transcriber)
     else:
         preflight(judge)
     result = run_pipeline(

@@ -24,11 +24,11 @@ LLM_CUT_REASONS: set[str] = SEMANTIC_REASONS | {"hook-delay", "ramble", "no-valu
 # judgment that covers it, never left with one of these.
 # noise (tongue smacks, breaths, throat clears) belongs here and NOT in
 # LLM_CUT_REASONS: it is measured off the audio envelope, not judged.
-MECHANICAL_REASONS: set[str] = {"silence", "filler", "restart", "noise"}
-# Word-removing reasons a judge stage decided (structure, retakes, content, restructure). A judged cut removes
+MECHANICAL_REASONS: set[str] = {"silence", "filler", "restart", "noise", "gap"}
+# Word-removing reasons a judge stage decided (structure, retakes, content, restructure, polish). A judged cut removes
 # every word it covers, and every sound inside it (laughter, unknown audio events, voiced audio): its span is
 # a decision, so the edge pass refines its two edges only, and no other cut may shrink or split it.
-JUDGED_REASONS: set[str] = {"cold-open", "outro", "tangent", "lead-in", "retake", "content"}
+JUDGED_REASONS: set[str] = {"cold-open", "outro", "tangent", "lead-in", "retake", "content", "polish"}
 
 
 @dataclass

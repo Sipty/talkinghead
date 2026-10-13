@@ -50,6 +50,7 @@ the memos are hand-editable, so a re-key must not discard manual cuts without a 
 | 5 | content | which whole sentences do not earn their runtime (and a coherence veto) | judge + coherence pass | stage memo |
 | 6 | pauses | pause trims, fillers, similarity-detected restarts, mouth noises | deterministic | stage memo |
 | 6b | restructure (opt-in: `restructure = true`) | topic blocks: which have no payoff (dropped), which open the cut (moved first) | judge: one sample per window, then one vote | stage memo, `plan.json` layout |
+| 6c | polish (opt-in: `polish = true`) | gap tightening between kept words (deterministic); word spans a judge names as disfluent | judge per window, k-vote agreement (gaps need no judge) | stage memo |
 | 7 | edges | final span of every cut | deterministic | `plan.json` |
 | 8 | render | picture and mastered audio, or mastered audio alone | deterministic | `final.mp4` or `final.wav`, `render.json` |
 | 9 | verify | did the render keep the plan's promises | deterministic, declarative checks | `verify/facts.json` |
@@ -198,6 +199,26 @@ the audio join in list order, the join at a moved block's old place is a crossfa
 `plan.provenance["blocks"]` records each block's output range, the source span it now owns (`placed`) and
 how far its start moved (`seam_moved`). Board overlays refuse such a plan. The stage memo holds the blocks
 with their decisions, so a hand-edited decision is honoured on replay.
+
+### 6c. Polish (judge, opt-in)
+
+`stages/polish.py`, enabled by `polish = true`, runs after restructure on the kept material (the raw cuts plus the block
+cuts). Two parts, both returning cuts that the edge pass places with the rest:
+
+- **Gap tightening** (no judge). The silence between two consecutive kept words is cut to a cap set by the boundary
+  it sits on, most specific first: block boundary (`polish_gap_block`, 0.45 s), speaker change (`polish_gap_speaker`,
+  0.20 s), sentence end (`polish_gap_sentence`, 0.30 s), inside a sentence (`polish_gap_within`, 0.15 s). The cut leaves
+  half the cap on each side. A gap is tightened only when both words are kept and no word-removing cut lies in it, and
+  protected events inside it are kept whole. The gap cut has reason `gap`: it removes no words.
+- **Disfluency judge**. Kept sentences are judged in windows of `polish_window_sec` with `polish_context_sec` of
+  read-only context. The judge names word spans to remove (repeats, false starts, self-corrections, fillers, fragments,
+  clutter exchanges, interrupting backchannels). Each window is sampled `polish_votes` times and a span is cut only when
+  `polish_agree` samples agree on it (`spans.cluster_spans`, narrow). Spans longer than `polish_max_sec` are dropped.
+  Cuts have reason `polish`, a judged word-removing reason that the `judged_removals` check verifies.
+
+The stage memo holds every cut with its reason, words and votes, so a hand-edited memo is honoured on replay. With
+`polish` off, no polish key reaches the config dict, the plan provenance or any memo key, so existing cooks are unchanged.
+On a plan-only rebuild the polish judge is the one judge allowed to answer (`--plan-only`), since its memo is built there.
 
 ### 7. Edges (deterministic)
 

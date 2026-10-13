@@ -4,6 +4,8 @@ seconds must equal the duration delta)."""
 
 from __future__ import annotations
 
+from collections import Counter
+
 from .timeline import Plan
 from .verify import CheckResult
 
@@ -11,6 +13,30 @@ from .verify import CheckResult
 def _fmt(t: float) -> str:
     m, s = divmod(t, 60.0)
     return f"{int(m):02d}:{s:05.2f}"
+
+
+def _polish(plan: Plan, notes: dict) -> list[str]:
+    """What the polish stage removed: gap tightening and disfluency cuts, read off the final plan's cuts."""
+    if "polish" not in notes:
+        return []
+    gaps = [c for c in plan.cuts if c.reason == "gap"]
+    disf = sorted((c for c in plan.cuts if c.reason == "polish"), key=lambda c: c.start)
+    words = sum(c.provenance["words"][1] - c.provenance["words"][0] + 1 for c in disf if "words" in c.provenance)
+    kinds = Counter(c.provenance.get("kind", "") for c in disf)
+    judged = notes["polish"]
+    rows = ["## Polish", "",
+            f"- gaps: {len(gaps)} cuts, {sum(c.length for c in gaps):.2f} s of silence removed between kept words",
+            f"- disfluencies: {len(disf)} cuts, {words} words, {sum(c.length for c in disf):.2f} s removed",
+            "- kinds: " + (", ".join(f"{k} {v}" for k, v in kinds.most_common()) or "none"),
+            f"- judge: {judged.get('windows', 0)} windows, {judged.get('proposed', 0)} spans proposed, "
+            f"{judged.get('dropped_bad_ids', 0)} bad ids, {judged.get('dropped_overlong', 0)} overlong, "
+            f"{judged.get('clusters', 0)} clusters kept by agreement", "",
+            "First disfluency cuts, in source order:", "",
+            "| start | end | kind | votes | text |", "|---|---|---|---|---|"]
+    for c in disf[:15]:
+        rows.append(f"| {_fmt(c.start)} | {_fmt(c.end)} | {c.provenance.get('kind', '')} | "
+                    f"{c.provenance.get('votes', '')} | {' '.join(c.text.split())[:90]} |")
+    return rows + [""]
 
 
 def _plan_card(notes: dict) -> list[str]:
@@ -182,6 +208,7 @@ def build_report(
     rows.append("")
     rows += _pacing(pacing)
     rows += _blocks(plan)
+    rows += _polish(plan, notes)
     rows += ["## Cuts", "", "| start | end | dur | reason | votes | text |", "|---|---|---|---|---|---|"]
     for c in plan.cuts:
         votes = c.provenance.get("votes", "")

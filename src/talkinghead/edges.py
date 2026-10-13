@@ -85,12 +85,12 @@ from .types import JUDGED_REASONS, MECHANICAL_REASONS
 
 # Reasons whose spans are meant to remove words (edges snap to word bounds).
 WORD_CUT_REASONS = frozenset({"retake", "restart", "filler", "content", "cold-open", "outro", "join",
-                              "tangent", "lead-in"})
+                              "tangent", "lead-in", "polish"})
 # Reasons whose whole job is removing NON-speech: for these, voiced audio the
 # transcript does not cover may not be landed inside or swallowed by the cut.
 # An editorial cut (above) is a decision about content, so the waveform only
 # keeps its EDGES clear and what it removes is reported instead.
-VOICE_SAFE_REASONS = frozenset({"silence", "noise"})
+VOICE_SAFE_REASONS = frozenset({"silence", "noise", "gap"})
 # A word is removed by a word-cut when at least this fraction of it is covered.
 REMOVE_COVERAGE = 0.5
 # Kept-quiet split of a splice target: this share follows the left kept word,
@@ -98,7 +98,7 @@ REMOVE_COVERAGE = 0.5
 SPLICE_QUIET_LEFT_SHARE = 0.6
 # Cuts that abandon words said wrongly and restate them: inside a sentence
 # they join straight to the correction.
-REPAIR_REASONS = frozenset({"retake", "restart"})
+REPAIR_REASONS = frozenset({"retake", "restart", "polish"})
 # Valley candidates within this many dB of the quietest count as tied, and the
 # one nearest the original edge wins: envelope noise must not move an edge.
 VALLEY_TIE_DB = 0.25
