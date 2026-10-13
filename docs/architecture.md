@@ -187,11 +187,17 @@ the block list (`restructure_votes` samples, strict majority) drops a block only
 Dropped blocks become `tangent` cuts; an opener's lead-in sentences become `lead-in` cuts. `restructure_brief`
 is the owner's brief, sent verbatim to both passes.
 
-Only after `refine_joins` does `restructure.reorder` split the plan at each block's quietest boundary and
-lay the openers first. The plan then runs out of source order: the picture and the audio join in list order,
-the join at a moved block's old place is a crossfade, and `plan.provenance["blocks"]` records each block's
-output range. Board overlays refuse such a plan. The stage memo holds the blocks with their decisions, so a
-hand-edited decision is honoured on replay.
+Only after `refine_joins` does `restructure.reorder` split the plan at each block boundary and
+lay the openers first. A boundary is a seam, so it is placed at apply time (the stored block starts and
+ends are never changed): the nearest sentence gap within six sentences where the sentence before ends a
+thought (`.`, `?`, `!`, not a dash or an ellipsis), the sentence after opens one (not a lowercase
+continuation), and no speaker's unfinished sentence is split across a backchannel. A gap with a removed span
+between its sentences is cut there, so no kept segment is split; otherwise the quietest frame is used, and only
+where both pieces at that frame are at least 0.15 s. The plan then runs out of source order: the picture and
+the audio join in list order, the join at a moved block's old place is a crossfade, and
+`plan.provenance["blocks"]` records each block's output range, the source span it now owns (`placed`) and
+how far its start moved (`seam_moved`). Board overlays refuse such a plan. The stage memo holds the blocks
+with their decisions, so a hand-edited decision is honoured on replay.
 
 ### 7. Edges (deterministic)
 
@@ -240,8 +246,14 @@ delete it. What an editorial cut swallows is reported instead (see `unclassified
 §9). `Config.voice_guard` turns the whole guard off.
 
 `Context.protected_spans` is separate from the optional unidentified-voice guard.
-It preserves full native laughter/unknown-event intervals for every cut reason, including an event inside an otherwise removed passage.
-Cut fusion and frame snapping cannot bridge or trim these protected intervals.
+It preserves full native laughter/unknown-event intervals for every mechanical cut reason, so a laugh is never
+trimmed by a silence, filler, noise or join cut. A judged cut (`JUDGED_REASONS`: cold-open, outro, tangent,
+lead-in, retake, content) is different: its span is a decision, so an event inside it goes too, and only its
+two edges are refined. Cut fusion and frame snapping cannot bridge or trim the protected intervals of mechanical cuts.
+
+A judged decision is also held: `hold_judged` puts back any word a judged cut removes (by midpoint, the same
+test the `judged_removals` verify check uses) whose midpoint an edge step had pulled out of the span. Fusing
+cuts never loses a judged reason to a mechanical cut that comes first.
 
 
 `timeline.Plan.from_cuts` then derives the kept segments from the merged cuts and

@@ -170,6 +170,10 @@ Use it when a separate microphone recording exists (see [Two inputs](#two-inputs
 `--topic` is one line about the video. It goes into every judgment prompt, and it is the cheapest way to improve the judge's answers.
 
 The run directory is `talk.talkinghead/`, next to `talk.mov`.
+
+`--plan-only` stops after `plan.json`: no render, verification or visuals. It rebuilds the plan from the run
+directory's stage memos and cached transcript, so every memo must hit (a miss fails, rather than calling a
+judge). Point `--out-dir` at a scratch copy to experiment without touching a finished cook.
 Open `talk.talkinghead/final.mp4` and `talk.talkinghead/report.md`.
 
 To preview a long recording first, add `--demo 6`.

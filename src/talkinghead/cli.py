@@ -186,6 +186,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-output-asr", action="store_true",
                      help="do not transcribe the finished output; word/pacing facts are then the source "
                           "words projected through the plan, not an independent measurement")
+    run.add_argument("--plan-only", action="store_true",
+                     help="stop after plan.json: no render, verification or visuals. Every stage memo must hit, "
+                          "so no judge or transcriber call is made (a miss fails)")
     run.add_argument("--config", default=None,
                      help="TOML file with overrides (default: $TALKINGHEAD_CONFIG)")
     run.add_argument("--guidelines", default=None, help="editorial guidelines markdown")
@@ -455,6 +458,16 @@ class _CachedTranscriber:
         raise RuntimeError("no cached transcript for this recording: run `talkinghead run` on it first")
 
 
+class _MemoOnlyJudge:
+    """Plan-only rebuilds: a judge call means a stage memo missed, which is an error, not a silent recompute."""
+
+    def __init__(self, real) -> None:
+        self.name = real.name
+
+    def decide(self, *args, **kwargs):
+        raise RuntimeError("plan-only: a stage memo missed and would call the judge; run `talkinghead run` first")
+
+
 def _refine_for_render(plan: Plan, cfg: Config, out: Path, *, audio_only: bool) -> Plan:
     """Refine the plan's joins against its recording's cached analysis, and write the refined plan
     and the join move records beside OUT (`<stem>.plan.json`, `<stem>.joins.json`)."""
@@ -586,12 +599,16 @@ def _run_cmd(args: argparse.Namespace) -> int:
                         fallback_command=cfg.fallback_command, panel=cfg.panel)
     # Before transcription: a missing judge must surface in seconds, not
     # after the first hour of work.
-    preflight(judge)
+    transcriber = build_transcriber(
+        transcriber_spec, scribe_response=args.scribe_response, scribe_audio=args.scribe_audio,
+        diarize=cfg.diarize, diarize_speakers=cfg.diarize_speakers)
+    if args.plan_only:  # no judge preflight, and a memo miss fails instead of calling out
+        judge, transcriber = _MemoOnlyJudge(judge), _CachedTranscriber(transcriber)
+    else:
+        preflight(judge)
     result = run_pipeline(
         str(video.resolve()), out_dir, cfg,
-        transcriber=build_transcriber(
-            transcriber_spec, scribe_response=args.scribe_response, scribe_audio=args.scribe_audio,
-            diarize=cfg.diarize, diarize_speakers=cfg.diarize_speakers),
+        transcriber=transcriber,
         judge=judge,
         cache=Cache(), guidelines=guidelines, topic=args.topic, demo_minutes=args.demo,
         decisions=decisions or None, audio=audio, fix_drift=args.fix_drift,
@@ -599,8 +616,11 @@ def _run_cmd(args: argparse.Namespace) -> int:
         assets_dir=str(assets),
         audio_only=args.audio_only, verify_output_asr=not args.no_output_asr,
         preferences=read_preferences(profile_dir(args.profile)),
-        refresh_preferences=args.refresh_preferences,
+        refresh_preferences=args.refresh_preferences, plan_only=args.plan_only,
     )
+    if args.plan_only:
+        print(f"plan: {result.plan_path}")
+        return 0
     print(f"final: {result.final}\nreport: {result.report}")
     if result.final_visuals:
         print(f"visuals: {result.final_visuals}")

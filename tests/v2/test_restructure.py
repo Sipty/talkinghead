@@ -170,12 +170,23 @@ def _plan(segments: list[Segment], duration: float = 10.0, cuts: list[Cut] | Non
     return Plan(sources={"main": src}, main="main", cuts=cuts or [], segments=segments)
 
 
+def timed(*rows: tuple[float, float, str, str | None]) -> list[Sentence]:
+    """Sentences from (start, end, text, speaker) rows, sids in order."""
+    return [Sentence(f"S{i:04d}", s, e, t, sp) for i, (s, e, t, sp) in enumerate(rows)]
+
+
+def reorder_blocks(*spans: tuple[str, int, int, float, float, dict]) -> list[rs.Block]:
+    """Blocks from (id, first, last, start, end, kwargs) rows."""
+    return [block(bid, first=f, last=last, start=s, end=e, **kw) for bid, f, last, s, e, kw in spans]
+
+
 def test_reorder_moves_the_opener_first_and_keeps_the_rest_in_source_order() -> None:
     plan = _plan([Segment("main", 0.0, 4.0), Segment("main", 4.5, 10.0)], cuts=[Cut(4.0, 4.5, "filler")])
-    blocks = [block("B01", start=0.0, end=3.0, decision="keep"),
-              block("B02", start=3.0, end=6.0, decision="keep", front_rank=1),
-              block("B03", start=6.0, end=10.0, decision="keep")]
-    out = rs.reorder(plan, blocks, edge_ctx(10.0))
+    sents_ = timed((0.0, 3.0, "One.", None), (3.0, 6.0, "Two.", None), (6.0, 10.0, "Three.", None))
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 3.0, {"decision": "keep"}),
+                            ("B02", 1, 1, 3.0, 6.0, {"decision": "keep", "front_rank": 1}),
+                            ("B03", 2, 2, 6.0, 10.0, {"decision": "keep"}))
+    out = rs.reorder(plan, blocks, edge_ctx(10.0), sents_)
     assert [(s.start, s.end) for s in out.segments] == [(3.0, 4.0), (4.5, 6.0), (0.0, 3.0), (6.0, 10.0)]
     assert out.output_duration == pytest.approx(9.5)
     assert not in_source_order(out.segments)
@@ -188,8 +199,9 @@ def test_reorder_moves_the_opener_first_and_keeps_the_rest_in_source_order() -> 
 def test_reorder_without_an_opener_leaves_the_segments_as_they_were() -> None:
     segs = [Segment("main", 0.0, 4.0), Segment("main", 4.5, 10.0)]
     plan = _plan(segs, cuts=[Cut(4.0, 4.5, "filler")])
-    blocks = [block("B01", start=0.0, end=3.0), block("B02", start=3.0, end=10.0)]
-    out = rs.reorder(plan, blocks, edge_ctx(10.0))
+    sents_ = timed((0.0, 3.0, "One.", None), (3.0, 10.0, "Two.", None))
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 3.0, {}), ("B02", 1, 1, 3.0, 10.0, {}))
+    out = rs.reorder(plan, blocks, edge_ctx(10.0), sents_)
     assert out.segments == segs
     assert in_source_order(out.segments)
 
@@ -198,9 +210,10 @@ def test_the_split_lands_at_the_quietest_point_between_two_sentences() -> None:
     db = np.full(int(10.0 / 0.005), -50.0)
     db[int(3.0 / 0.005):int(3.1 / 0.005)] = -90.0  # a dip inside the gap 2.8..3.2
     plan = _plan([Segment("main", 0.0, 10.0)], cuts=[])
-    blocks = [block("B01", start=0.0, end=2.8, decision="keep"),
-              block("B02", start=3.2, end=10.0, decision="keep", front_rank=1)]
-    out = rs.reorder(plan, blocks, edge_ctx(10.0, db=db, fps=None))
+    sents_ = timed((0.0, 2.8, "One.", None), (3.2, 10.0, "Two.", None))
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 2.8, {"decision": "keep"}),
+                            ("B02", 1, 1, 3.2, 10.0, {"decision": "keep", "front_rank": 1}))
+    out = rs.reorder(plan, blocks, edge_ctx(10.0, db=db, fps=None), sents_)
     # The dip spans 3.00..3.10 s; the quietest frame nearest the gap's middle inside it wins.
     assert 3.0 <= out.segments[0].start <= 3.1
     assert out.segments[0].end == pytest.approx(10.0)
@@ -209,8 +222,9 @@ def test_the_split_lands_at_the_quietest_point_between_two_sentences() -> None:
 
 def test_lead_in_cut_inside_an_opener_keeps_both_pieces_in_order() -> None:
     plan = _plan([Segment("main", 0.0, 4.0), Segment("main", 4.5, 10.0)], cuts=[Cut(4.0, 4.5, "lead-in")])
-    blocks = [block("B01", start=0.0, end=3.0), block("B02", start=3.0, end=10.0, decision="keep", front_rank=1)]
-    out = rs.reorder(plan, blocks, edge_ctx(10.0))
+    sents_ = timed((0.0, 3.0, "One.", None), (3.0, 10.0, "Two.", None))
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 3.0, {}), ("B02", 1, 1, 3.0, 10.0, {"decision": "keep", "front_rank": 1}))
+    out = rs.reorder(plan, blocks, edge_ctx(10.0), sents_)
     assert [(s.start, s.end) for s in out.segments] == [(3.0, 4.0), (4.5, 10.0), (0.0, 3.0)]
     assert out.provenance["blocks"][1]["output"] == [0.0, 6.5]
 
@@ -521,3 +535,97 @@ def test_a_reordered_cut_renders_verifies_and_replays_from_its_memo(clip: Path, 
     # the stronger reason survives: check the span is removed, not the label.
     assert any(c.start <= 1.7 and c.end >= 2.1 for c in replayed.cuts)
     assert {b["id"]: b["decision"] for b in replayed.provenance["blocks"]} == {"B01": "drop", "B02": "keep"}
+
+
+# ------------------------------------------------------------- seams (apply-time boundary placement)
+
+def test_a_thought_ends_on_terminal_punctuation_not_on_a_dash_an_ellipsis_or_a_comma() -> None:
+    assert rs.ends_thought("Make no mistake.")
+    assert rs.ends_thought('"Do this, bro. Make no mistake."')    # closing quote after the period
+    assert rs.ends_thought("Really?") and rs.ends_thought("Wait!")
+    assert not rs.ends_thought("But,")
+    assert not rs.ends_thought("I was going to-")
+    assert not rs.ends_thought("and so on...")
+    assert not rs.ends_thought("I think so as well")
+
+
+def test_a_thought_opens_on_a_capital_not_on_a_lowercase_continuation_or_an_ellipsis() -> None:
+    assert rs.starts_thought("I just have a very skeptic view")
+    assert rs.starts_thought('"Do this, bro.')
+    assert rs.starts_thought("Mm.") and rs.starts_thought("2 cents.")
+    assert not rs.starts_thought("to pull it off.")
+    assert not rs.starts_thought("n- not even the AI.")
+    assert not rs.starts_thought("... more trouble")
+
+
+def test_a_gap_is_complete_only_between_a_finished_sentence_and_a_new_thought() -> None:
+    s = timed((0, 1, "We went home.", None), (1, 2, "and slept.", None), (2, 3, "Then we left.", None),
+              (3, 4, "Okay", None))
+    assert not rs.complete_gap(s, 0)      # the next sentence continues the first
+    assert rs.complete_gap(s, 1)          # "and slept." ends it, "Then" opens a new thought
+    assert rs.complete_gap(s, 2)          # "Then we left." ends, "Okay" opens
+    assert not rs.complete_gap(s, 3)      # last sentence: nothing follows
+    s[2] = Sentence("S0002", 2, 3, "Then we left", None)
+    assert not rs.complete_gap(s, 2)      # no terminal punctuation: the thought is unfinished
+
+
+def test_a_gap_that_splits_a_speakers_sentence_across_a_backchannel_is_not_complete() -> None:
+    # A starts a thought, B interjects a complete sentence, A resumes with a lowercase continuation.
+    # The gap after B's interjection is the one that must not be chosen, though B's own sentence ends.
+    s = timed((0, 1, "The thing is", "A"), (1, 2, "Totally.", "B"), (2, 3, "Really, it works.", "B"),
+              (3, 4, "is the point.", "A"), (4, 5, "Good.", "A"))
+    assert not rs.complete_gap(s, 1)      # "Really, it works." opens a thought, but A's "is the point." resumes the split one
+    assert not rs.complete_gap(s, 2)      # next sentence is a continuation
+    assert rs.complete_gap(s, 3)          # A's thought is finished by then
+
+
+def test_a_stored_boundary_in_the_middle_of_a_sentence_moves_to_the_nearest_complete_gap() -> None:
+    # The stored gap (1) sits after "Then we left", which has no terminal punctuation. Gaps 0 and 2 are both one away
+    # and complete; the earlier one wins the tie.
+    s = timed((0, 2, "We went to the hall.", None), (2, 3, "Then we left", None),
+              (3.5, 5, "and we came back.", None), (5, 6, "Okay.", None))
+    blocks = reorder_blocks(("B01", 0, 1, 0.0, 3.0, {}), ("B02", 2, 3, 3.5, 6.0, {"decision": "keep", "front_rank": 1}))
+    plan = _plan([Segment("main", 0.0, 10.0)], duration=10.0)
+    bounds, notes = rs.seam_bounds(plan, blocks, s, edge_ctx(10.0, fps=None))
+    assert notes[0]["gap"] == 0 and notes[0]["moved"] == -1
+    assert bounds[0] == pytest.approx(2.0)
+
+
+def test_a_boundary_that_is_already_complete_stays_where_it_was() -> None:
+    s = timed((0, 2, "One.", None), (2, 4, "Two.", None), (4, 6, "Three.", None))
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 2.0, {}), ("B02", 1, 2, 2.0, 6.0, {}))
+    _, notes = rs.seam_bounds(_plan([Segment("main", 0.0, 10.0)]), blocks, s, edge_ctx(10.0, fps=None))
+    assert notes == [{"block": "B02", "stored_gap": 0, "gap": 0, "moved": None, "at": 2.0}]
+
+
+def test_a_boundary_is_placed_inside_the_removed_span_between_the_sentences() -> None:
+    # A cut sits between the two sentences: the boundary is the cut, so no kept segment is split.
+    s = timed((0, 2, "One.", None), (4, 6, "Two.", None))
+    plan = _plan([Segment("main", 0.0, 2.5), Segment("main", 3.5, 10.0)], cuts=[Cut(2.5, 3.5, "silence")])
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 2.0, {}), ("B02", 1, 1, 4.0, 6.0, {"decision": "keep", "front_rank": 1}))
+    bounds, _ = rs.seam_bounds(plan, blocks, s, edge_ctx(10.0, fps=None))
+    assert 2.5 <= bounds[0] <= 3.5
+
+
+def test_no_kept_piece_shorter_than_the_minimum_is_left_at_a_block_edge() -> None:
+    # The quietest instant sits 40 ms before a kept segment ends: that split would leave a sliver.
+    db = np.full(int(10.0 / 0.005), -50.0)
+    db[int(1.0 / 0.005):int(1.02 / 0.005)] = -90.0
+    s = timed((0, 1.0, "One.", None), (1.2, 4.0, "Two.", None))
+    plan = _plan([Segment("main", 0.0, 1.04), Segment("main", 1.04, 10.0)], cuts=[])
+    blocks = reorder_blocks(("B01", 0, 0, 0.0, 1.0, {}), ("B02", 1, 1, 1.2, 4.0, {"decision": "keep", "front_rank": 1}))
+    bounds, _ = rs.seam_bounds(plan, blocks, s, edge_ctx(10.0, db=db, fps=None))
+    assert all(min(t - a, b - t) >= rs.SEAM_MIN_PIECE - 1e-9 for t in bounds for a, b in [(0.0, 1.04), (1.04, 10.0)]
+               if a < t < b)
+
+
+def test_reorder_lays_out_an_opener_on_complete_sentences_and_reports_the_moves() -> None:
+    s = timed((0, 2, "We went to the hall.", None), (2, 3, "Then we left", None),
+              (3.5, 5, "and we came back.", None), (5, 6, "Okay.", None))
+    plan = _plan([Segment("main", 0.0, 10.0)], duration=10.0)
+    blocks = reorder_blocks(("B01", 0, 1, 0.0, 3.0, {}), ("B02", 2, 3, 3.5, 6.0, {"decision": "keep", "front_rank": 1}))
+    out = rs.reorder(plan, blocks, edge_ctx(10.0, fps=None), s)
+    layout = {b["id"]: b for b in out.provenance["blocks"]}
+    assert layout["B02"]["placed"] == [2.0, 10.0]            # the opener owns from the complete boundary on
+    assert layout["B02"]["seam_moved"] == -1            # its start boundary moved one sentence back
+    assert layout["B01"]["seam_moved"] is None          # the first block has no start boundary

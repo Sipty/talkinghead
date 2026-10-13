@@ -120,7 +120,9 @@ def fingerprints() -> dict:
     }
 
 
-# Captured at the base commit, before any speaker code existed.
+# Captured at the base commit, before any speaker code existed. The plan digest is re-pinned: the filler "Um" and
+# the retake "Sorry no wait" fuse across 0.6 s of silence, and the fused cut now takes the judged reason
+# (retake) instead of its first cut's (filler, which settle_filler_edges may drop). Same span, same edges.
 BASE_COMMIT = {
     "coherence": "49f2a13f9e0d45f5",
     "cold_open": "3cc5ff9a70bee9e8",
@@ -130,7 +132,7 @@ BASE_COMMIT = {
     "marker": "f50772bde822030e",
     "marker_window": "d3d66c44a15f1f1c",
     "outro": "5bb70c96a844dd99",
-    "plan": "abcea96cae82bd58",
+    "plan": "b9fac27d5e52390d",
     "retake": "7695db7a8d503e27",
     "retake_policy": "0e9fc19aadb6b87c",
     "retake_table": "9e1811c957b6f97f",
@@ -336,14 +338,14 @@ def test_finalize_spares_a_filler_that_would_have_swallowed_another_speakers_wor
     assert not any(c.end > 1.2 and c.start < 1.6 for c in out)
 
 
-def test_a_judged_cut_never_leaves_another_speakers_word_clipped_mid_word() -> None:
-    # The retake's last word "so" is S0's; S1's "okay" starts inside it. The S1 word must stay whole,
-    # and so must "so": the cut stops before it rather than shaving its tail.
+def test_a_judged_cut_never_clips_another_speakers_word_and_still_removes_its_own() -> None:
+    # The retake's last word "so" is S0's; S1's "okay" starts inside it. The judge removed "so" (its midpoint is
+    # in the span), so the cut reaches it; the S1 word stays whole, so the cut stops before "okay" starts.
     words = [_w("so", 1.0, 1.5, "S0"), _w("okay", 1.4, 2.4, "S1"), _w("yes", 3.0, 3.4, "S0")]
     out = finalize_cuts([Cut(1.0, 1.7, "retake", "so")], _edge_ctx(words))
-    for word in words[:2]:
-        overlapped = [c for c in out if c.end > word.start and c.start < word.end]
-        assert all(c.start <= word.start and c.end >= word.end for c in overlapped), word.text
+    other = words[1]
+    assert not any(c.end > other.start and c.start < other.end for c in out)
+    assert any(c.start <= 1.25 < c.end for c in out)
 
 
 def test_a_judged_cut_covering_most_of_another_speakers_word_removes_it_whole() -> None:

@@ -26,6 +26,7 @@ from .stages import content, pauses, restructure, retakes, structure
 from .store import Cache, RunDir, sha256_file, stable_key
 from .timeline import Cut, Plan
 from .transcribe import Transcriber
+from .types import JUDGED_REASONS
 from .verify import CheckResult, collect_facts, run_checks, visuals_resolution
 from .visuals.cards import avatar_fingerprint
 from .visuals.headclip import check_head_clip
@@ -301,6 +302,7 @@ def run_pipeline(
     verify_output_asr: bool = True,
     preferences: str = "",
     refresh_preferences: bool = False,
+    plan_only: bool = False,
 ) -> RunResult:
     if audio_only and (audio is not None or demo_minutes is not None):
         raise PipelineError("an audio-only run has no picture to align an external recording onto or to clip "
@@ -384,12 +386,16 @@ def run_pipeline(
         )
         blocks = restructure.blocks_from(value)
         notes["restructure"] = restructure.summary(value)
+        # The sentences the restructure judge saw (before its own cuts): the seams are placed in them.
+        kept_sents = restructure.kept_sentences(ctx, raw)
         raw = raw + restructure.block_cuts(blocks)
+    # The judged word-removing decisions as the edge pass received them: verify checks the plan keeps none.
+    judged = [(c.start, c.end, c.reason) for c in raw if c.reason in JUDGED_REASONS]
     cuts = finalize_cuts(raw, edge_ctx)
     plan = Plan.from_cuts(ctx.source, cuts)
     plan, joins = refine_joins(plan, edge_ctx)
     if config.restructure:
-        plan = restructure.reorder(plan, blocks, edge_ctx)
+        plan = restructure.reorder(plan, blocks, edge_ctx, kept_sents)
     plan.decisions = decided
     restructured = plan.provenance.get("blocks")
     plan.provenance = {**ctx.provenance, "raw_cuts": len(raw), "final_cuts": len(cuts), "demo": demo_minutes,
@@ -410,6 +416,10 @@ def run_pipeline(
         notes["memos"] = {"recomputed": ",".join(sorted(set(run.superseded))),
                           "previous_kept_at": "stages/<stage>.superseded.json"}
     plan_path.write_text(plan.to_json())
+    if plan_only:
+        # Offline rebuild from the memos alone: nothing is rendered or verified. The CLI hands in a judge
+        # and transcriber that refuse to be called, so a memo miss fails rather than recomputing.
+        return RunResult(plan_path, final, report_path, notes=notes)
 
     if audio_only:
         # No picture: no frame grid, no encoder settings; only the join and mastering inputs apply.
@@ -435,7 +445,8 @@ def run_pipeline(
                           lufs_target=config.loudness_lufs, source_path=plan.sources[plan.main].path,
                           voices=ctx.voices, speech_probes=ctx.speech_probes,
                           config=config, env=ctx.env, floor=ctx.floor, source_words=ctx.words,
-                          scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr)
+                          scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr,
+                          judged=judged)
     checks = run_checks(plan, facts)
     run.write_json(run.verify_dir / f"{prefix}facts.json",
                    {k: v for k, v in facts.items() if k not in ("words",)})

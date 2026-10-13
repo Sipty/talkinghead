@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from .types import JUDGED_REASONS
+
 SCHEMA_VERSION = 1
 # Spans shorter than this are noise, not a cut (mirrors the renderer's floor).
 MIN_CUT = 0.02
@@ -28,7 +30,8 @@ MIN_CUT = 0.02
 # would leave an unrenderable sliver between them.
 FUSE_GAP = 0.0
 # When cuts fuse, the most informative reason survives: a structural decision
-# over a word-level judgment over a mechanical trim.
+# over a word-level judgment over a mechanical trim. Between equal ranks a judged
+# reason beats a mechanical one (a restart fused with a tangent is still a tangent).
 REASON_RANK = {"cold-open": 3, "outro": 3, "retake": 2, "content": 2, "restart": 2, "join": 2,
                "tangent": 2, "lead-in": 2, "filler": 1, "noise": 1, "silence": 0}
 
@@ -69,11 +72,33 @@ class Segment:
         return self.end - self.start
 
 
+def fuse_into(last: Cut, c: Cut, *, by_rank: bool) -> None:
+    """Fold `c` into `last`, which starts no later than `c`: the span grows to cover both, the winning
+    reason survives with its provenance, and the texts are joined.
+
+    `by_rank` (merge_cuts): the higher REASON_RANK wins, and between equal ranks a judged reason wins.
+    Otherwise (flow_guard, which fuses across quiet): the first cut's reason stands unless `c` is judged
+    and `last` is not, so a judged decision is never lost to a mechanical cut that comes first, which
+    is what let the speaker guard shrink a tangent. Mechanical fusions keep their historical label.
+    """
+    last.end = max(last.end, c.end)
+    if by_rank:
+        wins = (REASON_RANK.get(c.reason, 1), c.reason in JUDGED_REASONS) > \
+            (REASON_RANK.get(last.reason, 1), last.reason in JUDGED_REASONS)
+    else:
+        wins = c.reason in JUDGED_REASONS and last.reason not in JUDGED_REASONS
+    if wins:
+        last.reason = c.reason
+        last.provenance = {**last.provenance, **c.provenance}
+    if c.text and c.text not in last.text:
+        last.text = f"{last.text} {c.text}".strip()
+
+
 def merge_cuts(cuts: list[Cut], duration: float, fuse_gap: float = FUSE_GAP) -> list[Cut]:
     """Clip to [0, duration], drop tiny spans, fuse overlaps and touches.
 
-    On a fuse the highest-ranked reason (REASON_RANK) survives and texts are
-    joined so the report still shows what was removed.
+    On a fuse the winning reason (`fuse_rank`) survives and texts are joined so
+    the report still shows what was removed.
     """
     clipped: list[Cut] = []
     for c in sorted(cuts, key=lambda c: (c.start, c.end)):
@@ -83,13 +108,7 @@ def merge_cuts(cuts: list[Cut], duration: float, fuse_gap: float = FUSE_GAP) -> 
     merged: list[Cut] = []
     for c in clipped:
         if merged and c.start <= merged[-1].end + fuse_gap:
-            last = merged[-1]
-            last.end = max(last.end, c.end)
-            if REASON_RANK.get(c.reason, 1) > REASON_RANK.get(last.reason, 1):
-                last.reason = c.reason
-                last.provenance = {**last.provenance, **c.provenance}
-            if c.text and c.text not in last.text:
-                last.text = f"{last.text} {c.text}".strip()
+            fuse_into(merged[-1], c, by_rank=True)
         else:
             merged.append(c)
     return merged

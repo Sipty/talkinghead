@@ -77,3 +77,27 @@ def test_segments_from_another_source_extend_the_output() -> None:
     assert plan.output_duration == pytest.approx(104.0)
     # main-source mapping accounts for the prepended segment
     assert plan.source_to_output(5.0) == pytest.approx(9.0)
+
+
+def test_a_judged_reason_wins_a_fuse_against_a_mechanical_one_of_equal_rank() -> None:
+    # A restart (mechanical, rank 2) fused with a tangent (judged, rank 2): the tangent's decision survives
+    # with its provenance, whichever comes first.
+    for first, second in ((Cut(1.0, 2.0, "restart"), Cut(1.5, 3.0, "tangent", "B07", {"block": "B07"})),
+                          (Cut(1.5, 3.0, "tangent", "B07", {"block": "B07"}), Cut(1.0, 2.0, "restart"))):
+        (out,) = merge_cuts([first, second], 10.0)
+        assert (out.start, out.end, out.reason) == (1.0, 3.0, "tangent")
+        assert out.provenance["block"] == "B07"
+
+
+def test_flow_guard_keeps_a_tangent_when_it_fuses_with_a_silence_cut() -> None:
+    import numpy as np
+
+    from talkinghead.audio import Envelope, RefinedWord
+    from talkinghead.edges import EdgeContext, flow_guard
+
+    env = Envelope(np.full(2000, -50.0), np.zeros(2000), 0.005, 16000)
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=[RefinedWord("x", 9.0, 9.1, 9.0, 9.1, 1.0)])
+    cuts = [Cut(1.0, 1.5, "silence", "", {"candidate": "P1"}), Cut(1.6, 3.0, "tangent", "B07", {"block": "B07"})]
+    (out,) = flow_guard(cuts, ctx)
+    assert (out.start, out.end, out.reason) == (1.0, 3.0, "tangent")
+    assert out.provenance["block"] == "B07"

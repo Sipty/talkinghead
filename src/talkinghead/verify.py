@@ -112,6 +112,28 @@ def _cold_open(plan: Plan, f: dict) -> CheckResult:
 
 
 
+def judged_leaks(plan: Plan, words: Sequence, judged: Sequence[tuple[float, float, str]]) -> list[dict]:
+    """Transcript words the plan keeps although a judged cut removed them.
+
+    `judged` are the judges' word-removing decisions as (start, end, reason) on the main source. A word
+    is removed by a decision when its midpoint lies in the decision's span; the plan keeps it when its
+    midpoint lies in a kept segment of the main source. Empty when the plan honours every decision.
+    """
+    kept = sorted((s.start, s.end) for s in plan.segments if s.source == plan.main)
+    starts = [a for a, _ in kept]
+    out: list[dict] = []
+    for w in words:
+        mid = (w.start + w.end) / 2
+        reason = next((r for a, b, r in judged if a <= mid < b), None)
+        if reason is None:
+            continue
+        i = bisect_right(starts, mid) - 1
+        if i >= 0 and kept[i][0] <= mid < kept[i][1]:
+            out.append({"text": w.text, "start": round(w.start, 3), "end": round(w.end, 3), "reason": reason,
+                        "speaker": getattr(w, "speaker", None)})
+    return out
+
+
 def _dead_air_runs(
     plan: Plan, silences: list[tuple[float, float]], min_gap: float,
 ) -> list[tuple[float, float, float]]:
@@ -178,6 +200,19 @@ def dead_air_excess(
         out.append({"start": round(a, 3), "end": round(b, 3), "boundary": boundary, "cap": cap,
                     "excess": round(max(0.0, (b - a) - (cap + DEAD_AIR_SLACK)), 3)})
     return out
+
+
+def _judged_removals(plan: Plan, f: dict) -> CheckResult:
+    """Every word a judged cut removes stays removed: a judge's span is a decision the edge pass may not undo."""
+    leaks = f.get("judged_leaks")
+    if leaks is None:
+        return CheckResult("judged_removals", "info", True, "not measured: no judged decisions were given")
+    if not leaks:
+        return CheckResult("judged_removals", "fatal", True, "every word a judged cut removes stays removed")
+    head = "; ".join(f"{x['text']!r} at {x['start']:.2f}s ({x['reason']})" for x in leaks[:5])
+    return CheckResult("judged_removals", "fatal", False,
+                       f"{len(leaks)} transcript words the plan keeps inside judged cuts: {head}"
+                       + (" ..." if len(leaks) > 5 else ""))
 
 
 def _residual_gaps(plan: Plan, f: dict) -> CheckResult:
@@ -383,13 +418,13 @@ def visuals_resolution(base: str, out: str) -> CheckResult:
 
 
 CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
-    _duration, _av_sync, _loudness, _cold_open, _residual_gaps, _render_silence, _joins, _join_edges,
-    _source_timing, _source_similarity, _unclassified_voice, _color, _resolution,
+    _duration, _av_sync, _loudness, _cold_open, _judged_removals, _residual_gaps, _render_silence, _joins,
+    _join_edges, _source_timing, _source_similarity, _unclassified_voice, _color, _resolution,
 ]
 
 AUDIO_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
-    _audio_stream, _duration, _loudness, _cold_open, _residual_gaps, _render_silence, _joins, _join_edges,
-    _source_timing, _source_similarity, _unclassified_voice,
+    _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _residual_gaps, _render_silence, _joins,
+    _join_edges, _source_timing, _source_similarity, _unclassified_voice,
 ]
 
 
@@ -700,6 +735,7 @@ def collect_facts(
     scale: str | None = None,
     env: Envelope | None = None, floor: float | None = None, source_words: Sequence = (),
     audio_only: bool = False, output_asr: bool = True,
+    judged: Sequence[tuple[float, float, str]] | None = None,
 ) -> dict:
     """Measure the render: durations, loudness, transcript (cached), join grades,
     the dead air that survives the plan, and - when the source path is known -
@@ -712,6 +748,8 @@ def collect_facts(
     `output_asr=False` skips transcribing the render; the transcript is then the
     source words projected through the plan, recorded as `output_asr:
     "source-projection"` because it is an expectation, not a measurement.
+    `judged` are the judges' word-removing decisions (start, end, reason): the
+    `judged_removals` check fails when the plan keeps a word any of them removed.
     A transcriber that replays one fixed source response is refused as an
     output ASR: it would hand back the source's words for the edited audio."""
     config = config or Config()
@@ -764,6 +802,7 @@ def collect_facts(
         # [] = asked for and unavailable, which the check reports as a warning.
         "source_timing": measure_source_timing(plan, render_path) if source_path else None,
         "unclassified_voice": unclassified_voice_facts(plan, voices, speech_probes),
+        "judged_leaks": judged_leaks(plan, source_words, judged) if judged is not None else None,
         "color": color_facts(source_path, render_path) if picture else None,
         # `scale` is the render's deliberate downscale (demo tier); None = native.
         "frame": {"source": list(display_size(source_path)), "render": list(display_size(render_path)),

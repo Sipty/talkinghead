@@ -450,8 +450,8 @@ def block_cuts(blocks: list[Block]) -> list[Cut]:
     return cuts
 
 
-def _quiet_point(ctx: EdgeContext, lo: float, hi: float) -> float:
-    """The quietest instant between two sentences: on the frame grid when the render has one."""
+def _quiet_points(ctx: EdgeContext, lo: float, hi: float) -> list[float]:
+    """Instants between two sentences, quietest first (ties: nearest the gap's middle). On the frame grid when the render has one."""
     if hi < lo:
         lo, hi = hi, lo
     mid = (lo + hi) / 2
@@ -470,21 +470,136 @@ def _quiet_point(ctx: EdgeContext, lo: float, hi: float) -> float:
         i = min(n - 1, max(0, int(round(t / fs))))
         return float(db[max(0, i - 4):min(n, i + 5)].mean())
 
-    return min(points, key=lambda t: (round(level(t), 1), abs(t - mid)))
+    return sorted(points, key=lambda t: (round(level(t), 1), abs(t - mid)))
 
 
-def reorder(plan: Plan, blocks: list[Block], ctx: EdgeContext) -> Plan:
+def _quiet_point(ctx: EdgeContext, lo: float, hi: float) -> float:
+    """The quietest instant between two sentences."""
+    return _quiet_points(ctx, lo, hi)[0]
+
+
+# ------------------------------------------------------------- seams
+#
+# A reordered video joins at the block boundaries, so each boundary must sit where a thought ends. The
+# stored block starts and ends are hand-editable and hashed into the memo, so they never change: at apply
+# time each boundary moves to the nearest complete-thought gap between two sentences, within SEAM_SEARCH
+# sentences either way (the stored gap wins when it is already complete). A gap is complete when:
+#   1. the sentence before it ends a thought: terminal . ? ! (closing quotes allowed), not an ellipsis or a
+#      dash, so an interrupted "I was going to-" is not a finished thought;
+#   2. the sentence after it can open a thought: not an ellipsis, and not a lowercase continuation
+#      ("to pull it off", "n- not even") of the sentence before;
+#   3. it does not split a speaker's sentence that resumes after a backchannel: no speaker whose last sentence
+#      before the gap is unfinished resumes within the window with a continuation.
+#   4. the gap is cut at a removed span when one lies between the two sentences (the cut is the boundary, so no
+#      kept segment is split); otherwise at the quietest point, and only where both kept pieces at that point
+#      are at least SEAM_MIN_PIECE long (a sliver of one frame at a block edge is never left).
+# The first sentence of an opener therefore starts a thought and its last sentence ends one.
+
+SEAM_SEARCH = 6
+SEAM_MIN_PIECE = 0.15
+_OPEN_QUOTES = "\"'\u201c\u2018([\u00bf\u00a1"
+_CLOSE_QUOTES = "\"'\u201d\u2019)]\u00bb"
+
+
+def ends_thought(text: str) -> bool:
+    """Rule 1: terminal punctuation after any closing quotes; an ellipsis or dash is an unfinished thought."""
+    t = text.rstrip().rstrip(_CLOSE_QUOTES).rstrip()
+    return t.endswith((".", "?", "!")) and not t.endswith(("...", "\u2026"))
+
+
+def starts_thought(text: str) -> bool:
+    """Rule 2: a capital, digit or symbol can open a thought; a lowercase word or an ellipsis continues one."""
+    t = text.lstrip().lstrip(_OPEN_QUOTES).lstrip()
+    if not t:
+        return True
+    if t.startswith(("...", "\u2026")):
+        return False
+    return not t[0].isalpha() or t[0].isupper()
+
+
+def _splits_a_thought(sents: list[Sentence], g: int) -> bool:
+    """Rule 3: a speaker's unfinished sentence before the gap resumes after it with a continuation."""
+    for j in range(g + 1, min(len(sents), g + 1 + SEAM_SEARCH)):
+        if starts_thought(sents[j].text):
+            continue
+        p = next((k for k in range(j - 1, -1, -1) if sents[k].speaker == sents[j].speaker), None)
+        if p is not None and p <= g and not ends_thought(sents[p].text):
+            return True
+    return False
+
+
+def complete_gap(sents: list[Sentence], g: int) -> bool:
+    """Whether a boundary may sit between sents[g] and sents[g + 1] (rules 1 to 3)."""
+    if not 0 <= g < len(sents) - 1:
+        return False
+    return ends_thought(sents[g].text) and starts_thought(sents[g + 1].text) and not _splits_a_thought(sents, g)
+
+
+def _gap_time(ctx: EdgeContext, plan: Plan, sents: list[Sentence], g: int) -> float | None:
+    """Rule 4: the quietest boundary instant in gap g that leaves both kept pieces long enough, or None."""
+    lo, hi = sents[g].end, sents[g + 1].start
+    removed = [c for c in plan.cuts if c.start >= lo - 1e-6 and c.end <= hi + 1e-6 and c.end > c.start]
+    if removed:
+        cut = max(removed, key=lambda c: c.end - c.start)
+        return _quiet_point(ctx, cut.start, cut.end)
+    kept = [s for s in plan.segments if s.source == plan.main]
+    for t in _quiet_points(ctx, lo, hi):
+        if all(not (s.start < t < s.end) or (t - s.start >= SEAM_MIN_PIECE and s.end - t >= SEAM_MIN_PIECE)
+               for s in kept):
+            return t
+    return None
+
+
+def seam_bounds(plan: Plan, blocks: list[Block], sents: list[Sentence], ctx: EdgeContext) -> tuple[list[float], list[dict]]:
+    """The instant of each boundary between consecutive blocks, and the sentence gap it sits in.
+
+    Boundary k is the gap after the last sentence of block k-1. Each boundary searches its own window,
+    bounded by the boundary before it (already placed) and the stored boundary after it, so the blocks stay
+    in order and none is emptied. A boundary with no complete, long-enough gap in its window keeps its stored
+    gap (reported as `"moved": null`).
+    """
+    bounds: list[float] = []
+    notes: list[dict] = []
+    prev_gap = -1
+    for k in range(1, len(blocks)):
+        stored = blocks[k].first - 1
+        # The next boundary stays at or after the gap after this one's block, so the window stops one short of it.
+        upper = blocks[k + 1].first - 2 if k + 1 < len(blocks) else len(sents) - 2
+        candidates = sorted(
+            (g for g in range(max(prev_gap + 1, stored - SEAM_SEARCH), min(upper, stored + SEAM_SEARCH) + 1)
+             if complete_gap(sents, g)),
+            key=lambda g: (abs(g - stored), g),
+        )
+        chosen, t = None, None
+        for g in candidates:
+            t = _gap_time(ctx, plan, sents, g)
+            if t is not None:
+                chosen = g
+                break
+        if chosen is None:
+            chosen = stored
+            t = _gap_time(ctx, plan, sents, stored)
+            if t is None:
+                t = _quiet_point(ctx, sents[stored].end, sents[stored + 1].start)
+        bounds.append(t)
+        notes.append({"block": blocks[k].id, "stored_gap": stored, "gap": chosen,
+                      "moved": None if chosen == stored else chosen - stored, "at": round(t, 3)})
+        prev_gap = chosen
+    return bounds, notes
+
+
+def reorder(plan: Plan, blocks: list[Block], ctx: EdgeContext, sents: list[Sentence]) -> Plan:
     """Lay the kept audio out with the openers first, the rest in source order.
 
-    The plan is split at every block boundary (the quietest point between two
-    sentences), each piece is owned by one block, openers' pieces come first in
+    The plan is split at every block boundary (`seam_bounds`: a complete-thought gap, at a removed span when one
+    lies between the sentences), each piece is owned by one block, openers' pieces come first in
     rank order, and contiguous pieces that stay in source order are re-fused.
-    Output length is unchanged. The layout (output range per block) goes into
-    `plan.provenance["blocks"]`.
+    Output length is unchanged. The layout (output range per block, the source instants it now spans, and
+    the boundary moves) goes into `plan.provenance["blocks"]`.
     """
     if not blocks:
         return plan
-    bounds = [_quiet_point(ctx, prev.end, cur.start) for prev, cur in zip(blocks, blocks[1:])]
+    bounds, seams = seam_bounds(plan, blocks, sents, ctx)
     front = sorted((b for b in blocks if b.decision == "keep" and b.front_rank is not None),
                    key=lambda b: b.front_rank)
     front_ids = {b.id for b in front}
@@ -514,13 +629,21 @@ def reorder(plan: Plan, blocks: list[Block], ctx: EdgeContext) -> Plan:
         else:
             segments.append(seg)
 
+    placed = {b.id: [] for b in blocks}
+    for seg, owner in pieces:
+        if owner is not None:
+            placed[owner].append((seg.start, seg.end))
+    moves = {n["block"]: n["moved"] for n in seams}
     layout = []
     for b in blocks:
         span = spans.get(b.id)
         kept = b.decision == "keep"
+        owned = placed[b.id]
         layout.append({
             "id": b.id, "title": b.title, "decision": b.decision, "reason": b.reason,
             "source": [round(b.start, 3), round(b.end, 3)],
+            "placed": [round(min(a for a, _ in owned), 3), round(max(e for _, e in owned), 3)] if owned else None,
+            "seam_moved": moves.get(b.id),   # sentences this block's start boundary moved; None when it stayed
             "output": [round(span[0], 3), round(span[1], 3)] if kept and span is not None else None,
             "front_rank": b.front_rank if kept else None,
             "interest": b.interest, "relevance": b.relevance, "judged": b.judged,

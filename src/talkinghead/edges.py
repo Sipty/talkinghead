@@ -3,7 +3,8 @@
 Order matters and each step is a pure function:
 1. merge            overlapping/touching cuts fuse
 2. protect_words    no kept word is ever clipped (word-removing cuts snap to
-                    whole words; silence/noise cuts retreat from any word)
+                    whole words; silence/noise cuts retreat from any word); a judged
+                    cut (JUDGED_REASONS) is never split around a kept-looking event
 3. steer_out_of_moans   a join never lands inside a detected moan: the cut
                     swallows the moan when it sits free in the gap, else
                     retreats so the moan stays whole in the kept audio
@@ -27,11 +28,14 @@ Order matters and each step is a pure function:
                     between them fuse (a rapid-cut pileup reads as a glitch)
 12. snap_to_frames  edges onto the video frame grid, shrinking, so segments
                     are whole frames and audio/video cannot drift
-13. settle_filler_edges  short filler cuts still on voiced audio: the voiced run is
+13. hold_judged     every word a judged cut removes (midpoint test) stays removed: a word the
+                    edge steps left uncovered is added as a cut of its own extent
+14. flow_guard      again: slivers the hold left between cuts fuse
+15. settle_filler_edges  short filler cuts still on voiced audio: the voiced run is
                     walked into the cut, else the filler is dropped
-14. spare_other_speaker  two-speaker recordings only: a mechanical cut shrinks away from
+16. spare_other_speaker  two-speaker recordings only: a mechanical cut shrinks away from
                     words spoken by someone other than its own target (runs first, and last)
-15. merge
+17. merge
 
 "Kept word" means a refined word not removed by the cut being placed. `pad`
 is the minimum distance a silence/noise edge keeps from any kept word.
@@ -60,18 +64,24 @@ target.
 
 Whatever the cut, kept speech that starts within `splice_lead_in` of the cut end is given that much
 real source in front of it: the end moves back through quiet audio only, and never over a removed word.
+
+A judged cut (`JUDGED_REASONS`: cold-open, outro, tangent, lead-in, retake, content) is a decision about
+the words in its span, so the whole span goes: no split around a laugh, a voice or any other event inside
+it, and no other cut may shrink it. Only its two edges take the refinement above. Every word whose midpoint
+the judge put in the span is therefore removed, which `verify` checks (judged_removals).
 """
 
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import dataclass, field, replace
 
 from .audio import Envelope, RefinedWord
 from .derive import pause_boundary
 from .joins import EDGE_CUT_MATCH_SEC, EDGE_VOICED_ABOVE_FLOOR_DB, edge_state
-from .timeline import MIN_CUT, Cut, Plan, Segment, merge_cuts
-from .types import MECHANICAL_REASONS
+from .timeline import MIN_CUT, Cut, Plan, Segment, fuse_into, merge_cuts
+from .types import JUDGED_REASONS, MECHANICAL_REASONS
 
 # Reasons whose spans are meant to remove words (edges snap to word bounds).
 WORD_CUT_REASONS = frozenset({"retake", "restart", "filler", "content", "cold-open", "outro", "join",
@@ -233,6 +243,7 @@ def protect_words(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     out: list[Cut] = []
     for c in cuts:
         removed = removed_words(c, ctx.words)
+        judged = c.reason in JUDGED_REASONS
         start, end = c.start, c.end
         if removed:
             start = min(start, min(w.start for w in removed))
@@ -240,10 +251,12 @@ def protect_words(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
         # Every edge stays clear of kept audio; only a cut whose job is removing
         # non-speech may split around a voice the transcript never named (split
         # an editorial cut there and a fragment of the passage the judge chose
-        # to remove ships instead).
+        # to remove ships instead). A judged cut is never split at all: a protected
+        # event or voice inside its span is part of what the judge removed (hold_judged
+        # restores any word a guard pushed out).
         guards = _kept_spans(c, ctx)
         pad = _pad(c.reason, ctx)
-        splits = _kept_spans(c, ctx, voices=c.reason in VOICE_SAFE_REASONS)
+        splits = [] if judged else _kept_spans(c, ctx, voices=c.reason in VOICE_SAFE_REASONS)
         for s, e in guards:
             if s < end and e > start:
                 if s <= start:                # span straddles the start: move start past it
@@ -257,7 +270,8 @@ def protect_words(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
                 start = e + pad
         # Cross-talk: a kept word of another speaker can push an edge into a removed word of this cut.
         # That word is then left whole (the cut stops at its near side), never clipped mid-word.
-        for w in removed:
+        # A judged cut keeps its removed words instead (hold_judged).
+        for w in ([] if judged else removed):
             if w.speaker is None or not _crosstalk(w, ctx.words):
                 continue
             if w.start < end < w.end and start <= w.start:
@@ -680,13 +694,53 @@ def flow_guard(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     out: list[Cut] = []
     for c in sorted(cuts, key=lambda c: (c.start, c.end)):
         if out and c.start - out[-1].end < ctx.flow_min_kept and not _speech_between(out[-1].end, c.start, ctx):
-            last = out[-1]
-            last.end = max(last.end, c.end)
-            if c.text and c.text not in last.text:
-                last.text = f"{last.text} {c.text}".strip()
+            fuse_into(out[-1], c, by_rank=False)   # a judged reason wins over a mechanical one (timeline.fuse_into)
         else:
             out.append(Cut(c.start, c.end, c.reason, c.text, dict(c.provenance)))
     return out
+
+
+def held_words(raw: list[Cut], words: list[RefinedWord]) -> list[Cut]:
+    """Each word a judged cut removes, as a cut over the word's own extent, taken from the judges' raw decisions.
+
+    A word is removed by a judged cut when its midpoint lies in that cut's span: the same test the
+    verify check uses. Degenerate (zero-length) words carry no audio and are not held.
+    """
+    judged = [c for c in raw if c.reason in JUDGED_REASONS]
+    out: list[Cut] = []
+    for w in words:
+        if w.end <= w.start:
+            continue
+        mid = (w.start + w.end) / 2
+        for c in judged:
+            if c.start <= mid < c.end:
+                out.append(Cut(w.start, w.end, c.reason, c.text, dict(c.provenance)))
+                break
+    return out
+
+
+def hold_judged(cuts: list[Cut], held: list[Cut], duration: float, fps: float | None = None) -> list[Cut]:
+    """Judged decisions win over the edge pass: every word a judged cut removes stays removed.
+
+    A word counts as removed while its midpoint is inside a cut (the same test as `held_words` and the
+    verify check). The edge steps move a judged cut's edges through quiet and kept-word pads, and a guard
+    or cross-talk rule can pull an edge in past a removed word's midpoint. Each word that is left
+    uncovered is put back as a cut of its own extent, on the frame grid when there is one (outward, so
+    the cut still reaches the word). Kept audio beside it is trimmed by that much. A word still covered
+    keeps the edge the valley search chose, so mid-word valley edges are unchanged.
+    """
+    spans = [(c.start, c.end) for c in merge_cuts(cuts, duration)]
+    starts = [a for a, _ in spans]
+    missing: list[Cut] = []
+    for h in held:
+        mid = (h.start + h.end) / 2
+        i = bisect_right(starts, mid) - 1
+        if i < 0 or not spans[i][0] <= mid < spans[i][1]:
+            a, b = h.start, h.end
+            if fps:
+                a, b = math.floor(a * fps + 1e-6) / fps, math.ceil(b * fps - 1e-6) / fps
+            missing.append(Cut(a, b, h.reason, h.text, dict(h.provenance)))
+    return merge_cuts(cuts + missing, duration) if missing else cuts
 
 
 def snap_to_frames(cuts: list[Cut], fps: float) -> list[Cut]:
@@ -830,6 +884,7 @@ def spare_other_speaker(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
+    held = held_words(cuts, ctx.words)
     cuts = merge_cuts(cuts, ctx.duration)
     cuts = spare_other_speaker(cuts, ctx)
     cuts = protect_words(cuts, ctx)
@@ -844,6 +899,10 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     cuts = flow_guard(cuts, ctx)
     if ctx.fps:
         cuts = snap_to_frames(cuts, ctx.fps)
+    cuts = hold_judged(cuts, held, ctx.duration, ctx.fps)
+    # The held words can leave a kept sliver between two cuts (a few frames of a removed word's tail):
+    # fuse again, as flow_guard would have had the words been removed in the first place.
+    cuts = flow_guard(cuts, ctx)
     cuts = settle_filler_edges(cuts, ctx)
     cuts = spare_other_speaker(cuts, ctx)
     return merge_cuts(cuts, ctx.duration)

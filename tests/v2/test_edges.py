@@ -386,15 +386,25 @@ def _laugh_env() -> Envelope:
                     (4.5, 5.0, LOUD)])
 
 
-@pytest.mark.parametrize("reason", ["silence", "noise", "filler", "retake", "restart", "content",
-                                    "join", "cold-open", "outro"])
-def test_a_protected_laugh_survives_every_cut_reason_whole_after_frame_snapping(reason: str) -> None:
+@pytest.mark.parametrize("reason", ["silence", "noise", "filler", "restart", "join"])
+def test_a_protected_laugh_survives_a_mechanical_cut_whole_after_frame_snapping(reason: str) -> None:
     words = [_w("so", 0.3, 0.8), _w("next", 4.5, 5.0)]
     ctx = _ctx(words, env=_laugh_env(), protected=[LAUGH])
     out = finalize_cuts([Cut(1.0, 4.0, reason, "x")], ctx)
     assert _survives(out, LAUGH)
     assert len(out) == 2 and out[0].end <= LAUGH[0] and out[1].start >= LAUGH[1]
     assert all(_on_grid(c.start) and _on_grid(c.end) for c in out)
+
+
+@pytest.mark.parametrize("reason", ["retake", "content", "cold-open", "outro", "tangent", "lead-in"])
+def test_a_judged_cut_removes_a_protected_laugh_inside_its_span(reason: str) -> None:
+    # A judge decided the whole span goes: the laugh inside it is part of that decision.
+    words = [_w("so", 0.3, 0.8), _w("next", 4.5, 5.0)]
+    ctx = _ctx(words, env=_laugh_env(), protected=[LAUGH])
+    out = finalize_cuts([Cut(1.0, 4.0, reason, "x")], ctx)
+    assert not _survives(out, LAUGH)
+    assert all(_on_grid(c.start) and _on_grid(c.end) for c in out)
+    assert len(out) == 1 and out[0].start <= 1.0 + 1 / 30 and out[0].end >= 4.0 - 1 / 30
 
 
 def test_without_the_protected_span_the_same_cut_removes_the_laugh() -> None:
@@ -603,3 +613,35 @@ def test_refine_joins_never_lets_the_lead_in_re_expose_a_removed_word() -> None:
     refined, _ = refine_joins(_two_segment_plan(Cut(0.9, 1.6, "retake", "x")), _ctx(words, env=env))
     assert 1.58 - 1e-9 <= refined.segments[1].start <= 1.6 + 1e-9
     assert [w.text for w in removed_words(refined.cuts[0], words)] == ["x"]
+
+
+def test_hold_judged_puts_back_a_removed_word_an_edge_step_left_uncovered() -> None:
+    # The edge pass pulled the cut's end in past the midpoint of "um": the word is held as its own cut.
+    from talkinghead.edges import held_words, hold_judged
+    words = [_w("so", 0.5, 1.3), _w("um", 1.3, 1.7), _w("next", 1.7, 2.4)]
+    judged = [Cut(1.3, 1.7, "tangent", "um", {"block": "B07"})]
+    held = held_words(judged, words)
+    out = hold_judged([Cut(1.3, 1.5, "tangent", "um", {"block": "B07"})], held, 10.0)
+    assert [(c.start, c.end, c.reason) for c in out] == [(1.3, 1.7, "tangent")]
+
+
+def test_hold_judged_keeps_a_valley_edge_while_the_word_stays_covered() -> None:
+    from talkinghead.edges import held_words, hold_judged
+    words = [_w("so", 0.5, 1.3), _w("um", 1.3, 1.7)]
+    held = held_words([Cut(1.3, 1.7, "content")], words)
+    out = hold_judged([Cut(1.4, 1.7, "content")], held, 10.0)
+    assert [(c.start, c.end) for c in out] == [(1.4, 1.7)]
+
+
+def test_a_tangent_fused_with_a_restart_inside_it_leaves_no_kept_word_of_the_other_speaker() -> None:
+    # The leak: a restart fused into a tangent kept the tangent's span to the speaker guard as mechanical.
+    words = [_w("so", 0.3, 0.8)] + [
+        RefinedWord(t, s, e, s, e, 1.0, speaker)
+        for t, s, e, speaker in (("and", 1.1, 1.4, "S0"), ("yes", 1.6, 1.9, "S1"), ("well", 2.1, 2.5, "S0"))
+    ]
+    ctx = _ctx(words)
+    cuts = [Cut(1.0, 1.05, "restart", "x"), Cut(1.0, 2.6, "tangent", "B07", {"block": "B07"})]
+    out = finalize_cuts(cuts, ctx)
+    for w in words[1:]:
+        mid = (w.start + w.end) / 2
+        assert any(c.start <= mid < c.end for c in out), w.text

@@ -572,3 +572,38 @@ def test_a_muted_audio_render_is_caught_by_the_silence_and_timing_checks(tmp_pat
     results = {r.name: r for r in run_checks(plan, _audio_facts(tmp_path, render, source, plan=plan))}
     assert not results["render_silence"].ok and "DIGITAL" in results["render_silence"].detail
     assert not results["source_timing"].ok
+
+
+def _judged_plan(cuts: list[Cut]) -> Plan:
+    from talkinghead.timeline import Plan as P
+    src = SourceInfo("main", "/v/in.mp4", "sha", 10.0)
+    return P.from_cuts(src, cuts)
+
+
+class _W:
+    def __init__(self, text: str, start: float, end: float) -> None:
+        self.text, self.start, self.end, self.speaker = text, start, end, None
+
+
+def test_judged_removals_fails_on_a_kept_word_a_judged_cut_removed_and_names_the_first_few() -> None:
+    # The judge removed [2, 4); the plan keeps "yes" (3.0 to 3.4) because a cut chewed the span.
+    words = [_W("so", 1.0, 1.5), _W("yes", 3.0, 3.4), _W("right", 3.5, 3.9), _W("next", 6.0, 6.5)]
+    plan = _judged_plan([Cut(2.0, 2.9, "silence"), Cut(3.7, 4.0, "silence")])
+    judged = [(2.0, 4.0, "tangent")]
+    leaks = verify.judged_leaks(plan, words, judged)
+    assert [x["text"] for x in leaks] == ["yes"]
+    res = verify._judged_removals(plan, {"judged_leaks": leaks})
+    assert not res.ok and res.severity == "fatal" and "'yes' at 3.00s (tangent)" in res.detail
+
+
+def test_judged_removals_passes_when_every_judged_word_stays_removed() -> None:
+    words = [_W("so", 1.0, 1.5), _W("yes", 2.1, 2.4), _W("next", 6.0, 6.5)]
+    plan = _judged_plan([Cut(2.0, 4.0, "tangent")])
+    leaks = verify.judged_leaks(plan, words, [(2.0, 4.0, "tangent")])
+    assert leaks == []
+    assert verify._judged_removals(plan, {"judged_leaks": leaks}).ok
+
+
+def test_judged_removals_is_not_measured_without_judged_decisions() -> None:
+    res = verify._judged_removals(_judged_plan([]), {})
+    assert res.ok and res.severity == "info"
