@@ -186,7 +186,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="the exact audio the saved Scribe response was made from")
     run.add_argument("--no-output-asr", action="store_true",
                      help="do not transcribe the finished output; word/pacing facts are then the source "
-                          "words projected through the plan, not an independent measurement")
+                          "words projected through the plan, not an independent measurement, and the polish "
+                          "output pass (which needs the rendered transcript) is skipped")
     run.add_argument("--plan-only", action="store_true",
                      help="stop after plan.json: no render, verification or visuals. Every stage memo must hit, "
                           "so no judge or transcriber call is made (a miss fails); the polish judge is the one "

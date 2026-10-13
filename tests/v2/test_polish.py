@@ -170,11 +170,30 @@ def test_policy_fingerprint_is_stable_within_a_build() -> None:
 
 # ------------------------------------------------------------- config
 
-def test_polish_leaves_no_trace_in_the_config_when_disabled() -> None:
-    off = Config().to_dict()
+def test_polish_knobs_stay_out_of_every_other_stages_key() -> None:
+    # Turning polish on or off, or tuning it, re-keys only the polish stages: a cook's structure, retake,
+    # content, pause and visuals memos keep their keys (and their hand edits).
+    from talkinghead.pipeline import STAGE_CONFIG_KEYS, _stage_config
+
+    class Ctx:
+        def __init__(self, config: Config) -> None:
+            self.config = config
+
+    base = Config(polish=False)
+    for other in (Config(polish=True), Config(polish=True, polish_votes=5, polish_output_rounds=0),
+                  Config(polish=True, polish_gap_block=0.1, polish_output_rounds=4)):
+        for stage in ("structure", "retakes", "content", "pauses", "restructure", "visuals"):
+            assert _stage_config(Ctx(other), stage) == _stage_config(Ctx(base), stage), stage
+    assert _stage_config(Ctx(Config(polish=True, polish_votes=5)), "polish") != \
+        _stage_config(Ctx(Config(polish=True)), "polish")
+    assert "polish_output" in STAGE_CONFIG_KEYS and "polish_votes" in STAGE_CONFIG_KEYS["polish_output"]
+
+
+def test_the_config_dict_keeps_polish_when_it_is_on_and_leaves_no_trace_when_off() -> None:
+    assert Config().to_dict()["polish"] is True and Config().to_dict()["polish_output_rounds"] == 2
+    off = Config(polish=False).to_dict()
     assert not [k for k in off if k == "polish" or k.startswith("polish_")]
-    on = Config(polish=True).to_dict()
-    assert on["polish"] is True and on["polish_gap_block"] == 0.45 and on["polish_votes"] == 3
+    assert Config(polish=True).to_dict()["polish_gap_block"] == 0.45
 
 
 def test_polish_agreement_cannot_exceed_its_votes() -> None:

@@ -788,6 +788,17 @@ def _claim_voiced_run(c: Cut, ctx: EdgeContext) -> Cut:
     return Cut(start, end, c.reason, c.text, dict(c.provenance))
 
 
+def _is_filler_cut(c: Cut) -> bool:
+    """A filler cut: a filler the transcript named, or a filler the output pass confirmed on the render's transcript.
+
+    The output pass finds fillers the source transcript missed, so its voiced edges are settled exactly like a
+    source filler's: a judged source-side polish cut keeps the edge pass's own placement.
+    """
+    if c.reason == "filler":
+        return True
+    return c.reason == "polish" and c.provenance.get("pass") == "output" and c.provenance.get("kind") == "filler"
+
+
 def settle_filler_edges(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     """Filler cuts whose edge still sits on voiced audio: take the voiced run into the cut.
 
@@ -803,7 +814,7 @@ def settle_filler_edges(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
         return list(cuts)
     out: list[Cut] = []
     for c in cuts:
-        if c.reason != "filler":
+        if not _is_filler_cut(c):
             out.append(c)
             continue
         settled = _claim_voiced_run(c, ctx)

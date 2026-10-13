@@ -205,10 +205,11 @@ class Config:
     restructure_front: int = 3
     # Windows judged at once, only with a judge that is safe to call concurrently.
     restructure_parallel: int = 4
-    # Polish (opt-in, after restructure). Gap tightening: the silence left between two consecutive kept words is
+    # Polish (on by default, after restructure). Gap tightening: the silence left between two consecutive kept words is
     # cut down to a cap set by the boundary the gap sits on, most specific first: block boundary, speaker change,
     # sentence end, then inside a sentence. Gaps are cut only in one kept stretch, never across a word.
-    polish: bool = False
+    # `polish = false` opts a cook out of gap tightening, the source disfluency judge and the output pass.
+    polish: bool = True
     polish_gap_block: float = 0.45
     polish_gap_speaker: float = 0.20
     polish_gap_sentence: float = 0.30
@@ -222,6 +223,10 @@ class Config:
     polish_max_sec: float = 15.0
     # Windows judged at once, only with a judge that is safe to call concurrently.
     polish_parallel: int = 4
+    # Output pass: the finished render is transcribed and scanned for fillers, repeated words and restarts the
+    # source transcript could not show. Each round judges the findings, cuts the confirmed ones and re-renders.
+    # 0 disables the pass; a cook whose output was never transcribed skips it whatever this is set to.
+    polish_output_rounds: int = 2
 
     def validate(self) -> "Config":
         if self.agree > self.votes:
@@ -262,6 +267,8 @@ class Config:
         if min(self.polish_gap_block, self.polish_gap_speaker, self.polish_gap_sentence, self.polish_gap_within,
                self.polish_max_sec) < 0:
             raise ValueError("polish gap caps and polish_max_sec cannot be negative")
+        if self.polish_output_rounds < 0:
+            raise ValueError("polish_output_rounds cannot be negative")
         return self
 
     def to_dict(self) -> dict:

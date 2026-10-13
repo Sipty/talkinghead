@@ -50,7 +50,7 @@ the memos are hand-editable, so a re-key must not discard manual cuts without a 
 | 5 | content | which whole sentences do not earn their runtime (and a coherence veto) | judge + coherence pass | stage memo |
 | 6 | pauses | pause trims, fillers, similarity-detected restarts, mouth noises | deterministic | stage memo |
 | 6b | restructure (opt-in: `restructure = true`) | topic blocks: which have no payoff (dropped), which open the cut (moved first) | judge: one sample per window, then one vote | stage memo, `plan.json` layout |
-| 6c | polish (opt-in: `polish = true`) | gap tightening between kept words (deterministic); word spans a judge names as disfluent | judge per window, k-vote agreement (gaps need no judge) | stage memo |
+| 6c | polish (on by default; `polish = false` opts out) | gap tightening between kept words (deterministic); word spans a judge names as disfluent; output pass: stutters and fillers the render still has | judge per window, k-vote agreement (gaps need no judge); output pass judges one batch per round | stage memo, one per output round |
 | 7 | edges | final span of every cut | deterministic | `plan.json` |
 | 8 | render | picture and mastered audio, or mastered audio alone | deterministic | `final.mp4` or `final.wav`, `render.json` |
 | 9 | verify | did the render keep the plan's promises | deterministic, declarative checks | `verify/facts.json` |
@@ -200,10 +200,10 @@ the audio join in list order, the join at a moved block's old place is a crossfa
 how far its start moved (`seam_moved`). Board overlays refuse such a plan. The stage memo holds the blocks
 with their decisions, so a hand-edited decision is honoured on replay.
 
-### 6c. Polish (judge, opt-in)
+### 6c. Polish (judge, on by default)
 
-`stages/polish.py`, enabled by `polish = true`, runs after restructure on the kept material (the raw cuts plus the block
-cuts). Two parts, both returning cuts that the edge pass places with the rest:
+`stages/polish.py`, on unless the cook sets `polish = false`, runs after restructure on the kept material (the raw cuts plus
+the block cuts). Two source-side parts, both returning cuts that the edge pass places with the rest:
 
 - **Gap tightening** (no judge). The silence between two consecutive kept words is cut to a cap set by the boundary
   it sits on, most specific first: block boundary (`polish_gap_block`, 0.45 s), speaker change (`polish_gap_speaker`,
@@ -217,8 +217,36 @@ cuts). Two parts, both returning cuts that the edge pass places with the rest:
   Cuts have reason `polish`, a judged word-removing reason that the `judged_removals` check verifies.
 
 The stage memo holds every cut with its reason, words and votes, so a hand-edited memo is honoured on replay. With
-`polish` off, no polish key reaches the config dict, the plan provenance or any memo key, so existing cooks are unchanged.
+`polish = false`, no polish key reaches the config dict or the plan provenance, so a cook that opts out keeps its keys.
+Polish knobs stay out of every other stage's memo key (`pipeline._stage_config`): tuning polish re-keys only the polish
+stages and the plan they produce, never the structure, retake, content, pause or visuals memos.
 On a plan-only rebuild the polish judge is the one judge allowed to answer (`--plan-only`), since its memo is built there.
+
+#### Output pass (`residual.py`, rounds in `stages/polish.py`)
+
+The source transcript cannot show a stutter Scribe merged into one word ("I, I, I" comes back as one "I"), so after
+each render the pipeline transcribes the render itself and scans that transcript (`residual.scan`) for three things:
+
+- fillers: uh, um, erm, hmm, hm, mm, in any case or spelling;
+- a 1-3 word phrase said twice in a row, after normalising case and punctuation ("I, I", "it's, it's");
+- a fragment restarted: a token ending in a hyphen (or a 2-4 letter prefix) followed by a word that starts with it.
+
+Each round's findings go to the judge in one batched prompt (`vote`, `polish_votes` samples, `polish_agree` to cut),
+with about 10 s of transcript around each finding and the flagged words in double brackets. The rules are the same text
+the source pass uses (`POLISH_KINDS`, `POLISH_NEVER`). A confirmed finding maps to one main-source span
+(`residual.to_source`) and is cut with reason `polish` and `pass: output` in its provenance: the first copy and the gap
+before the kept copy, ending `OUTPUT_KEPT_PAD` before the kept word's onset. A span may cross a join that runs forward
+in the source (a gap cut sits there, and the cut runs through the removed silence). A span crossing a join that runs
+backward (a moved block) is reported and not cut. Output-pass filler cuts settle their voiced edges like source fillers
+(`edges.settle_filler_edges`); a filler the source transcript never named can still keep a tail, which the residual check reports.
+
+The rounds run up to `polish_output_rounds` (default 2, 0 disables). Each round re-renders the plan, transcribes the
+render again and stops early when a round confirms nothing. The round's memo is keyed on the cuts it builds on, so a
+plan-only rebuild replays it without transcribing. The final check `residual_disfluencies` (warn, never fatal) lists
+findings the last render still shows that the judge did not keep, with output times. The report's Polish section
+lists every round, the skipped findings, the residuals and the judged-keep list.
+
+The pass runs only when the render is transcribed. With `--no-output-asr` it is skipped, and the report says so.
 
 ### 7. Edges (deterministic)
 

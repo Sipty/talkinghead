@@ -36,7 +36,52 @@ def _polish(plan: Plan, notes: dict) -> list[str]:
     for c in disf[:15]:
         rows.append(f"| {_fmt(c.start)} | {_fmt(c.end)} | {c.provenance.get('kind', '')} | "
                     f"{c.provenance.get('votes', '')} | {' '.join(c.text.split())[:90]} |")
+    rows += [""]
+    if "output" in judged:
+        rows += _output_pass(judged["output"])
     return rows + [""]
+
+
+def _table(head: list[str], items: list[list[str]], limit: int = 15) -> list[str]:
+    rows = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    rows += ["| " + " | ".join(item) + " |" for item in items[:limit]]
+    if len(items) > limit:
+        rows.append(f"| ... {len(items) - limit} more | | | |")
+    return rows + [""]
+
+
+def _output_pass(output: dict) -> list[str]:
+    """The output pass: each round's counts, the findings it skipped, what the final render still shows, and the
+    findings the judge kept on purpose."""
+    rounds = output.get("rounds") or []
+    rows = ["### Output pass", ""]
+    if output.get("skipped"):
+        rows += [f"- skipped: {output['skipped']}", ""]
+    for r in rounds:
+        rows.append(f"- round {r.get('round')}: {r.get('findings', 0)} findings, {r.get('cut', 0)} cut, "
+                    f"{r.get('keep', 0)} judged keep, {r.get('skipped', 0)} skipped "
+                    f"({r.get('votes', '')} votes, {r.get('agree', '')} to agree)")
+    rows.append("")
+    skipped = [x for r in rounds for x in r.get("rows", []) if str(x.get("decision", "")).startswith("skipped")]
+    if skipped:
+        rows += ["Confirmed but not cut (the span could not be mapped to one main-source span):", ""]
+        rows += _table(["output time", "text", "reason"],
+                       [[_fmt(x["start"]), " ".join(str(x["heard"]).split())[:60], x["decision"]] for x in skipped])
+    residual = output.get("residual")
+    if residual is None:
+        rows += ["- residual check: not measured (the render was not transcribed)", ""]
+    elif not residual:
+        rows += ["- residual check: none left in the render's transcript outside the judged-keep list", ""]
+    else:
+        rows += [f"Residual in the final render, not judged keep ({len(residual)}):", ""]
+        rows += _table(["output time", "kind", "text"],
+                       [[_fmt(x["start"]), x["kind"], " ".join(str(x["heard"]).split())[:60]] for x in residual])
+    keep = output.get("keep") or []
+    if keep:
+        rows += [f"Judged keep, left in on purpose ({len(keep)}):", ""]
+        rows += _table(["output time", "kind", "text"],
+                       [[_fmt(x["start"]), x["kind"], " ".join(str(x["text"]).split())[:60]] for x in keep])
+    return rows
 
 
 def _plan_card(notes: dict) -> list[str]:

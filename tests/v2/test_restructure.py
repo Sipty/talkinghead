@@ -352,7 +352,8 @@ def test_a_speakerless_cook_with_restructure_off_keeps_its_prompts_keys_and_plan
              Word("Are", 2.00, 2.20, 1.0), Word("you", 2.20, 2.40, 1.0), Word("tired?", 2.40, 2.90, 1.0),
              Word("Um", 3.60, 3.90, 1.0), Word("Second", 6.00, 6.40, 1.0), Word("here.", 6.70, 7.00, 1.0),
              Word("Goodbye.", 8.00, 8.50, 1.0)]
-    cfg = Config()
+    # Polish is on by default now; the digests were captured before it existed, so this cook is a polish-off one.
+    cfg = Config(polish=False)
     table = sentence_table(words, split_pause=cfg.sentence_split_pause, burst_last=None)
 
     def h(x) -> str:
@@ -521,7 +522,7 @@ def _keep(front_for_b02: int | None = 1) -> dict:
 
 def _cfg() -> Config:
     return Config(crf=30, preset="ultrafast", votes=5, agree=4, visuals_enabled=False, restructure=True,
-                  restructure_votes=3, restructure_front=1)
+                  restructure_votes=3, restructure_front=1, polish=False)
 
 
 def test_a_reordered_cut_renders_verifies_and_replays_from_its_memo(clip: Path, tmp_path: Path) -> None:

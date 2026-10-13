@@ -21,6 +21,7 @@ import sys
 _CANDIDATES = re.compile(r"^- (\S+?):", re.M)
 _CORE_FIRST = re.compile(r"--- CORE \(start blocks here\) ---\n(S\d+) \|")
 _BLOCK_ROW = re.compile(r"^(B\d+) \|", re.M)
+_FINDING_ID = re.compile(r"^(c\d+) \(", re.M)
 
 
 def _last_candidate(prompt: str) -> str:
@@ -46,6 +47,12 @@ def answer(prompt: str) -> dict:
         return {"verdict": "keep", "why": "dry run: keep every marker"}
     if "TASK: CONTENT" in prompt:
         return {"cuts": []}
+    if "TASK: POLISH WINDOW" in prompt:
+        return {"cuts": []}
+    if "TASK: OUTPUT PASS" in prompt:
+        # Every finding the render's scan flags is kept: the dry run makes no editorial call.
+        return {"verdicts": [{"id": c, "verdict": "keep", "why": "dry run: keep every finding"}
+                             for c in _FINDING_ID.findall(prompt)]}
     if "TASK: EDITORIAL PLAN" in prompt:
         return {"central_argument": "dry run: no editorial plan", "chapters": [], "visuals": []}
     if "TASK: RESEARCH" in prompt:

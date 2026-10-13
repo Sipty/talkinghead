@@ -27,7 +27,7 @@ from .store import Cache, RunDir, sha256_file, stable_key
 from .timeline import Cut, Plan
 from .transcribe import Transcriber
 from .types import JUDGED_REASONS
-from .verify import CheckResult, collect_facts, run_checks, visuals_resolution
+from .verify import CheckResult, collect_facts, residual_findings, run_checks, visuals_resolution
 from .visuals.cards import avatar_fingerprint
 from .visuals.headclip import check_head_clip
 from .visuals.render import render_visuals
@@ -226,13 +226,19 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...] | None] = {
     "polish": ("polish_gap_block", "polish_gap_speaker", "polish_gap_sentence", "polish_gap_within",
                "polish_window_sec", "polish_context_sec", "polish_votes", "polish_agree", "polish_max_sec",
                "min_cut_sec", "sentence_split_pause"),
+    "polish_output": ("polish_votes", "polish_agree", "min_cut_sec"),
 }
 
 
 def _stage_config(ctx: Context, stage: str) -> dict:
     keys = STAGE_CONFIG_KEYS.get(stage)
     cfg = ctx.config
-    return {"config": cfg.to_dict() if keys is None else {k: getattr(cfg, k) for k in keys}}
+    if keys is None:
+        # The polish knobs (and the output pass's round count) change no other stage's output, so they stay out of
+        # every other stage's key: turning polish on or tuning it re-keys only the polish stages and their plan.
+        full = {k: v for k, v in cfg.to_dict().items() if k != "polish" and not k.startswith("polish_")}
+        return {"config": full}
+    return {"config": {k: getattr(cfg, k) for k in keys}}
 
 
 def _digest(value) -> str:
@@ -248,6 +254,15 @@ def _retake_policy() -> str:
     return _digest([inspect.getsource(fn) for fn in (
         prompts.retake_prompt, prompts.marker_prompt, prompts.marker_window, prompts.annotated_sentence_table,
     )] + [prompts.RETAKE_SCHEMA, prompts.MARKER_SCHEMA])
+
+
+def _stored_memo(run: RunDir, stage: str, inputs: dict, version: int):
+    """A stage's stored value when its key still matches `inputs`, else None. Plan-only rebuilds replay through this."""
+    path = run.memo_dir / f"{stage}.json"
+    if not path.is_file():
+        return None
+    stored = json.loads(path.read_text())
+    return stored["value"] if stored.get("key") == stable_key(inputs, version) else None
 
 
 def _words_sha(words) -> str:
@@ -407,37 +422,24 @@ def run_pipeline(
         )
         notes["polish"] = value["notes"]
         raw = raw + polish.cuts_from(value)
-    # The judged word-removing decisions as the edge pass received them: verify checks the plan keeps none.
-    judged = [(c.start, c.end, c.reason) for c in raw if c.reason in JUDGED_REASONS]
-    cuts = finalize_cuts(raw, edge_ctx)
-    plan = Plan.from_cuts(ctx.source, cuts)
-    plan, joins = refine_joins(plan, edge_ctx)
-    if config.restructure:
-        plan = restructure.reorder(plan, blocks, edge_ctx, kept_sents)
-    plan.decisions = decided
-    restructured = plan.provenance.get("blocks")
-    plan.provenance = {**ctx.provenance, "raw_cuts": len(raw), "final_cuts": len(cuts), "demo": demo_minutes,
-                       **({"audio_only": True} if audio_only else {}),
-                       **({"blocks": restructured} if restructured is not None else {})}
-    # Source time of the cold open. Under restructure's reordering the output opens on an opener, so this is
-    # a source instant only; it does not name where the hook sits in the cut.
-    if decided.get("cold_open", {}).get("start", 0.0) > 0:
-        plan.anchors["hook_start"] = float(decided["cold_open"]["start"])
-    notes["edges"] = {"raw": len(raw), "final": len(cuts), "removed_sec": round(sum(c.length for c in cuts), 2),
-                      "voice_spans": len(ctx.voices), "speech_probes": len(ctx.speech_probes),
-                      "voice_masked_non_speech": ctx.provenance.get("unclassified_voice", {}).get("masked_non_speech"),
-                      "dropped_fillers": edge_ctx.dropped_fillers, "spared_other_speaker": edge_ctx.spared_other_speaker,
-                      "refined_joins": sum(j["moved"] for j in joins)}
-    if run.superseded:
-        # A re-key replaced memos that may hold hand edits: name them and where
-        # the previous content was kept, rather than only reporting the new cut.
-        notes["memos"] = {"recomputed": ",".join(sorted(set(run.superseded))),
-                          "previous_kept_at": "stages/<stage>.superseded.json"}
-    plan_path.write_text(plan.to_json())
-    if plan_only:
-        # Offline rebuild from the memos alone: nothing is rendered or verified. The CLI hands in a judge
-        # and transcriber that refuse to be called, so a memo miss fails rather than recomputing.
-        return RunResult(plan_path, final, report_path, notes=notes)
+    # The edge pass turns the raw cuts into the plan. The output pass adds rounds of cuts: each round renders the
+    # plan so far, scans its transcript, and cuts what the judge confirms; the next round builds on that plan.
+    def assemble(cur: list[Cut]) -> tuple[Plan, list[Cut], list]:
+        cuts = finalize_cuts(cur, edge_ctx)
+        plan = Plan.from_cuts(ctx.source, cuts)
+        plan, joins = refine_joins(plan, edge_ctx)
+        if config.restructure:
+            plan = restructure.reorder(plan, blocks, edge_ctx, kept_sents)
+        plan.decisions = decided
+        restructured = plan.provenance.get("blocks")
+        plan.provenance = {**ctx.provenance, "raw_cuts": len(cur), "final_cuts": len(cuts), "demo": demo_minutes,
+                           **({"audio_only": True} if audio_only else {}),
+                           **({"blocks": restructured} if restructured is not None else {})}
+        # Source time of the cold open. Under restructure's reordering the output opens on an opener, so this is
+        # a source instant only; it does not name where the hook sits in the cut.
+        if decided.get("cold_open", {}).get("start", 0.0) > 0:
+            plan.anchors["hook_start"] = float(decided["cold_open"]["start"])
+        return plan, cuts, joins
 
     if audio_only:
         # No picture: no frame grid, no encoder settings; only the join and mastering inputs apply.
@@ -448,23 +450,96 @@ def run_pipeline(
     if demo_minutes is not None:
         settings = RenderSettings(crf=config.demo_crf, preset=config.demo_preset, scale=config.demo_scale,
                                   fps=config.fps, crossfade_sec=config.splice_crossfade_sec)
-    render_key = render_memo_key(plan, settings, audio_only=audio_only)
-    memo_path = run.root / f"{prefix}render.json"
-    memo = run.read_json(memo_path, default={})
-    if final.is_file() and memo.get("key") == render_key and not fresh:
-        render_cmd = memo.get("cmd", "")
-    else:
-        render_cmd = (render_audio_plan if audio_only else render_plan)(plan, str(final), settings)
-        run.write_json(memo_path, {"key": render_key, "cmd": render_cmd})
 
-    facts = collect_facts(plan, str(final), transcriber=transcriber if verify_output_asr else None, cache=cache,
-                          workdir=run.verify_dir,
-                          source_duration=ctx.duration, source_silences=ctx.silences,
-                          lufs_target=config.loudness_lufs, source_path=plan.sources[plan.main].path,
-                          voices=ctx.voices, speech_probes=ctx.speech_probes,
-                          config=config, env=ctx.env, floor=ctx.floor, source_words=ctx.words,
-                          scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr,
-                          judged=judged)
+    output: dict = {}
+    if config.polish:
+        if not verify_output_asr:
+            output["skipped"] = ("output ASR is off (--no-output-asr): the render was not transcribed, so the output "
+                                 "pass did not run")
+        elif config.polish_output_rounds == 0:
+            output["skipped"] = "polish_output_rounds is 0"
+    rounds_max = config.polish_output_rounds if config.polish and verify_output_asr else 0
+    cur = raw
+    applied: list[Cut] = []
+    keep: list[dict] = []
+    rounds: list[dict] = []
+    round_no = 0
+    facts: dict = {}
+    render_cmd: str | None = None
+    while True:
+        # The judged word-removing decisions as the edge pass received them: verify checks the plan keeps none.
+        judged = [(c.start, c.end, c.reason) for c in cur if c.reason in JUDGED_REASONS]
+        plan, cuts, joins = assemble(cur)
+        plan_path.write_text(plan.to_json())
+        round_inputs = {**base_inputs, **_stage_config(ctx, "polish_output"),
+                        "raw": _digest([(c.start, c.end, c.reason) for c in cur]),
+                        "blocks": _digest([(b.first, b.last, b.start, b.end, b.decision) for b in blocks]),
+                        "round": round_no + 1, "policy": polish.output_policy()}
+        if plan_only:
+            # Offline rebuild: nothing is rendered, so a round can only replay what a full run stored for this plan.
+            if round_no >= rounds_max:
+                break
+            value = _stored_memo(run, f"{prefix}polish-output-{round_no + 1}", round_inputs,
+                                 STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION))
+            if value is None:
+                output.setdefault("skipped", "plan-only: no stored output round for this plan; a full run "
+                                             "transcribes the render and stores it")
+                break
+        else:
+            render_key = render_memo_key(plan, settings, audio_only=audio_only)
+            memo_path = run.root / f"{prefix}render.json"
+            memo = run.read_json(memo_path, default={})
+            if final.is_file() and memo.get("key") == render_key and not fresh:
+                render_cmd = memo.get("cmd", "")
+            else:
+                render_cmd = (render_audio_plan if audio_only else render_plan)(plan, str(final), settings)
+                run.write_json(memo_path, {"key": render_key, "cmd": render_cmd})
+            facts = collect_facts(plan, str(final), transcriber=transcriber if verify_output_asr else None,
+                                  cache=cache, workdir=run.verify_dir,
+                                  source_duration=ctx.duration, source_silences=ctx.silences,
+                                  lufs_target=config.loudness_lufs, source_path=plan.sources[plan.main].path,
+                                  voices=ctx.voices, speech_probes=ctx.speech_probes,
+                                  config=config, env=ctx.env, floor=ctx.floor, source_words=ctx.words,
+                                  scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr,
+                                  judged=judged)
+            if round_no >= rounds_max:
+                break
+            value = run.memo(
+                f"{prefix}polish-output-{round_no + 1}", round_inputs,
+                STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION),
+                lambda: polish.output_round(ctx, plan, facts["words"], round_no + 1), fresh=fresh,
+            )
+        rounds.append({**value["notes"], "rows": value["findings"]})
+        keep.extend(value["keep"])
+        if not value["cuts"]:
+            break
+        applied += polish.output_cuts_from(value)
+        cur = raw + applied
+        round_no += 1
+    if config.polish:
+        output["rounds"] = rounds
+        output["keep"] = keep
+        notes["polish"]["output"] = output
+    # The edge pass's result of the final round.
+    notes["edges"] = {"raw": len(cur), "final": len(cuts), "removed_sec": round(sum(c.length for c in cuts), 2),
+                      "voice_spans": len(ctx.voices), "speech_probes": len(ctx.speech_probes),
+                      "voice_masked_non_speech": ctx.provenance.get("unclassified_voice", {}).get("masked_non_speech"),
+                      "dropped_fillers": edge_ctx.dropped_fillers, "spared_other_speaker": edge_ctx.spared_other_speaker,
+                      "refined_joins": sum(j["moved"] for j in joins)}
+    if run.superseded:
+        # A re-key replaced memos that may hold hand edits: name them and where
+        # the previous content was kept, rather than only reporting the new cut.
+        notes["memos"] = {"recomputed": ",".join(sorted(set(run.superseded))),
+                          "previous_kept_at": "stages/<stage>.superseded.json"}
+    if plan_only:
+        # Offline rebuild from the memos alone: nothing is rendered or verified. The CLI hands in a judge
+        # and transcriber that refuse to be called, so a memo miss fails rather than recomputing.
+        return RunResult(plan_path, final, report_path, notes=notes)
+    if config.polish:
+        # The judged-keep findings of every round, all judged on renders the final check may still see.
+        facts["disfluency_keep"] = [k["key"] for k in keep]
+        output["residual"] = residual_findings(facts)
+
     checks = run_checks(plan, facts)
     run.write_json(run.verify_dir / f"{prefix}facts.json",
                    {k: v for k, v in facts.items() if k not in ("words",)})

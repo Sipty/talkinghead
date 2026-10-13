@@ -115,7 +115,7 @@ def fingerprints() -> dict:
         "retake_policy": _retake_policy(),
         "stage_inputs": _digest(_stage_inputs(ctx, "GUIDELINES")),
         "stage_config": {s: _digest(_stage_config(ctx, s)) for s in ("structure", "retakes", "content", "pauses", "visuals")},
-        "config_dict": _digest(Config().to_dict()),
+        "config_dict": _digest(Config(polish=False).to_dict()),
         "plan": _digest(plan.to_json()),
     }
 

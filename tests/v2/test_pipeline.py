@@ -72,10 +72,10 @@ def clip(tmp_path: Path) -> Path:
 
 
 def _cfg() -> Config:
-    # Visuals off: these tests pin the CUT pipeline's contract (exact judge
-    # call counts, byte-identical plans). The overlay pass has its own test
-    # below, and its own judge calls would make these counts meaningless.
-    return Config(crf=30, preset="ultrafast", votes=5, agree=4, visuals_enabled=False)
+    # Visuals and polish off: these tests pin the CUT pipeline's contract (exact judge
+    # call counts, byte-identical plans). The overlay pass and the polish passes have their own
+    # tests, and their own judge calls would make these counts meaningless.
+    return Config(crf=30, preset="ultrafast", votes=5, agree=4, visuals_enabled=False, polish=False)
 
 
 def test_run_produces_plan_render_and_report(clip: Path, tmp_path: Path) -> None:
@@ -376,7 +376,7 @@ def test_visuals_pass_writes_a_deliverable_and_leaves_the_cut_alone(clip: Path, 
     cfg = Config(crf=30, preset="ultrafast", votes=5, agree=4,
                  visuals_enabled=True, visuals_research=False, visuals_min_hold=1.0,
                  plan_enabled=True, plan_hold=1.0, plan_open_at=0.0, plan_open_hold=1.0,
-                 visuals_min_gap=0.4)
+                 visuals_min_gap=0.4, polish=False)
     result = run_pipeline(str(clip), out, cfg, transcriber=PlanAwareTranscriber(out),
                           judge=VisualsJudge(), cache=Cache(tmp_path / "cache"),
                           guidelines="G", topic="t", assets_dir=assets)

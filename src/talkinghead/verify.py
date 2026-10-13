@@ -23,6 +23,7 @@ from .config import Config
 from .derive import pause_boundary, pause_cap
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
+from .residual import scan as scan_disfluencies
 from .store import Cache
 from .timeline import Plan, Segment
 from .transcribe import Transcriber, Transcript, Word, av_durations, prepare_audio, transcribe_cached
@@ -475,15 +476,42 @@ def visuals_resolution(base: str, out: str) -> CheckResult:
                        f"overlay render {ow}x{oh} vs cut {bw}x{bh}")
 
 
+def residual_findings(f: dict) -> list[dict] | None:
+    """The render's disfluency findings the output pass did not judge keep; None when the render was not transcribed."""
+    found = f.get("disfluency_findings")
+    if found is None:
+        return None
+    keep = set(f.get("disfluency_keep") or ())
+    return [x for x in found if x["key"] not in keep]
+
+
+def _residual_disfluencies(plan: Plan, f: dict) -> CheckResult:
+    """Fillers, repeated words and restarts the finished render still contains that the output pass did not cut.
+
+    A warning, not a failure: deliberate emphasis looks the same to the scan, and the judge keeps it.
+    """
+    found = residual_findings(f)
+    if found is None:
+        return CheckResult("residual_disfluencies", "info", True,
+                           "not measured: the render was not transcribed (output ASR disabled)")
+    if not found:
+        return CheckResult("residual_disfluencies", "warn", True,
+                           "no filler, repeated word or restart left in the render's transcript")
+    head = "; ".join(f"{x['heard']!r} at {x['start']:.2f}s ({x['kind']})" for x in found[:5])
+    return CheckResult("residual_disfluencies", "warn", False,
+                       f"{len(found)} disfluencies left in the render, not judged keep: {head}"
+                       + (" ..." if len(found) > 5 else ""))
+
+
 CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
     _duration, _av_sync, _loudness, _cold_open, _judged_removals, _clipped_words, _clipped_speech, _residual_gaps,
-    _render_silence,
+    _residual_disfluencies, _render_silence,
     _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice, _color, _resolution,
 ]
 
 AUDIO_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
     _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _clipped_words, _clipped_speech,
-    _residual_gaps,
+    _residual_gaps, _residual_disfluencies,
     _render_silence, _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice,
 ]
 
@@ -810,6 +838,8 @@ def collect_facts(
     "source-projection"` because it is an expectation, not a measurement.
     `judged` are the judges' word-removing decisions (start, end, reason): the
     `judged_removals` check fails when the plan keeps a word any of them removed.
+    `disfluency_findings` is every filler, repeat and restart the render's transcript shows (None when not
+    transcribed); the pipeline adds `disfluency_keep` once the output pass has judged its rounds.
     A transcriber that replays one fixed source response is refused as an
     output ASR: it would hand back the source's words for the edited audio."""
     config = config or Config()
@@ -858,6 +888,8 @@ def collect_facts(
         "quiet_silence_min": quiet_silence_min(config),
         "render_silences": render_silences(wav, quiet_silence_min(config)),
         "render_transcript": transcript.to_dict(),
+        # None = the render was not transcribed, so nothing in it can be scanned.
+        "disfluency_findings": None if not output_asr else [f.to_dict() for f in scan_disfluencies(words)],
         # None = the evidence was never asked for (a hand render, unit facts);
         # [] = asked for and unavailable, which the check reports as a warning.
         "source_timing": measure_source_timing(plan, render_path) if source_path else None,
