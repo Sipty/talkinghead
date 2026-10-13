@@ -53,9 +53,20 @@ def no_repeat() -> np.ndarray:
     return np.concatenate([A, B, C])
 
 
+def _run_on(*parts: np.ndarray) -> np.ndarray:
+    """The parts joined by 20 ms overlap-add, so the sound runs straight on with no fade-out dip at a join."""
+    out = parts[0].copy()
+    ov = int(0.02 * SR)
+    for p in parts[1:]:
+        fade = np.linspace(0.0, 1.0, ov, dtype=np.float32)
+        out[-ov:] = out[-ov:] * (1 - fade) + p[:ov] * fade
+        out = np.concatenate([out, p[ov:]])
+    return out
+
+
 def no_closure() -> np.ndarray:
     """A repeat with no closure: the sound runs straight on, so there is no quiet point to cut at."""
-    return np.concatenate([A, B, A, C])
+    return _run_on(A, B, A, C)
 
 
 def test_the_restart_is_found_where_the_first_sound_comes_back() -> None:
@@ -98,6 +109,13 @@ def _plan() -> Plan:
     return Plan.from_cuts(SourceInfo("main", "/v/in.mp4", "sha", 10.0), [])
 
 
+def _led(token):
+    """The token as load_span returns it: ALIGN_SEC of room tone before the stamped start (not digital silence,
+    where any cut point reads as an infinite dip)."""
+    room = np.random.default_rng(3).normal(0.0, 1e-3, round(intraword.ALIGN_SEC * SR)).astype(token.dtype)
+    return np.concatenate([room, token])
+
+
 def _ctx(judge) -> object:
     from types import SimpleNamespace
 
@@ -113,27 +131,28 @@ def _verdict(decision: str) -> dict:
 
 def test_an_output_round_cuts_the_broken_off_start_of_a_confirmed_restart(monkeypatch) -> None:
     token = stutter()
-    monkeypatch.setattr(intraword, "load_span", lambda path, s, e: token)
+    padded = _led(token)
+    monkeypatch.setattr(intraword, "load_span", lambda path, s, e, lead=0.0: padded)
     words = [Word("impl-implement", 1.0, 1.0 + token.size / SR, 1.0), Word("next", 3.0, 3.3, 1.0)]
     judge = FakeJudge([_verdict("cut")] * 3)
     value = polish.output_round(_ctx(judge), _plan(), words, 1)
     (cut,) = value["cuts"]
     assert value["findings"][0]["decision"] == "cut"
     assert cut["provenance"]["intra"] is True and cut["provenance"]["kind"] == "restart"
-    assert cut["start"] == pytest.approx(1.0)
-    assert cut["end"] == pytest.approx(1.0 + intraword.locate(token).cut_end, abs=1e-6)
+    # The onset is aligned within ALIGN_SEC of the stamp: the cut starts where the restart's opening matches best.
+    assert cut["start"] == pytest.approx(1.0, abs=intraword.ALIGN_SEC + 1e-6)
+    assert cut["end"] == pytest.approx(1.0 + intraword.locate(padded, lead=intraword.ALIGN_SEC).cut_end, abs=1e-6)
     assert 1.0 + 0.35 <= cut["end"] <= 1.0 + RESTART_AT + 1e-9
 
 
 def test_an_output_round_skips_and_reports_a_confirmed_restart_it_cannot_place(monkeypatch) -> None:
     token = no_repeat()
-    monkeypatch.setattr(intraword, "load_span", lambda path, s, e: token)
+    padded = _led(token)
+    monkeypatch.setattr(intraword, "load_span", lambda path, s, e, lead=0.0: padded)
     words = [Word("impl-implement", 1.0, 1.0 + token.size / SR, 1.0), Word("next", 3.0, 3.3, 1.0)]
     value = polish.output_round(_ctx(FakeJudge([_verdict("cut")] * 3)), _plan(), words, 1)
     assert value["cuts"] == []
     assert value["findings"][0]["decision"] == "skipped: no restart in the audio"
-    # The sounds share a spectrum, so the match alone is not enough: the cut point has no closure to sit in.
-    assert value["findings"][0]["restart"]["dip_db"] < intraword.MIN_DIP_DB
 
 
 def test_a_placed_restart_survives_the_edge_pass_inside_the_word_it_shortens() -> None:

@@ -524,20 +524,21 @@ def _place_intra(plan, f: Finding, cfg, round_no: int, votes: int, why: str) -> 
     src = residual.to_source(plan, f.start, f.end)
     if src is None:
         return None, "skipped: crosses a join", {}
-    found = intraword.locate(intraword.load_span(plan.sources[plan.main].path, src[0], src[1]))
+    found = intraword.locate(intraword.load_span(plan.sources[plan.main].path, src[0], src[1],
+                                                 lead=intraword.ALIGN_SEC), lead=intraword.ALIGN_SEC)
     if found is None:
         return None, "skipped: too short for a restart", {}
     notes = {"tau": round(src[0] + found.tau, 3), "cut_end": round(src[0] + found.cut_end, 3),
              "similarity": round(found.similarity, 3), "dip_db": round(found.dip_db, 1)}
     if not found.found:
         return None, "skipped: no restart in the audio", notes
-    end = src[0] + found.cut_end
-    if end - src[0] < cfg.min_cut_sec:
+    start, end = src[0] + found.start, src[0] + found.cut_end
+    if end - start < cfg.min_cut_sec:
         return None, "skipped: too short", notes
-    cut = Cut(src[0], end, POLISH_REASON, f.heard,
+    cut = Cut(start, end, POLISH_REASON, f.heard,
               {"pass": "output", "round": round_no, "kind": "restart", "intra": True,
                "output": [round(f.start, 3), round(f.end, 3)], "votes": votes, "why": why,
-               "span": [src[0], end], "tau": notes["tau"], "similarity": notes["similarity"]})
+               "span": [start, end], "tau": notes["tau"], "similarity": notes["similarity"]})
     return cut, "cut", notes
 
 

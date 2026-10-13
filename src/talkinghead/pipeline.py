@@ -22,6 +22,7 @@ from .judge import Judge
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
 from .report import build_report
+from .residual import same_occurrence
 from .stages import content, pauses, polish, restructure, retakes, structure
 from .store import Cache, RunDir, sha256_file, stable_key
 from .timeline import Cut, Plan
@@ -489,6 +490,7 @@ def run_pipeline(
     keep: list[dict] = []
     rounds: list[dict] = []
     round_no = 0
+    residual_swept = False
     facts: dict = {}
     render_cmd: str | None = None
     while True:
@@ -504,14 +506,18 @@ def run_pipeline(
                         "round": round_no + 1, "policy": polish.output_policy(), "render": render_key}
         if plan_only:
             # Offline rebuild: nothing is rendered, so a round can only replay what a full run stored for this plan.
-            if round_no >= rounds_max:
+            # Past the budget only the residual sweep can follow, and only if a full run stored it.
+            if round_no >= rounds_max and residual_swept:
                 break
             value = _stored_round(run, f"{prefix}polish-output-{round_no + 1}", round_inputs,
                                   STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION))
             if value is None:
-                output.setdefault("skipped", "plan-only: no stored output round for this plan; a full run "
-                                             "transcribes the render and stores it")
+                if round_no < rounds_max:
+                    output.setdefault("skipped", "plan-only: no stored output round for this plan; a full run "
+                                                 "transcribes the render and stores it")
                 break
+            if round_no >= rounds_max:
+                residual_swept = True
         else:
             memo_path = run.root / f"{prefix}render.json"
             memo = run.read_json(memo_path, default={})
@@ -534,8 +540,16 @@ def run_pipeline(
                                   config=config, env=ctx.env, floor=ctx.floor, source_words=ctx.words,
                                   scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr,
                                   judged=judged)
-            if round_no >= rounds_max:
+            # The round budget is spent once the judged rounds have run. One more round is still due when the final
+            # render shows a repeat or restart that no round ever saw (a transcript the judges did not hear): it
+            # is judged like any other, once.
+            unseen = [] if facts.get("disfluency_findings") is None else [
+                x for x in facts["disfluency_findings"]
+                if not any(same_occurrence(x, row) for r in rounds for row in r["rows"])]
+            if round_no >= rounds_max and (rounds_max == 0 or residual_swept or not unseen):
                 break
+            if round_no >= rounds_max:
+                residual_swept = True
             transcript = _digest(facts["render_transcript"])
             value = run.memo(
                 f"{prefix}polish-output-{round_no + 1}", {**round_inputs, "transcript": transcript},

@@ -190,11 +190,22 @@ def _pad(reason: str, ctx: EdgeContext) -> float:
 
 
 def removed_words(cut: Cut, words: list[RefinedWord]) -> list[RefinedWord]:
-    """Words this cut removes: none for silence/noise cuts, majority-covered ones otherwise."""
+    """Words this cut removes: none for silence/noise cuts, majority-covered ones otherwise.
+
+    An output-pass cut was confirmed on the render's transcript, so its coverage uses each word's ASR-widened extent,
+    the same extent its guards use. Measured on the refined bounds alone, a word the render still plays (its ASR end
+    runs past the refined end) counts as kept, and its guard then shrinks the cut to nothing.
+    """
     if cut.reason not in WORD_CUT_REASONS:
         return []
     out = []
+    asr = asr_guarded(cut)
     for w in words:
+        if asr and word_extent(w)[1] > word_extent(w)[0]:
+            w_start, w_end = word_extent(w)
+            if _overlap(cut.start, cut.end, w_start, w_end) / (w_end - w_start) >= REMOVE_COVERAGE:
+                out.append(w)
+            continue
         if w.end <= w.start:
             # Degenerate token refined to a point (whisper emits these): it
             # carries no audio, so any word-cut spanning its timestamp removes

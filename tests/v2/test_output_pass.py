@@ -269,3 +269,19 @@ def test_fused_output_cuts_keep_the_union_of_their_confirmed_spans() -> None:
     assert len(out) == 1
     assert out[0].start <= 3.60 + 1e-6 and out[0].end >= 5.10 - 1e-6  # "it," is removed, not kept
     assert out[0].provenance["span"] == pytest.approx([3.60, 5.12])
+
+
+def test_an_output_cut_removes_a_word_whose_asr_extent_it_covers() -> None:
+    # Shape of the "if," at 658 s: the refined bounds end at 658.22, the ASR stamp runs to 658.33, and the render
+    # plays the word over 658.24-658.43. The cut covers the ASR extent, so the word is removed and the cut is not
+    # shrunk by its guard. Measured on the refined bounds alone it removed nothing and was dropped as a sliver.
+    db = np.full(int(10.0 / FRAME_SEC), -50.0)
+    env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
+    word = RefinedWord(" if,", 3.17, 3.22, 3.17, 3.33, 1.0)
+    words = [word, RefinedWord(" if", 3.455, 3.548, 3.455, 3.548, 1.0)]
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None)
+    cut = Cut(3.237, 3.427, "polish", "if,", {"pass": "output", "span": [3.237, 3.427]})
+    out = finalize_cuts([cut], ctx)
+    assert len(out) == 1
+    assert out[0].start <= 3.17 + 1e-6 and out[0].end >= 3.33 - 1e-6  # the first "if," is gone
+    assert out[0].end <= 3.455 + 1e-6  # the second "if" is kept
