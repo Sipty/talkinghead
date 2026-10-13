@@ -17,7 +17,7 @@ from .align import AlignResult, align
 from .analysis import analyze
 from .config import Config
 from .context import Context, NeedsDecision
-from .edges import EdgeContext, finalize_cuts, refine_joins
+from .edges import EdgeContext, finalize_cuts, is_intra_restart, refine_joins
 from .judge import Judge
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
@@ -478,7 +478,7 @@ def run_pipeline(
     render_cmd: str | None = None
     while True:
         # The judged word-removing decisions as the edge pass received them: verify checks the plan keeps none.
-        judged = [(c.start, c.end, c.reason) for c in cur if c.reason in JUDGED_REASONS]
+        judged = [(c.start, c.end, c.reason) for c in cur if c.reason in JUDGED_REASONS and not is_intra_restart(c)]
         plan, cuts, joins = assemble(cur)
         plan_path.write_text(plan.to_json())
         render_key = render_memo_key(plan, settings, audio_only=audio_only)

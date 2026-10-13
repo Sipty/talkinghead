@@ -94,6 +94,16 @@ VOICE_SAFE_REASONS = frozenset({"silence", "noise", "gap"})
 # Silence placed from word stamps with fixed pads (polish.gap_cuts): the envelope steps would pull these back into
 # the words they separate, so finalize only trims them around the cuts that exist after the other steps.
 PLACED_REASONS = frozenset({"gap"})
+
+
+def is_intra_restart(c: Cut) -> bool:
+    """An output-pass cut that removes the broken-off start of one word. It lies inside a word the transcript keeps,
+    so it is placed on the audio (see intraword), not guarded against the word's edges."""
+    return c.provenance.get("intra") is True
+
+
+def _is_placed(c: Cut) -> bool:
+    return c.reason in PLACED_REASONS or is_intra_restart(c)
 # A cut this close to a placed gap takes the ASR-stamped word extent (see asr_guarded), so the pair cannot clip a word.
 ASR_GUARD_REACH = 0.5
 # A word is removed by a word-cut when at least this fraction of it is covered.
@@ -973,9 +983,9 @@ def _fit_placed(placed: list[Cut], others: list[Cut], ctx: EdgeContext) -> list[
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
-    placed = [c for c in cuts if c.reason in PLACED_REASONS]
-    cuts = [c for c in cuts if c.reason not in PLACED_REASONS]
-    cuts = mark_asr_guard(cuts, placed)
+    placed = [c for c in cuts if _is_placed(c)]
+    cuts = [c for c in cuts if not _is_placed(c)]
+    cuts = mark_asr_guard(cuts, [c for c in placed if c.reason in PLACED_REASONS])
     held = held_words(cuts, ctx.words)
     cuts = merge_cuts(cuts, ctx.duration)
     cuts = spare_other_speaker(cuts, ctx)

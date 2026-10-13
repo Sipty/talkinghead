@@ -35,7 +35,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Sequence
 
-from .. import residual
+from .. import intraword, residual
 from ..context import Context
 from ..edges import WORD_CUT_REASONS, word_extent
 from ..judge import vote
@@ -509,7 +509,36 @@ def merge_keeps(prev: list[dict], rows: list[dict], new: list[dict]) -> list[dic
 def _candidate_context(words: Sequence, f: Finding) -> str:
     if f.kind == "fragment":
         return "abandoned speech, answer with from_index: " + _fragment_context(words, f)
+    if f.split:
+        return ("a restart inside one word (the cut removes only the broken-off start, the rest of the word stays): "
+                + _context(words, f))
     return _context(words, f)
+
+
+def _place_intra(plan, f: Finding, cfg, round_no: int, votes: int, why: str) -> tuple[Cut | None, str, dict]:
+    """The cut for a confirmed restart inside one word, placed on the source audio.
+
+    Returns (cut or None, decision, notes). The cut runs from the token's start to the quiet point before the restart
+    the audio finds. A token with no convincing restart is skipped and reported, never cut on a guess.
+    """
+    src = residual.to_source(plan, f.start, f.end)
+    if src is None:
+        return None, "skipped: crosses a join", {}
+    found = intraword.locate(intraword.load_span(plan.sources[plan.main].path, src[0], src[1]))
+    if found is None:
+        return None, "skipped: too short for a restart", {}
+    notes = {"tau": round(src[0] + found.tau, 3), "cut_end": round(src[0] + found.cut_end, 3),
+             "similarity": round(found.similarity, 3), "dip_db": round(found.dip_db, 1)}
+    if not found.found:
+        return None, "skipped: no restart in the audio", notes
+    end = src[0] + found.cut_end
+    if end - src[0] < cfg.min_cut_sec:
+        return None, "skipped: too short", notes
+    cut = Cut(src[0], end, POLISH_REASON, f.heard,
+              {"pass": "output", "round": round_no, "kind": "restart", "intra": True,
+               "output": [round(f.start, 3), round(f.end, 3)], "votes": votes, "why": why,
+               "span": [src[0], end], "tau": notes["tau"], "similarity": notes["similarity"]})
+    return cut, "cut", notes
 
 
 def output_prompt(words: Sequence, found: list[Finding], topic: str | None) -> str:
@@ -528,7 +557,11 @@ def output_policy() -> str:
     """
     sources = [inspect.getsource(fn) for fn in (output_prompt, _context, output_round, residual.scan,
                                                 residual.to_source, residual.to_source_point,
-                                                residual.finding_source, residual.same_occurrence)]
+                                                residual.finding_source, residual.same_occurrence,
+                                                residual._split_restart, _place_intra, intraword.locate,
+                                                intraword._quiet_before, intraword._dip_db)]
+    sources.append(repr((intraword.MIN_SIMILARITY, intraword.MIN_DIP_DB, intraword.TAU_MIN_SEC,
+                         intraword.TAU_MAX_SEC, intraword.TAU_MAX_FRAC, intraword.SNAP_BEFORE_SEC)))
     text = "\n".join(sources + [repr(OUTPUT_SCHEMA), OUTPUT_RULES, repr((OUTPUT_CONTEXT_SEC, OUTPUT_KEPT_PAD))])
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
@@ -581,6 +614,11 @@ def output_round(ctx: Context, plan, words: Sequence, round_no: int) -> dict:
             row["decision"] = "keep"
             keep.append({"key": f.key, "text": f.heard, "start": round(f.start, 3), "kind": f.kind,
                          "source": source})
+        elif f.split:
+            placed, decision, notes = _place_intra(plan, f, cfg, round_no, votes, whys.get(cid, ""))
+            row.update(decision=decision, restart=notes)
+            if placed is not None:
+                cuts.append(placed)
         else:
             cut_f = fragment_cut(words, f, cut_from[cid]) if f.kind == "fragment" else f
             row.update(first=cut_f.first, start=cut_f.start, heard=cut_f.heard)

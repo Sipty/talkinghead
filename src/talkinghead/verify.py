@@ -12,7 +12,7 @@ import re
 import subprocess
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +21,7 @@ from .audio import Envelope
 from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
+from .edges import is_intra_restart
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
 from .residual import finding_source, same_occurrence
@@ -477,6 +478,11 @@ def visuals_resolution(base: str, out: str) -> CheckResult:
                        f"overlay render {ow}x{oh} vs cut {bw}x{bh}")
 
 
+def _word_cuts(plan: Plan) -> Plan:
+    """The plan without intra-token restarts: they cut inside a word on purpose, so they are not clipped words."""
+    return replace(plan, cuts=[c for c in plan.cuts if not is_intra_restart(c)])
+
+
 def residual_findings(f: dict) -> list[dict] | None:
     """The render's disfluency findings the output pass did not judge keep; None when the render was not transcribed.
 
@@ -901,7 +907,7 @@ def collect_facts(
         "source_timing": measure_source_timing(plan, render_path) if source_path else None,
         "unclassified_voice": unclassified_voice_facts(plan, voices, speech_probes),
         "judged_leaks": judged_leaks(plan, source_words, judged) if judged is not None else None,
-        "clipped_words": clipped_words(plan, source_words) if source_words else None,
+        "clipped_words": clipped_words(_word_cuts(plan), source_words) if source_words else None,
         "color": color_facts(source_path, render_path) if picture else None,
         # `scale` is the render's deliberate downscale (demo tier); None = native.
         "frame": {"source": list(display_size(source_path)), "render": list(display_size(render_path)),

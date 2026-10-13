@@ -51,6 +51,9 @@ class Finding:
     follows: bool
     heard: str  # the removed words as the transcript wrote them
     key: str  # identity across renders: the kind and the normalised words, so a re-render still matches
+    # A restart inside one token ("impl-implement"): the broken-off part is only part of the token, so its cut end
+    # is placed on the audio (see intraword), not at the token's own edge.
+    split: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -88,9 +91,38 @@ def _restart_at(words: Sequence, toks: list[tuple[int, str]], p: int) -> bool:
     return RESTART_STEM[0] <= len(stem) <= RESTART_STEM[1] and len(nxt) > len(stem)
 
 
+EDGE_PUNCT = ".,!?;:\"'()[]"
+
+
+def _split_restart(text: str) -> tuple[str, str] | None:
+    """The two parts of a token shaped "X-Y" where Y starts with X ("impl-implement"), normalised; else None.
+
+    Real hyphenations pass the shape too ("re-read"), so the output judge decides whether the restart is one.
+    """
+    core = text.strip().strip(EDGE_PUNCT)
+    if core.count("-") != 1 or core.startswith("-") or core.endswith("-"):
+        return None
+    x, y = (norm(part) for part in core.split("-"))
+    if not x or not y or not y.startswith(x):
+        return None
+    return x, y
+
+
 def _dashed(text: str) -> bool:
     """A token the speaker broke off with a dash ("also--", "to-"): an abandoned fragment unless it restarts."""
     return text.strip().endswith("-")
+
+
+def _split_finding(words: Sequence, toks: list[tuple[int, str]], p: int) -> Finding:
+    """A restart inside the token toks[p]: its span is the whole token, and the placement finds the cut inside it."""
+    i = toks[p][0]
+    x, y = _split_restart(words[i].text)
+    if p + 1 < len(toks):
+        end, follows = words[toks[p + 1][0]].start, True
+    else:
+        end, follows = words[i].end, False
+    return Finding("restart", i, i, words[i].start, end, follows, words[i].text.strip(), f"restart {x} {y}",
+                   split=True)
 
 
 def _finding(words: Sequence, kind: str, toks: list[tuple[int, str]], p: int, n: int) -> Finding:
@@ -111,7 +143,8 @@ def scan(words: Sequence) -> list[Finding]:
     """Every filler, repeated phrase and restart in the transcript, in time order.
 
     A repeat removes its first copy and the gap before the second copy, so chained repeats ("I, I, I") give
-    adjacent findings that do not overlap. Every dashed token that is not a restart is a fragment: its default span is
+    adjacent findings that do not overlap. A token shaped "X-Y" with Y starting with X is a restart inside one word. Every
+    dashed token that is not a restart is a fragment: its default span is
     the dashed word alone, and the output pass may widen it back to the start of the abandoned words. Words are
     compared after normalisation; punctuation-only tokens are skipped. A repeat never crosses a speaker change.
     """
@@ -132,6 +165,8 @@ def scan(words: Sequence) -> list[Finding]:
             continue
         if _restart_at(words, toks, p):
             out.append(_finding(words, "restart", toks, p, 1))
+        elif _split_restart(words[toks[p][0]].text) is not None:
+            out.append(_split_finding(words, toks, p))
         elif _dashed(words[toks[p][0]].text):
             out.append(_finding(words, "fragment", toks, p, 1))
         p += 1
