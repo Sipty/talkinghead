@@ -338,14 +338,14 @@ def test_finalize_spares_a_filler_that_would_have_swallowed_another_speakers_wor
     assert not any(c.end > 1.2 and c.start < 1.6 for c in out)
 
 
-def test_a_judged_cut_never_clips_another_speakers_word_and_still_removes_its_own() -> None:
-    # The retake's last word "so" is S0's; S1's "okay" starts inside it. The judge removed "so" (its midpoint is
-    # in the span), so the cut reaches it; the S1 word stays whole, so the cut stops before "okay" starts.
+def test_a_judged_cut_never_clips_another_speakers_word_and_gives_its_own_back_whole() -> None:
+    # The retake's last word "so" is S0's; S1's "okay" starts inside it. The judge removed "so", but no edge can
+    # leave "so" without clipping "okay", so "so" goes back whole (the fallback) and "okay" stays untouched.
     words = [_w("so", 1.0, 1.5, "S0"), _w("okay", 1.4, 2.4, "S1"), _w("yes", 3.0, 3.4, "S0")]
     out = finalize_cuts([Cut(1.0, 1.7, "retake", "so")], _edge_ctx(words))
     other = words[1]
     assert not any(c.end > other.start and c.start < other.end for c in out)
-    assert any(c.start <= 1.25 < c.end for c in out)
+    assert not any(c.end > words[0].start and c.start < words[0].end for c in out)
 
 
 def test_a_judged_cut_covering_most_of_another_speakers_word_removes_it_whole() -> None:

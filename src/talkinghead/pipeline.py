@@ -576,6 +576,7 @@ def run_pipeline(
                       "voice_spans": len(ctx.voices), "speech_probes": len(ctx.speech_probes),
                       "voice_masked_non_speech": ctx.provenance.get("unclassified_voice", {}).get("masked_non_speech"),
                       "dropped_fillers": edge_ctx.dropped_fillers, "spared_other_speaker": edge_ctx.spared_other_speaker,
+                      "fragments": edge_ctx.fragments, "given_back": len(edge_ctx.given_back),
                       "refined_joins": sum(j["moved"] for j in joins)}
     if run.superseded:
         # A re-key replaced memos that may hold hand edits: name them and where

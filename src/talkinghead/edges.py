@@ -184,6 +184,10 @@ class EdgeContext:
     # Set by take_removed_whole: fragments settled per outcome, and the removed words given back whole.
     fragments: dict = field(default_factory=dict)
     given_back: list = field(default_factory=list)
+    # Set by take_removed_whole: one record per fragment decision (word, side, outcome).
+    decisions: list = field(default_factory=list)
+    # Set by finalize_cuts: ids of the words the stage decisions remove, read by spare_other_speaker.
+    decided_words: set = field(default_factory=set)
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
@@ -988,7 +992,7 @@ def spare_other_speaker(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
             prov[SPEAKER_KEY] = target
         pad = _pad(c.reason, ctx)
         holes = _coalesce([
-            (w.start - pad, w.end + pad) for w in ctx.words
+            (w.start - pad, w.end + pad) for w in ctx.words if id(w) not in ctx.decided_words
             if w.speaker is not None and w.speaker != target and w.end > w.start
             and w.end + pad > c.start and w.start - pad < c.end
         ])
@@ -1148,6 +1152,14 @@ def _uncovered(a: float, b: float, spans: list[tuple[float, float]], starts: lis
     return [(p, q) for p, q in out if q > p]
 
 
+def _kept_fragment(a: float, b: float, spans: list[tuple[float, float]], starts: list[float],
+                   longest: float) -> bool:
+    """Whether the audio of [a, b) that no cut covers is a fragment: FRAGMENT_MIN_SEC and FRAGMENT_SHARE in total,
+    summed over both sides. Matches verify's cut_word_fragments."""
+    kept = sum(q - p for p, q in _uncovered(a, b, spans, starts, longest))
+    return kept >= FRAGMENT_MIN_SEC and kept > FRAGMENT_SHARE * (b - a)
+
+
 def _quietest(ctx: EdgeContext, lo: float, hi: float, *, late: bool) -> tuple[float, float] | None:
     """(time, contrast dB) of the envelope minimum over [lo, hi]; among equal minima the latest (or earliest) frame."""
     db = ctx.env.db
@@ -1170,18 +1182,58 @@ def _grid(t: float, fps: float | None, *, up: bool) -> float:
     return (math.ceil(t * fps - 1e-6) if up else math.floor(t * fps + 1e-6)) / fps
 
 
+OUTWARD_SEC = 0.5
+
+
+def _quiet_outside(lo: float, hi: float, ctx: EdgeContext, *, late: bool) -> float | None:
+    """A quiet point in [lo, hi] for a cut edge beside a removed word with no kept word on that side, else None.
+
+    The quietest frame (the latest among ties when `late`, nearest the word) must lie within quiet_above_floor_db
+    of the noise floor.
+    """
+    lo, hi = max(0.0, lo), min(ctx.duration, hi)
+    found = _quietest(ctx, lo, hi, late=late)
+    if found is None:
+        return None
+    t = found[0]
+    if float(ctx.env.db[min(len(ctx.env.db) - 1, int(t / ctx.env.frame_sec))]) > ctx.floor + ctx.quiet_above_floor_db:
+        return None
+    return _grid(t, ctx.fps, up=not late)
+
+
+def _overlap_edge(hit: list, p: float, q: float, *, tail: bool, speaker) -> tuple[str, float | None]:
+    """A kept word overlaps the uncovered fragment [p, q) of a removed word.
+
+    The edge moves to the removed word's own edge (p for a head cut, q for a tail cut) when the kept word's refined
+    audio is clear of the removed word and the overlap is within KEPT_CLIP_SHARE of the kept word's extent.
+    Another speaker's word, or no clean boundary, gives the word back.
+    """
+    if any(k.speaker != speaker for k in hit):
+        return "fail", None
+    for k in hit:
+        a, b = word_extent(k)
+        if tail and (k.start < q - 1e-3 or q - a > KEPT_CLIP_SHARE * (b - a)):
+            return "fail", None
+        if not tail and (k.end > p + 1e-3 or b - p > KEPT_CLIP_SHARE * (b - a)):
+            return "fail", None
+    return "overlap", (q if tail else p)
+
+
 def _tail_edge(p: float, r: RefinedWord, kept: list, kstarts: list[float],
                ctx: EdgeContext) -> tuple[str, float | None]:
     """(kind, t) for a cut whose edge sits at p inside removed word r, given the kept word that follows r.
 
-    kind "leave": no kept word touches r's tail, or one overlaps it; kind "fail": no clear boundary (t is None).
+    kind "quiet" when no kept word lies on this side, "overlap" or "gap"/"touch" for a boundary; kind "fail" when
+    the boundary is not clear or would clip too much (t is None).
     """
     q = word_extent(r)[1]
-    if any(a < q and b > p for a, b, _ in kept):
-        return "leave", None
+    hit = [k for a, b, k in kept if a < q and b > p]
+    if hit:
+        return _overlap_edge(hit, p, q, tail=True, speaker=r.speaker)
     j = bisect_left(kstarts, q - 1e-9)
     if j >= len(kept):
-        return "leave", None
+        t = _quiet_outside(q, q + OUTWARD_SEC, ctx, late=False)
+        return ("quiet", t) if t is not None else ("fail", None)
     ka, kb, k = kept[j]
     if ka - q >= BOUNDARY_GAP_SEC:
         kind = "gap"
@@ -1201,11 +1253,13 @@ def _head_edge(q: float, r: RefinedWord, kept: list, kends: list[float],
                ctx: EdgeContext) -> tuple[str, float | None]:
     """(kind, t) for a cut whose edge sits at q inside removed word r, given the kept word that precedes r."""
     p = word_extent(r)[0]
-    if any(a < q and b > p for a, b, _ in kept):
-        return "leave", None
+    hit = [k for a, b, k in kept if a < q and b > p]
+    if hit:
+        return _overlap_edge(hit, p, q, tail=False, speaker=r.speaker)
     j = bisect_right(kends, p + 1e-9) - 1
     if j < 0:
-        return "leave", None
+        t = _quiet_outside(p - OUTWARD_SEC, p, ctx, late=True)
+        return ("quiet", t) if t is not None else ("fail", None)
     ka, kb, k = kept[j]
     if p - kb >= BOUNDARY_GAP_SEC:
         kind = "gap"
@@ -1236,9 +1290,9 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
     A fragment is a removed word with at least FRAGMENT_SHARE and FRAGMENT_MIN_SEC still in the output, beside a kept
     word it touches. Its cut edge moves to a boundary found in the audio. A boundary that is not clear, that would clip
     the kept word beyond KEPT_CLIP_SHARE, or that leaves a fragment, gives the word back. A word with no kept word on
-    that side, or with one overlapping it, is left alone: mid-word valleys are not this step's.
+    that side moves its edge to a quiet point outside it. Mid-word valleys are not this step's.
     """
-    stats = {"gap": 0, "touch": 0, "given_back": 0, "uncut": 0, "left": 0}
+    stats = {"gap": 0, "touch": 0, "given_back": 0, "uncut": 0, "quiet": 0, "overlap": 0}
     kept = sorted(((a, b, w) for w in ctx.words if id(w) not in decided for a, b in [word_extent(w)] if b > a),
                   key=lambda t: t[0])
     kstarts = [a for a, _, _ in kept]
@@ -1258,8 +1312,8 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
     for r in removed:
         a, b = word_extent(r)
         for _ in range(4):
-            frags = [(p, q) for p, q in _uncovered(a, b, spans, starts, longest)
-                     if q - p >= FRAGMENT_MIN_SEC and q - p > FRAGMENT_SHARE * (b - a)]
+            frags = [(p, q) for p, q in _uncovered(a, b, spans, starts, longest)] \
+                if _kept_fragment(a, b, spans, starts, longest) else []
             if not frags:
                 break
             p, q = frags[0]
@@ -1269,34 +1323,52 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
             i_head = next((i for i in settleable if abs(cuts_l[i].start - q) < 1e-6 and cuts_l[i].end > q), None)
             if i_tail is None and i_head is None:
                 stats["uncut"] += 1
+                ctx.decisions.append({"word": r.text, "start": round(a, 3), "end": round(b, 3), "side": "none",
+                                      "frag": [round(p, 3), round(q, 3)], "outcome": "uncut"})
                 break
             tail = i_tail is not None
             i = i_tail if tail else i_head
             c = cuts_l[i]
             kind, t = _tail_edge(p, r, kept, kstarts, ctx) if tail else _head_edge(q, r, kept, kends, ctx)
-            if kind == "leave":
-                stats["left"] += 1
-                break
             if t is not None:
                 moved = (Cut(c.start, t, c.reason, c.text, dict(c.provenance)) if tail
                          else Cut(t, c.end, c.reason, c.text, dict(c.provenance)))
                 cuts_l[i] = moved
                 spans, starts, longest = cover()
-                if not any(q2 - p2 >= FRAGMENT_MIN_SEC and q2 - p2 > FRAGMENT_SHARE * (b - a)
-                           for p2, q2 in _uncovered(a, b, spans, starts, longest)):
+                if not _kept_fragment(a, b, spans, starts, longest):
                     stats[kind] += 1
+                    ctx.decisions.append({"word": r.text, "start": round(a, 3), "end": round(b, 3), "side": "tail" if tail else "head",
+                                          "frag": [round(p, 3), round(q, 3)], "outcome": kind, "edge": round(t, 3)})
                     break
             cuts_l[i] = _give_back(c, r, tail, ctx)
             given.append((round(r.start, 6), round(r.end, 6)))
             stats["given_back"] += 1
+            ctx.decisions.append({"word": r.text, "start": round(a, 3), "end": round(b, 3), "side": "tail" if tail else "head",
+                                  "frag": [round(p, 3), round(q, 3)], "outcome": "given", "reason_kind": kind})
             spans, starts, longest = cover()
             break
+    # A decided word that keeps (nearly) all its audio is a fallback when no other speaker's word overlaps it: the
+    # cut was lost (keep_words_whole, or a give-back already counted). Recorded, so the count matches verify's.
+    spans, starts, longest = cover()
+    for r in removed:
+        a, b = word_extent(r)
+        key = (round(r.start, 6), round(r.end, 6))
+        if key in given or b <= a:
+            continue
+        if sum(q2 - p2 for p2, q2 in _uncovered(a, b, spans, starts, longest)) < 0.9 * (b - a):
+            continue
+        given.append(key)
+        stats["given_back"] += 1
+        ctx.decisions.append({"word": r.text, "start": round(a, 3), "end": round(b, 3), "side": "none",
+                              "frag": [round(a, 3), round(b, 3)], "outcome": "given"})
     ctx.fragments = stats
     ctx.given_back = given
     return [c for c in cuts_l if c is not None]
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.given_back = []
+    ctx.decisions = []
     decided = _decided_removed(cuts, ctx.words)
+    ctx.decided_words = decided
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
     placed = [c for c in cuts if _is_placed(c) or _is_token_fragment(c, ctx.words)]
