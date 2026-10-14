@@ -302,3 +302,20 @@ def test_a_cut_after_an_acoustically_disjoint_kept_word_never_removes_that_word(
     out = finalize_cuts([cut], ctx)
     for c in out:
         assert not (c.start < 1.10 and c.end > 1.00), "a kept neighbour's refined audio was cut"
+
+
+def test_a_broken_off_fragment_removes_only_its_part_of_the_source_token() -> None:
+    # Shape of "impl-" in "imple-implement" (247.3-248.2 in a real cook): the render shows the fragment, so the output
+    # pass confirms a restart whose span covers only the first half of the source token, and that span ends just past
+    # the token's midpoint. The rest of the token is the kept restart; the cut must stay inside its span.
+    db = np.full(int(10.0 / FRAME_SEC), -50.0)
+    env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
+    words = [RefinedWord(" you", 0.98, 1.145, 0.98, 1.28, 1.0),
+             RefinedWord(" imple-implement", 1.305, 2.16, 1.34, 2.16, 1.0),
+             RefinedWord(" all", 2.28, 2.36, 2.28, 2.36, 1.0)]
+    ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None)
+    cut = Cut(1.353, 1.743, "polish", "impl-", {"pass": "output", "kind": "restart", "span": [1.353, 1.743]})
+    out = finalize_cuts([cut], ctx)
+    assert len(out) == 1
+    assert out[0].start >= 1.34 - 1e-6 and out[0].end <= 1.76, out  # the fragment, not the whole token
+    assert all(c.end <= 1.76 or c.start >= 2.16 for c in out), "the kept restart was removed"

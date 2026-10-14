@@ -28,7 +28,7 @@ Order matters and each step is a pure function:
                     between them fuse (a rapid-cut pileup reads as a glitch)
 12. snap_to_frames  edges onto the video frame grid, shrinking, so segments
                     are whole frames and audio/video cannot drift
-13. hold_judged     every word a judged cut removes (midpoint test) stays removed: a word the
+13. hold_judged     every word a judged cut removes (coverage test) stays removed: a word the
                     edge steps left uncovered is added as a cut of its own extent
 14. flow_guard      again: slivers the hold left between cuts fuse
 15. settle_filler_edges  short filler cuts still on voiced audio: the voiced run is
@@ -67,8 +67,8 @@ real source in front of it: the end moves back through quiet audio only, and nev
 
 A judged cut (`JUDGED_REASONS`: cold-open, outro, tangent, lead-in, retake, content) is a decision about
 the words in its span, so the whole span goes: no split around a laugh, a voice or any other event inside
-it, and no other cut may shrink it. Only its two edges take the refinement above. Every word whose midpoint
-the judge put in the span is therefore removed, which `verify` checks (judged_removals).
+it, and no other cut may shrink it. Only its two edges take the refinement above. Every word the judge's span
+covers (`judged_removes`) is therefore removed, which `verify` checks (judged_removals).
 """
 
 from __future__ import annotations
@@ -80,6 +80,7 @@ from dataclasses import dataclass, field, replace
 from .audio import Envelope, RefinedWord
 from .derive import pause_boundary
 from .joins import EDGE_CUT_MATCH_SEC, EDGE_VOICED_ABOVE_FLOOR_DB, edge_state
+from .residual import _split_restart
 from .timeline import MIN_CUT, Cut, Plan, Segment, fuse_into, merge_cuts
 from .types import JUDGED_REASONS, MECHANICAL_REASONS
 
@@ -772,10 +773,22 @@ def flow_guard(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     return out
 
 
+def judged_removes(start: float, end: float, w) -> bool:
+    """Whether a judged cut over [start, end) removes the word `w` (any object with start and end).
+
+    The test is coverage, the same one `removed_words` uses, and verify's judged-leak check uses it too. A midpoint
+    test lets a cut that only grazes a word's middle take the whole word: a broken-off fragment ("impl-") ends just
+    past the middle of the token it sits in ("imple-implement"), and the midpoint rule then removed the kept restart.
+    """
+    if w.end <= w.start:
+        return start <= w.start <= end
+    return _overlap(start, end, w.start, w.end) / (w.end - w.start) >= REMOVE_COVERAGE
+
+
 def held_words(raw: list[Cut], words: list[RefinedWord]) -> list[Cut]:
     """Each word a judged cut removes, as a cut over the word's own extent, taken from the judges' raw decisions.
 
-    A word is removed by a judged cut when its midpoint lies in that cut's span: the same test the
+    A word is removed by a judged cut when the cut covers it (`judged_removes`): the same test the
     verify check uses. Degenerate (zero-length) words carry no audio and are not held.
     """
     judged = [c for c in raw if c.reason in JUDGED_REASONS]
@@ -783,9 +796,8 @@ def held_words(raw: list[Cut], words: list[RefinedWord]) -> list[Cut]:
     for w in words:
         if w.end <= w.start:
             continue
-        mid = (w.start + w.end) / 2
         for c in judged:
-            if c.start <= mid < c.end:
+            if judged_removes(c.start, c.end, w):
                 out.append(Cut(w.start, w.end, c.reason, c.text, dict(c.provenance)))
                 break
     return out
@@ -794,9 +806,9 @@ def held_words(raw: list[Cut], words: list[RefinedWord]) -> list[Cut]:
 def hold_judged(cuts: list[Cut], held: list[Cut], duration: float, fps: float | None = None) -> list[Cut]:
     """Judged decisions win over the edge pass: every word a judged cut removes stays removed.
 
-    A word counts as removed while its midpoint is inside a cut (the same test as `held_words` and the
+    A word counts as removed while a cut covers it (`judged_removes`: the same test as `held_words` and the
     verify check). The edge steps move a judged cut's edges through quiet and kept-word pads, and a guard
-    or cross-talk rule can pull an edge in past a removed word's midpoint. Each word that is left
+    or cross-talk rule can pull an edge in past a removed word's coverage. Each word that is left
     uncovered is put back as a cut of its own extent, on the frame grid when there is one (outward, so
     the cut still reaches the word). Kept audio beside it is trimmed by that much. A word still covered
     keeps the edge the valley search chose, so mid-word valley edges are unchanged.
@@ -998,10 +1010,22 @@ def _fit_placed(placed: list[Cut], others: list[Cut], ctx: EdgeContext) -> list[
     return [c for c in out if c.length >= ctx.min_cut]
 
 
+def _is_token_fragment(c: Cut, words: list[RefinedWord]) -> bool:
+    """An output-pass restart that is a broken-off part of one restart-shaped source token.
+
+    The render shows the fragment ("impl-") but the source has the whole token ("imple-implement"), so the cut
+    covers only part of that token's audio. Like a placed restart it keeps its span: the token's other half is speech.
+    """
+    if c.provenance.get("pass") != "output" or c.provenance.get("kind") != "restart":
+        return False
+    return any(w.start - 1e-6 <= c.start and c.end <= w.end + 1e-6 and _split_restart(w.text) is not None
+               for w in words)
+
+
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
-    placed = [c for c in cuts if _is_placed(c)]
+    placed = [c for c in cuts if _is_placed(c) or _is_token_fragment(c, ctx.words)]
     cuts = [c for c in cuts if not _is_placed(c)]
     cuts = mark_asr_guard(cuts, [c for c in placed if c.reason in PLACED_REASONS])
     held = held_words(cuts, ctx.words)

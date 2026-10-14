@@ -241,7 +241,7 @@ in the source (a gap cut sits there, and the cut runs through the removed silenc
 backward (a moved block) is reported and not cut. Output-pass filler cuts settle their voiced edges like source fillers
 (`edges.settle_filler_edges`); a filler the source transcript never named can still keep a tail, which the residual check reports.
 
-A fragment restarted inside one token ("impl-implement") is placed on the source audio, not the render. `intraword.locate` aligns the token's onset within `ALIGN_SEC` (80 ms) of Scribe's stamp, since the stamp can start and end tens of milliseconds off the sound. It then takes the restart as the candidate whose onset matches best (similarity at least `MIN_SIMILARITY`, 0.90) among those whose cut point is a closure at least `MIN_DIP_DB` (8 dB) below the loudest frame before it. A token that does not qualify is skipped, and the report says why: `skipped: no restart in the audio` (the match or the closure failed), `skipped: too short for a restart`, `skipped: crosses a join`, or `skipped: too short` (the cut would be below `min_cut_sec`). A skipped finding stays in the residual list.
+A fragment restarted inside one token ("impl-implement") is placed on the source audio, not the render. `intraword.locate` aligns the token's onset within `ALIGN_SEC` (80 ms) of Scribe's stamp, since the stamp can start and end tens of milliseconds off the sound. It then takes the restart as the candidate whose onset matches best (similarity at least `MIN_SIMILARITY`, 0.90) among those whose cut point is a closure at least `MIN_DIP_DB` (8 dB) below the loudest frame before it. A token that does not qualify is skipped, and the report says why: `skipped: no restart in the audio` (the match or the closure failed), `skipped: too short for a restart`, `skipped: crosses a join`, or `skipped: too short` (the cut would be below `min_cut_sec`). A skipped finding stays in the residual list. A broken-off fragment the output pass confirms ("impl-" in the render) keeps its confirmed span in the source token: the rest of the token is kept speech, never removed with the fragment.
 
 These thresholds were set on one recording: four of its five stutters pass with their numbers steady across stamp offsets, the fifth is not placed, and about one ordinary word in ten also passes the onset test. A placement therefore needs Scribe's X-Xy token and the judge's confirmation first. Nothing guarantees that every stutter is removed or that no word is clipped: read the residual list and the placed cuts in the report.
 
@@ -307,8 +307,8 @@ trimmed by a silence, filler, noise or join cut. A judged cut (`JUDGED_REASONS`:
 lead-in, retake, content) is different: its span is a decision, so an event inside it goes too, and only its
 two edges are refined. Cut fusion and frame snapping cannot bridge or trim the protected intervals of mechanical cuts.
 
-A judged decision is also held: `hold_judged` puts back any word a judged cut removes (by midpoint, the same
-test the `judged_removals` verify check uses) whose midpoint an edge step had pulled out of the span. Fusing
+A judged decision is also held: `hold_judged` puts back any word a judged cut removes (by coverage: the cut covers at
+least half the word's audio, the same test the `judged_removals` verify check uses) that an edge step had pulled out of the span. Fusing
 cuts never loses a judged reason to a mechanical cut that comes first.
 
 

@@ -21,7 +21,7 @@ from .audio import Envelope
 from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
-from .edges import is_intra_restart
+from .edges import is_intra_restart, judged_removes
 from .isolate import LAG_MIN_STRONG, timing_audio
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
@@ -124,7 +124,7 @@ def judged_leaks(plan: Plan, words: Sequence, judged: Sequence[tuple[float, floa
     """Transcript words the plan keeps although a judged cut removed them.
 
     `judged` are the judges' word-removing decisions as (start, end, reason) on the main source. A word
-    is removed by a decision when its midpoint lies in the decision's span; the plan keeps it when its
+    is removed by a decision when the decision covers most of it (`judged_removes`); the plan keeps it when its
     midpoint lies in a kept segment of the main source. Empty when the plan honours every decision.
     """
     kept = sorted((s.start, s.end) for s in plan.segments if s.source == plan.main)
@@ -132,7 +132,7 @@ def judged_leaks(plan: Plan, words: Sequence, judged: Sequence[tuple[float, floa
     out: list[dict] = []
     for w in words:
         mid = (w.start + w.end) / 2
-        reason = next((r for a, b, r in judged if a <= mid < b), None)
+        reason = next((r for a, b, r in judged if judged_removes(a, b, w)), None)
         if reason is None:
             continue
         i = bisect_right(starts, mid) - 1
