@@ -74,7 +74,7 @@ covers (`judged_removes`) is therefore removed, which `verify` checks (judged_re
 from __future__ import annotations
 
 import math
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field, replace
 
 from .audio import Envelope, RefinedWord
@@ -1022,7 +1022,96 @@ def _is_token_fragment(c: Cut, words: list[RefinedWord]) -> bool:
                for w in words)
 
 
+def _window(spans: list[tuple[float, float]], starts: list[float], longest: float, lo: float,
+           hi: float) -> list[tuple[float, float]]:
+    """The sorted spans overlapping [lo, hi): `starts` are the spans' starts, `longest` the longest span."""
+    out: list[tuple[float, float]] = []
+    i = bisect_left(starts, lo - longest)
+    while i < len(spans) and spans[i][0] < hi:
+        if spans[i][1] > lo:
+            out.append(spans[i])
+        i += 1
+    return out
+
+
+def _decided_removed(cuts: list[Cut], words: list[RefinedWord]) -> set[int]:
+    """Ids of the words the stage decisions remove: covered by a word-removing cut (judged_removes)."""
+    ordered = sorted(words, key=lambda w: w.start)
+    starts = [w.start for w in ordered]
+    longest = max((w.end - w.start for w in ordered), default=0.0)
+    decided: set[int] = set()
+    for c in cuts:
+        if c.reason not in WORD_CUT_REASONS | JUDGED_REASONS:
+            continue
+        for w in ordered[bisect_left(starts, c.start - longest):bisect_right(starts, c.end)]:
+            if judged_removes(c.start, c.end, w):
+                decided.add(id(w))
+    return decided
+
+
+def _split_around(pieces: list[tuple[float, float]], a: float, b: float,
+                  pad: float) -> list[tuple[float, float]]:
+    """`pieces` with the kept word [a, b) taken out: each edge that lands inside it moves to its far side plus pad,
+    and a piece that covers it is split in two."""
+    out: list[tuple[float, float]] = []
+    for s, e in pieces:
+        if e <= s or e <= a or s >= b:
+            if e > s:
+                out.append((s, e))
+        elif s < a and e > b:
+            out += [(s, a - pad), (b + pad, e)]
+        elif s >= a and e <= b:
+            continue
+        elif s < a:
+            out.append((s, a - pad))
+        else:
+            out.append((b + pad, e))
+    return out
+
+
+def keep_words_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> list[Cut]:
+    """Last edge step: no cut edge lies inside a kept word.
+
+    A kept word is one the stage decisions did not remove; its extent is word_extent (the ASR stamp widened by the
+    refined bounds). A cut that takes part of one gives that part back: an edge moves to the word's boundary on the
+    cut's side plus the cut's pad, and a cut that covers the word is split around it. An output-pass cut claims a
+    kept word only where its refined audio meets the cut (see _guard_extent). Mid-word valley edges on removed words
+    are left alone (hold_judged), and intra-token restarts keep their span: they cut inside a kept token on purpose.
+    """
+    kept = sorted(ext for ext in (word_extent(w) for w in ctx.words if id(w) not in decided) if ext[1] > ext[0])
+    refined = sorted((w.start, w.end) for w in ctx.words if id(w) not in decided and w.end > w.start)
+    if not kept:
+        return cuts
+    kstarts = [a for a, _ in kept]
+    kmax = max(b - a for a, b in kept)
+    rfstarts = [a for a, _ in refined]
+    rfmax = max((b - a for a, b in refined), default=0.0)
+    out: list[Cut] = []
+    for c in cuts:
+        if is_intra_restart(c) or _is_token_fragment(c, ctx.words):
+            out.append(c)
+            continue
+        s, e = c.start, c.end
+        if _is_output_cut(c):
+            near = _window(refined, rfstarts, rfmax, s, e)
+        else:
+            near = _window(kept, kstarts, kmax, s, e)
+        pad = _pad(c.reason, ctx)
+        pieces = [(s, e)]
+        for _ in range(4):
+            before = pieces
+            for a, b in near:
+                pieces = _split_around(pieces, a, b, pad)
+            if pieces == before:
+                break
+        for x, y in pieces:
+            if y - x > ctx.min_cut:
+                out.append(Cut(x, y, c.reason, c.text, dict(c.provenance)))
+    return out
+
+
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    decided = _decided_removed(cuts, ctx.words)
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
     placed = [c for c in cuts if _is_placed(c) or _is_token_fragment(c, ctx.words)]
@@ -1051,7 +1140,8 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     cuts = settle_filler_edges(cuts, ctx)
     cuts = spare_other_speaker(cuts, ctx)
     cuts = merge_cuts(cuts, ctx.duration)
-    return merge_cuts(cuts + _fit_placed(placed, cuts, ctx), ctx.duration)
+    out = merge_cuts(cuts + _fit_placed(placed, cuts, ctx), ctx.duration)
+    return keep_words_whole(out, ctx, decided)
 
 
 REFINED_JOINS = "refined_joins"

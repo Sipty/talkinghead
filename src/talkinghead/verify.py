@@ -21,7 +21,7 @@ from .audio import Envelope
 from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
-from .edges import is_intra_restart, judged_removes
+from .edges import WORD_CUT_REASONS, is_intra_restart, judged_removes, word_extent
 from .isolate import LAG_MIN_STRONG, timing_audio
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
@@ -30,6 +30,7 @@ from .residual import scan as scan_disfluencies
 from .store import Cache
 from .timeline import Plan, Segment
 from .transcribe import Transcriber, Transcript, Word, av_durations, prepare_audio, transcribe_cached
+from .types import JUDGED_REASONS
 
 FIRST_WORD_MAX = 0.5
 AV_SYNC_TOL = 0.2
@@ -142,26 +143,52 @@ def judged_leaks(plan: Plan, words: Sequence, judged: Sequence[tuple[float, floa
     return out
 
 
-# A transcript word is clipped when cuts take more than CLIP_MIN and less than CLIP_MAX of its ASR audio: a cut
-# edge lies inside the word. A word wholly removed or wholly kept is not clipped.
-CLIP_MIN = 0.10
-CLIP_MAX = 0.90
+# A kept transcript word may lose at most this share of its extent to cuts (the clipped_words check).
+CLIP_KEPT_SHARE = 0.10
 
 
-def clipped_words(plan: Plan, words: Sequence) -> list[dict]:
-    """Transcript words (any speaker, ASR stamps) that a cut takes part of, with the cut reasons covering them."""
-    kept = sorted((s.start, s.end) for s in plan.segments if s.source == plan.main)
+def clipped_words(plan: Plan, words: Sequence,
+                   removing: Sequence[tuple[float, float, str]] | None = None) -> list[dict]:
+    """Kept transcript words that cuts take more than CLIP_KEPT_SHARE of.
+
+    A word is kept when the stages did not remove it: no word-removing decision in `removing` (start, end, reason)
+    covers it (judged_removes). Without `removing` the plan's own word-removing cuts stand in, which can read a word
+    whose removal the edge chain shortened as kept. Its extent is the ASR stamp widened by the refined bounds
+    (word_extent), so a short refined bound cannot hide the stamp's tail.
+    """
+    if removing is None:
+        removing = [(c.start, c.end, c.reason) for c in plan.cuts if c.reason in WORD_CUT_REASONS | JUDGED_REASONS]
+    decisions = sorted(removing)
+    d_starts = [s for s, _, _ in decisions]
+    d_long = max((e - s for s, e, _ in decisions), default=0.0)
+    cuts = sorted(plan.cuts, key=lambda c: c.start)
+    starts = [c.start for c in cuts]
+    longest = max((c.end - c.start for c in cuts), default=0.0)
     out: list[dict] = []
     for w in words:
-        s, e = getattr(w, "asr_start", w.start), getattr(w, "asr_end", w.end)
-        if e <= s:
+        a, b = word_extent(w)
+        if b <= a:
             continue
-        kept_share = sum(max(0.0, min(e, b) - max(s, a)) for a, b in kept) / (e - s)
-        share = 1.0 - min(1.0, kept_share)
-        if CLIP_MIN < share < CLIP_MAX:
-            reasons = sorted({c.reason for c in plan.cuts if c.start < e and c.end > s})
-            out.append({"text": w.text, "start": round(s, 3), "end": round(e, 3), "cut": round(share, 3),
-                        "reasons": reasons, "speaker": getattr(w, "speaker", None)})
+        lo, hi = min(a, w.start), max(b, w.end)
+        i = bisect_left(d_starts, lo - d_long)
+        decided = False
+        while i < len(decisions) and decisions[i][0] < hi:
+            if decisions[i][1] > lo and judged_removes(decisions[i][0], decisions[i][1], w):
+                decided = True
+                break
+            i += 1
+        if decided:
+            continue
+        hit: list = []
+        i = bisect_left(starts, a - longest)
+        while i < len(cuts) and cuts[i].start < b:
+            if cuts[i].end > a:
+                hit.append(cuts[i])
+            i += 1
+        share = sum(min(b, c.end) - max(a, c.start) for c in hit) / (b - a)
+        if share > CLIP_KEPT_SHARE:
+            out.append({"text": w.text, "start": round(a, 3), "end": round(b, 3), "cut": round(share, 3),
+                        "reasons": sorted({c.reason for c in hit}), "speaker": getattr(w, "speaker", None)})
     return out
 
 
@@ -247,37 +274,19 @@ def _judged_removals(plan: Plan, f: dict) -> CheckResult:
 
 
 def _clipped_words(plan: Plan, f: dict) -> CheckResult:
-    """No placed gap cut takes part of a transcript word: silence between words never clips the word it separates.
-
-    Other cuts that take part of a word are reported as a warning (_clipped_speech): ASR stamps overlap for repeated
-    words and run long at word ends, so a judged removal can legitimately meet one.
-    """
+    """No kept transcript word loses more than CLIP_KEPT_SHARE of its extent to a cut: an eaten word is a defect."""
     clipped = f.get("clipped_words")
     if clipped is None:
         return CheckResult("clipped_words", "fatal", True, "not measured: no source transcript was given")
-    placed = [x for x in clipped if "gap" in x["reasons"]]
-    if not placed:
-        return CheckResult("clipped_words", "fatal", True, "no placed gap cut takes part of a transcript word")
+    if not clipped:
+        return CheckResult("clipped_words", "fatal", True,
+                           f"no kept transcript word loses more than {CLIP_KEPT_SHARE:.0%} to a cut")
     head = "; ".join(f"{x['text']!r} {x['start']:.2f}-{x['end']:.2f}s, {x['cut']:.0%} cut by {'/'.join(x['reasons'])}"
-                     for x in placed[:5])
+                     for x in clipped[:5])
     return CheckResult("clipped_words", "fatal", False,
-                       f"{len(placed)} transcript words partly cut by placed gaps: {head}"
-                       + (" ..." if len(placed) > 5 else ""))
+                       f"{len(clipped)} kept transcript words cut beyond {CLIP_KEPT_SHARE:.0%}: {head}"
+                       + (" ..." if len(clipped) > 5 else ""))
 
-
-def _clipped_speech(plan: Plan, f: dict) -> CheckResult:
-    """Words partly cut by word-removing cuts (silence and noise excluded): a warning with the count."""
-    clipped = f.get("clipped_words")
-    if clipped is None:
-        return CheckResult("clipped_speech", "warn", True, "not measured: no source transcript was given")
-    other = [x for x in clipped if "gap" not in x["reasons"] and set(x["reasons"]) - {"silence", "noise"}]
-    if not other:
-        return CheckResult("clipped_speech", "warn", True, "no word-removing cut takes part of a transcript word")
-    head = "; ".join(f"{x['text']!r} {x['start']:.2f}s, {x['cut']:.0%} cut by {'/'.join(x['reasons'])}"
-                     for x in other[:5])
-    return CheckResult("clipped_speech", "warn", False,
-                       f"{len(other)} transcript words partly cut by word-removing cuts: {head}"
-                       + (" ..." if len(other) > 5 else ""))
 
 
 
@@ -520,13 +529,13 @@ def _residual_disfluencies(plan: Plan, f: dict) -> CheckResult:
 
 
 CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
-    _duration, _av_sync, _loudness, _cold_open, _judged_removals, _clipped_words, _clipped_speech, _residual_gaps,
+    _duration, _av_sync, _loudness, _cold_open, _judged_removals, _clipped_words, _residual_gaps,
     _residual_disfluencies, _render_silence,
     _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice, _color, _resolution,
 ]
 
 AUDIO_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
-    _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _clipped_words, _clipped_speech,
+    _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _clipped_words,
     _residual_gaps, _residual_disfluencies,
     _render_silence, _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice,
 ]
@@ -884,6 +893,7 @@ def collect_facts(
     env: Envelope | None = None, floor: float | None = None, source_words: Sequence = (),
     audio_only: bool = False, output_asr: bool = True,
     judged: Sequence[tuple[float, float, str]] | None = None,
+    removing: Sequence[tuple[float, float, str]] | None = None,
 ) -> dict:
     """Measure the render: durations, loudness, transcript (cached), join grades,
     the dead air that survives the plan, and - when the source path is known -
@@ -965,7 +975,7 @@ def collect_facts(
         "source_timing": measure_source_timing(plan, render_path) if source_path else None,
         "unclassified_voice": unclassified_voice_facts(plan, voices, speech_probes),
         "judged_leaks": judged_leaks(plan, source_words, judged) if judged is not None else None,
-        "clipped_words": clipped_words(_word_cuts(plan), source_words) if source_words else None,
+        "clipped_words": clipped_words(_word_cuts(plan), source_words, removing) if source_words else None,
         "color": color_facts(source_path, render_path) if picture else None,
         # `scale` is the render's deliberate downscale (demo tier); None = native.
         "frame": {"source": list(display_size(source_path)), "render": list(display_size(render_path)),

@@ -17,7 +17,7 @@ from .align import AlignResult, align
 from .analysis import analyze
 from .config import ISOLATE_KEYS, Config
 from .context import Context, NeedsDecision
-from .edges import EdgeContext, finalize_cuts, is_intra_restart, refine_joins
+from .edges import WORD_CUT_REASONS, EdgeContext, finalize_cuts, is_intra_restart, refine_joins
 from .judge import Judge
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
@@ -496,6 +496,8 @@ def run_pipeline(
     while True:
         # The judged word-removing decisions as the edge pass received them: verify checks the plan keeps none.
         judged = [(c.start, c.end, c.reason) for c in cur if c.reason in JUDGED_REASONS and not is_intra_restart(c)]
+        removing = [(c.start, c.end, c.reason) for c in cur
+                    if c.reason in WORD_CUT_REASONS | JUDGED_REASONS and not is_intra_restart(c)]
         plan, cuts, joins = assemble(cur)
         attach_isolation(plan)
         plan_path.write_text(plan.to_json())
@@ -539,7 +541,7 @@ def run_pipeline(
                                   voices=ctx.voices, speech_probes=ctx.speech_probes,
                                   config=config, env=ctx.env, floor=ctx.floor, source_words=ctx.words,
                                   scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr,
-                                  judged=judged)
+                                  judged=judged, removing=removing)
             # The round budget is spent once the judged rounds have run. One more round is still due when the final
             # render shows a repeat or restart that no round ever saw (a transcript the judges did not hear): it
             # is judged like any other, once.
