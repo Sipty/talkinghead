@@ -541,7 +541,7 @@ def run_pipeline(
                                   voices=ctx.voices, speech_probes=ctx.speech_probes,
                                   config=config, env=ctx.env, floor=ctx.floor, source_words=ctx.words,
                                   scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr,
-                                  judged=judged, removing=removing)
+                                  judged=judged, removing=removing, given_back=set(edge_ctx.given_back))
             # The round budget is spent once the judged rounds have run. One more round is still due when the final
             # render shows a repeat or restart that no round ever saw (a transcript the judges did not hear): it
             # is judged like any other, once.

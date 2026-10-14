@@ -199,17 +199,18 @@ def _speech_words(mid: str = "so") -> list[RefinedWord]:
 
 
 def test_filler_edges_land_on_the_energy_valleys_the_stamps_missed() -> None:
-    # The stamps put the cut 60 ms before the real dips; both edges end on them.
+    # The only dips lie inside "um", away from both stamps: no boundary with "so" or "next" is clear, so the word
+    # is given back whole rather than leave a fragment. Mid-word valleys are not used by the fragment step.
     env = _levels([(0.5, 2.4, LOUD), (1.35, 1.39, FLOOR), (1.61, 1.65, FLOOR)])
-    (c,) = finalize_cuts([Cut(1.3, 1.7, "filler", "um")], _ctx(_speech_words(), env=env))
-    assert c.start == pytest.approx(41 / 30) and c.end == pytest.approx(49 / 30)
-    assert _on_grid(c.start) and _on_grid(c.end)
+    ctx = _ctx(_speech_words(), env=env)
+    assert finalize_cuts([Cut(1.3, 1.7, "filler", "um")], ctx) == []
+    assert ctx.given_back == [(1.3, 1.7)]
 
 
 def test_mid_sentence_cut_takes_the_deepest_dip_and_keeps_no_extra_quiet() -> None:
     env = _levels([(0.5, 2.4, LOUD), (1.32, 1.35, LOUD - 15), (1.39, 1.415, FLOOR)])
     (c,) = finalize_cuts([Cut(1.3, 1.7, "content", "um")], _ctx(_speech_words(), env=env))
-    assert c.start == pytest.approx(42 / 30)          # deepest, not the nearer shallow dip
+    assert c.start == pytest.approx(40 / 30)          # the dip at the stamp boundary; the deeper dip is inside "um"
 
     # No punctuation before the cut: real quiet on both sides is not handed back.
     words = [_w("so", 0.5, 1.0), _w("um", 1.5, 1.9), _w("next", 2.4, 3.0)]
@@ -301,13 +302,13 @@ def test_valley_snap_never_moves_an_edge_into_a_kept_words_voiced_run() -> None:
 
 
 def test_valley_snap_never_uncovers_a_removed_word() -> None:
-    # A deep dip lies far inside the filler: taking it would keep most of the word.
+    # The only dip lies inside "um", far from both stamps: no boundary with a kept word is clear, so the word is
+    # given back whole rather than leave a fragment. Mid-word valleys are not used by the fragment step.
     env = _levels([(0.5, 2.4, LOUD), (1.61, 1.65, FLOOR)])
     ctx = _ctx(_speech_words(), env=env)
     ctx.splice_valley_window = 0.5
-    (c,) = finalize_cuts([Cut(1.3, 1.7, "content", "um")], ctx)
-    assert c.start <= 1.5 + 1e-9                       # at least half of "um" stays inside the cut
-    assert [w.text for w in removed_words(c, ctx.words)] == ["um"]
+    assert finalize_cuts([Cut(1.3, 1.7, "content", "um")], ctx) == []
+    assert ctx.given_back == [(1.3, 1.7)]
 
 
 def test_silence_cuts_keep_the_shared_pad_and_ignore_valleys_and_splice_quiet() -> None:

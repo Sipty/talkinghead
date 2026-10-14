@@ -77,6 +77,8 @@ import math
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field, replace
 
+import numpy as np
+
 from .audio import Envelope, RefinedWord
 from .derive import pause_boundary
 from .joins import EDGE_CUT_MATCH_SEC, EDGE_VOICED_ABOVE_FLOOR_DB, edge_state
@@ -179,6 +181,9 @@ class EdgeContext:
     dropped_fillers: int = 0
     # Set by finalize_cuts: mechanical cuts shrunk or dropped to spare another speaker's words.
     spared_other_speaker: int = 0
+    # Set by take_removed_whole: fragments settled per outcome, and the removed words given back whole.
+    fragments: dict = field(default_factory=dict)
+    given_back: list = field(default_factory=list)
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
@@ -1110,7 +1115,187 @@ def keep_words_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> li
     return out
 
 
+# A removed word whose audio is still partly in the output (a fragment) is settled by moving the cut edge that leaves
+# it: to the quietest point of a real silence beside it, or to the valley between it and the touching kept word. A
+# word with no such boundary is given back whole (its cut edge is pulled to the word's far edge).
+FRAGMENT_MIN_SEC = 0.04
+FRAGMENT_SHARE = 0.10
+# The clipped_words tolerance: a boundary may take at most this share of the kept word beside it.
+KEPT_CLIP_SHARE = 0.10
+# A real silence this long between a removed and a kept word: its quietest point takes the edge.
+BOUNDARY_GAP_SEC = 0.06
+# Touching words: the boundary is searched this far past each word's ASR stamp.
+BOUNDARY_MARGIN = 0.03
+# A touching boundary needs this much level contrast (dB) in its window: flat audio has no valley.
+VALLEY_CONTRAST_DB = 6.0
+
+
+def _uncovered(a: float, b: float, spans: list[tuple[float, float]], starts: list[float],
+               longest: float) -> list[tuple[float, float]]:
+    """The parts of [a, b) that no span covers; `spans` sorted by start, `starts` their starts."""
+    out: list[tuple[float, float]] = []
+    cur = a
+    i = bisect_left(starts, a - longest)
+    while i < len(spans) and spans[i][0] < b:
+        s, e = spans[i]
+        if e > cur:
+            if s > cur:
+                out.append((cur, min(s, b)))
+            cur = e
+        i += 1
+    if cur < b:
+        out.append((cur, b))
+    return [(p, q) for p, q in out if q > p]
+
+
+def _quietest(ctx: EdgeContext, lo: float, hi: float, *, late: bool) -> tuple[float, float] | None:
+    """(time, contrast dB) of the envelope minimum over [lo, hi]; among equal minima the latest (or earliest) frame."""
+    db = ctx.env.db
+    if len(db) == 0 or hi < lo:
+        return None
+    fs = ctx.env.frame_sec
+    i0 = max(0, min(len(db) - 1, int(lo / fs)))
+    i1 = max(i0, min(len(db) - 1, int(hi / fs)))
+    seg = db[i0:i1 + 1]
+    low = float(seg.min())
+    ties = np.flatnonzero(seg <= low)
+    k = int(ties[-1] if late else ties[0])
+    return (i0 + k) * fs, float(seg.max()) - low
+
+
+def _grid(t: float, fps: float | None, *, up: bool) -> float:
+    """`t` on the frame grid: up for a start edge, down for an end edge (the snap_to_frames convention)."""
+    if not fps:
+        return t
+    return (math.ceil(t * fps - 1e-6) if up else math.floor(t * fps + 1e-6)) / fps
+
+
+def _tail_edge(p: float, r: RefinedWord, kept: list, kstarts: list[float],
+               ctx: EdgeContext) -> tuple[str, float | None]:
+    """(kind, t) for a cut whose edge sits at p inside removed word r, given the kept word that follows r.
+
+    kind "leave": no kept word touches r's tail, or one overlaps it; kind "fail": no clear boundary (t is None).
+    """
+    q = word_extent(r)[1]
+    if any(a < q and b > p for a, b, _ in kept):
+        return "leave", None
+    j = bisect_left(kstarts, q - 1e-9)
+    if j >= len(kept):
+        return "leave", None
+    ka, kb, k = kept[j]
+    if ka - q >= BOUNDARY_GAP_SEC:
+        kind = "gap"
+        found = _quietest(ctx, q, ka - ctx.env.frame_sec, late=False)
+    else:
+        kind = "touch"
+        found = _quietest(ctx, max(p, r.asr_end - BOUNDARY_MARGIN), k.asr_start + BOUNDARY_MARGIN, late=True)
+        if found is None or found[1] < VALLEY_CONTRAST_DB or max(0.0, found[0] - ka) / (kb - ka) > KEPT_CLIP_SHARE:
+            return "fail", None
+    if found is None:
+        return "fail", None
+    t = _grid(found[0], ctx.fps, up=False)
+    return (kind, t) if t > p else ("fail", None)
+
+
+def _head_edge(q: float, r: RefinedWord, kept: list, kends: list[float],
+               ctx: EdgeContext) -> tuple[str, float | None]:
+    """(kind, t) for a cut whose edge sits at q inside removed word r, given the kept word that precedes r."""
+    p = word_extent(r)[0]
+    if any(a < q and b > p for a, b, _ in kept):
+        return "leave", None
+    j = bisect_right(kends, p + 1e-9) - 1
+    if j < 0:
+        return "leave", None
+    ka, kb, k = kept[j]
+    if p - kb >= BOUNDARY_GAP_SEC:
+        kind = "gap"
+        found = _quietest(ctx, kb + ctx.env.frame_sec, p, late=True)
+    else:
+        kind = "touch"
+        found = _quietest(ctx, k.asr_end - BOUNDARY_MARGIN, min(q, r.asr_start + BOUNDARY_MARGIN), late=False)
+        if found is None or found[1] < VALLEY_CONTRAST_DB or max(0.0, kb - found[0]) / (kb - ka) > KEPT_CLIP_SHARE:
+            return "fail", None
+    if found is None:
+        return "fail", None
+    t = _grid(found[0], ctx.fps, up=True)
+    return (kind, t) if t < q else ("fail", None)
+
+
+def _give_back(c: Cut, r: RefinedWord, tail: bool, ctx: EdgeContext) -> Cut | None:
+    """The cut with its edge pulled off removed word r, so r stays whole; None when nothing of the cut is left."""
+    a, b = word_extent(r)
+    start, end = (c.start, min(c.end, a)) if tail else (max(c.start, b), c.end)
+    if end - start <= ctx.min_cut:
+        return None
+    return Cut(start, end, c.reason, c.text, dict(c.provenance))
+
+
+def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> list[Cut]:
+    """Settles the fragments of removed words (see the constants above). Sets ctx.fragments and ctx.given_back.
+
+    A fragment is a removed word with at least FRAGMENT_SHARE and FRAGMENT_MIN_SEC still in the output, beside a kept
+    word it touches. Its cut edge moves to a boundary found in the audio. A boundary that is not clear, that would clip
+    the kept word beyond KEPT_CLIP_SHARE, or that leaves a fragment, gives the word back. A word with no kept word on
+    that side, or with one overlapping it, is left alone: mid-word valleys are not this step's.
+    """
+    stats = {"gap": 0, "touch": 0, "given_back": 0, "uncut": 0, "left": 0}
+    kept = sorted(((a, b, w) for w in ctx.words if id(w) not in decided for a, b in [word_extent(w)] if b > a),
+                  key=lambda t: t[0])
+    kstarts = [a for a, _, _ in kept]
+    kept_by_end = sorted(kept, key=lambda t: t[1])
+    kends = [b for _, b, _ in kept_by_end]
+    removed = sorted((w for w in ctx.words if id(w) in decided and word_extent(w)[1] > word_extent(w)[0]),
+                     key=lambda w: word_extent(w)[0])
+    cuts_l: list[Cut | None] = list(cuts)
+    given: list[tuple[float, float]] = []
+
+    def cover() -> tuple[list[tuple[float, float]], list[float], float]:
+        spans = sorted((c.start, c.end) for c in cuts_l if c is not None and not is_intra_restart(c)
+                       and not _is_token_fragment(c, ctx.words))
+        return spans, [s for s, _ in spans], max((e - s for s, e in spans), default=0.0)
+
+    spans, starts, longest = cover()
+    for r in removed:
+        a, b = word_extent(r)
+        for _ in range(4):
+            frags = [(p, q) for p, q in _uncovered(a, b, spans, starts, longest)
+                     if q - p >= FRAGMENT_MIN_SEC and q - p > FRAGMENT_SHARE * (b - a)]
+            if not frags:
+                break
+            p, q = frags[0]
+            settleable = [i for i, c in enumerate(cuts_l) if c is not None and not is_intra_restart(c)
+                          and not _is_token_fragment(c, ctx.words) and c.reason not in PLACED_REASONS]
+            i_tail = next((i for i in settleable if abs(cuts_l[i].end - p) < 1e-6 and cuts_l[i].start < p), None)
+            i_head = next((i for i in settleable if abs(cuts_l[i].start - q) < 1e-6 and cuts_l[i].end > q), None)
+            if i_tail is None and i_head is None:
+                stats["uncut"] += 1
+                break
+            tail = i_tail is not None
+            i = i_tail if tail else i_head
+            c = cuts_l[i]
+            kind, t = _tail_edge(p, r, kept, kstarts, ctx) if tail else _head_edge(q, r, kept, kends, ctx)
+            if kind == "leave":
+                stats["left"] += 1
+                break
+            if t is not None:
+                moved = (Cut(c.start, t, c.reason, c.text, dict(c.provenance)) if tail
+                         else Cut(t, c.end, c.reason, c.text, dict(c.provenance)))
+                cuts_l[i] = moved
+                spans, starts, longest = cover()
+                if not any(q2 - p2 >= FRAGMENT_MIN_SEC and q2 - p2 > FRAGMENT_SHARE * (b - a)
+                           for p2, q2 in _uncovered(a, b, spans, starts, longest)):
+                    stats[kind] += 1
+                    break
+            cuts_l[i] = _give_back(c, r, tail, ctx)
+            given.append((round(r.start, 6), round(r.end, 6)))
+            stats["given_back"] += 1
+            spans, starts, longest = cover()
+            break
+    ctx.fragments = stats
+    ctx.given_back = given
+    return [c for c in cuts_l if c is not None]
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    ctx.given_back = []
     decided = _decided_removed(cuts, ctx.words)
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
@@ -1141,7 +1326,8 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     cuts = spare_other_speaker(cuts, ctx)
     cuts = merge_cuts(cuts, ctx.duration)
     out = merge_cuts(cuts + _fit_placed(placed, cuts, ctx), ctx.duration)
-    return keep_words_whole(out, ctx, decided)
+    out = keep_words_whole(out, ctx, decided)
+    return merge_cuts(take_removed_whole(out, ctx, decided), ctx.duration)
 
 
 REFINED_JOINS = "refined_joins"

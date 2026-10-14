@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 from bisect import bisect_left, bisect_right
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -21,7 +21,15 @@ from .audio import Envelope
 from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
-from .edges import WORD_CUT_REASONS, is_intra_restart, judged_removes, word_extent
+from .edges import (
+    FRAGMENT_MIN_SEC,
+    FRAGMENT_SHARE,
+    KEPT_CLIP_SHARE,
+    WORD_CUT_REASONS,
+    is_intra_restart,
+    judged_removes,
+    word_extent,
+)
 from .isolate import LAG_MIN_STRONG, timing_audio
 from .joins import check_join, source_edge_facts
 from .render import AUDIO_RATE
@@ -121,17 +129,21 @@ def _cold_open(plan: Plan, f: dict) -> CheckResult:
 
 
 
-def judged_leaks(plan: Plan, words: Sequence, judged: Sequence[tuple[float, float, str]]) -> list[dict]:
+def judged_leaks(plan: Plan, words: Sequence, judged: Sequence[tuple[float, float, str]],
+                  given_back: Collection[tuple[float, float]] = ()) -> list[dict]:
     """Transcript words the plan keeps although a judged cut removed them.
 
     `judged` are the judges' word-removing decisions as (start, end, reason) on the main source. A word
     is removed by a decision when the decision covers most of it (`judged_removes`); the plan keeps it when its
-    midpoint lies in a kept segment of the main source. Empty when the plan honours every decision.
+    midpoint lies in a kept segment of the main source. A word the edge pass gave back whole (`given_back`, its
+    refined (start, end)) is a reported fallback, not a leak. Empty when the plan honours every decision.
     """
     kept = sorted((s.start, s.end) for s in plan.segments if s.source == plan.main)
     starts = [a for a, _ in kept]
     out: list[dict] = []
     for w in words:
+        if (round(w.start, 6), round(w.end, 6)) in given_back:
+            continue
         mid = (w.start + w.end) / 2
         reason = next((r for a, b, r in judged if judged_removes(a, b, w)), None)
         if reason is None:
@@ -144,7 +156,49 @@ def judged_leaks(plan: Plan, words: Sequence, judged: Sequence[tuple[float, floa
 
 
 # A kept transcript word may lose at most this share of its extent to cuts (the clipped_words check).
-CLIP_KEPT_SHARE = 0.10
+CLIP_KEPT_SHARE = KEPT_CLIP_SHARE
+
+
+def cut_word_fragments(plan: Plan, words: Sequence, removing: Sequence[tuple[float, float, str]]) -> dict:
+    """Removed words whose audio is partly in the output: `partial` lists them (at least FRAGMENT_SHARE and
+    FRAGMENT_MIN_SEC still kept, not nearly all); `audible` counts the removed words left almost whole."""
+    cuts = sorted((c.start, c.end) for c in plan.cuts)
+    cstarts = [s for s, _ in cuts]
+    clong = max((e - s for s, e in cuts), default=0.0)
+    dec = sorted(removing)
+    dstarts = [s for s, _, _ in dec]
+    dlong = max((e - s for s, e, _ in dec), default=0.0)
+    partial: list[dict] = []
+    audible = 0
+    for w in words:
+        a, b = min(getattr(w, "asr_start", w.start), w.start), max(getattr(w, "asr_end", w.end), w.end)
+        if b <= a:
+            continue
+        i = bisect_left(dstarts, a - dlong)
+        decided = False
+        while i < len(dec) and dec[i][0] < b:
+            if dec[i][1] > a and judged_removes(dec[i][0], dec[i][1], w):
+                decided = True
+                break
+            i += 1
+        if not decided:
+            continue
+        covered = 0.0
+        j = bisect_left(cstarts, a - clong)
+        while j < len(cuts) and cuts[j][0] < b:
+            covered += max(0.0, min(b, cuts[j][1]) - max(a, cuts[j][0]))
+            j += 1
+        kept_len = max(0.0, (b - a) - covered)
+        if kept_len < FRAGMENT_MIN_SEC or kept_len <= FRAGMENT_SHARE * (b - a):
+            continue
+        if kept_len >= 0.9 * (b - a):
+            audible += 1
+        else:
+            partial.append({"text": w.text, "start": round(a, 3), "end": round(b, 3),
+                            "kept_sec": round(kept_len, 3), "speaker": getattr(w, "speaker", None)})
+    return {"partial": partial, "audible": audible}
+
+
 
 
 def clipped_words(plan: Plan, words: Sequence,
@@ -528,14 +582,31 @@ def _residual_disfluencies(plan: Plan, f: dict) -> CheckResult:
                        + (" ..." if len(found) > 5 else ""))
 
 
+def _cut_word_fragments(plan: Plan, f: dict) -> CheckResult:
+    """Removed words still partly audible in the output: a warning, with the fully audible ones counted."""
+    frags = f.get("cut_word_fragments")
+    if frags is None:
+        return CheckResult("cut_word_fragments", "warn", True, "not measured: no source transcript was given")
+    partial = frags["partial"]
+    note = f"{frags['audible']} removed words left almost whole (fallbacks or uncut)"
+    if not partial:
+        return CheckResult("cut_word_fragments", "warn", True, f"no removed word leaves a fragment; {note}")
+    head = "; ".join(f"{x['text']!r} {x['start']:.2f}-{x['end']:.2f}s, {x['kept_sec'] * 1000:.0f} ms kept"
+                     for x in partial[:5])
+    return CheckResult("cut_word_fragments", "warn", False,
+                       f"{len(partial)} removed words leave a fragment: {head}"
+                       + (" ..." if len(partial) > 5 else "") + f"; {note}")
+
+
 CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
-    _duration, _av_sync, _loudness, _cold_open, _judged_removals, _clipped_words, _residual_gaps,
+    _duration, _av_sync, _loudness, _cold_open, _judged_removals, _clipped_words, _cut_word_fragments,
+    _residual_gaps,
     _residual_disfluencies, _render_silence,
     _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice, _color, _resolution,
 ]
 
 AUDIO_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
-    _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _clipped_words,
+    _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _clipped_words, _cut_word_fragments,
     _residual_gaps, _residual_disfluencies,
     _render_silence, _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice,
 ]
@@ -894,6 +965,7 @@ def collect_facts(
     audio_only: bool = False, output_asr: bool = True,
     judged: Sequence[tuple[float, float, str]] | None = None,
     removing: Sequence[tuple[float, float, str]] | None = None,
+    given_back: Collection[tuple[float, float]] = (),
 ) -> dict:
     """Measure the render: durations, loudness, transcript (cached), join grades,
     the dead air that survives the plan, and - when the source path is known -
@@ -974,8 +1046,10 @@ def collect_facts(
         # [] = asked for and unavailable, which the check reports as a warning.
         "source_timing": measure_source_timing(plan, render_path) if source_path else None,
         "unclassified_voice": unclassified_voice_facts(plan, voices, speech_probes),
-        "judged_leaks": judged_leaks(plan, source_words, judged) if judged is not None else None,
+        "judged_leaks": judged_leaks(plan, source_words, judged, given_back) if judged is not None else None,
         "clipped_words": clipped_words(_word_cuts(plan), source_words, removing) if source_words else None,
+        "cut_word_fragments": (cut_word_fragments(_word_cuts(plan), source_words, removing)
+                               if source_words and removing is not None else None),
         "color": color_facts(source_path, render_path) if picture else None,
         # `scale` is the render's deliberate downscale (demo tier); None = native.
         "frame": {"source": list(display_size(source_path)), "render": list(display_size(render_path)),
