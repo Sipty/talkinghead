@@ -641,6 +641,9 @@ def _run_cmd(args: argparse.Namespace) -> int:
     )
     if args.plan_only:
         print(f"plan: {result.plan_path}")
+        edges = (result.notes or {}).get("edges", {})
+        if "given_back" in edges:
+            print(f"edges: fragments {edges['fragments']}, given_back {edges['given_back']}")
         return 0
     print(f"final: {result.final}\nreport: {result.report}")
     if result.final_visuals:
