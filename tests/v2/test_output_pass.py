@@ -271,10 +271,10 @@ def test_fused_output_cuts_keep_the_union_of_their_confirmed_spans() -> None:
     assert out[0].provenance["span"] == pytest.approx([3.60, 5.12])
 
 
-def test_an_output_cut_keeps_its_span_when_a_neighbours_asr_stamp_runs_into_it() -> None:
-    # Shape of the "if," at 658 s: the refined bounds end at 3.22, the ASR stamp runs to 3.33, and the render plays
-    # the repeat over 3.24-3.43. The neighbour is not touched by the cut's audio at its refined bounds, so it claims
-    # nothing there: the cut keeps its whole confirmed span rather than being shrunk to a sliver and dropped.
+def test_an_output_cut_is_given_back_whole_when_a_neighbours_asr_stamp_runs_into_it() -> None:
+    # Owner rule: cut at the real boundary; if that would clip a kept word, give the removed word back whole. The
+    # repeat (3.24-3.43) runs into the kept "if," union extent (3.17-3.33), so the repeat stays whole: no cut, no
+    # fragment, and the neighbour "if" (3.455-3.548) is intact.
     db = np.full(int(10.0 / FRAME_SEC), -50.0)
     env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
     word = RefinedWord(" if,", 3.17, 3.22, 3.17, 3.33, 1.0)
@@ -282,8 +282,7 @@ def test_an_output_cut_keeps_its_span_when_a_neighbours_asr_stamp_runs_into_it()
     ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None)
     cut = Cut(3.237, 3.427, "polish", "if,", {"pass": "output", "span": [3.237, 3.427]})
     out = finalize_cuts([cut], ctx)
-    assert len(out) == 1
-    assert out[0].start == pytest.approx(3.237, abs=1e-6) and out[0].end == pytest.approx(3.427, abs=1e-6)
+    assert out == [], out
 
 
 @pytest.mark.parametrize("provenance", [
