@@ -1241,16 +1241,21 @@ def keep_words_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> li
     kept = sorted(ext for ext in (word_extent(w) for w in ctx.words if id(w) not in decided) if ext[1] > ext[0])
     if not kept:
         return cuts
+    # An output-pass cut claims a kept word only where the word's refined audio meets the cut: the ASR stamp can run
+    # into the repeat the cut removes. Every other cut claims the whole extent that verify measures.
+    refined = sorted((w.start, w.end) for w in ctx.words if id(w) not in decided and w.end > w.start)
     guard = _midpoints([w for w in ctx.words if id(w) in decided])
-    kstarts = [a for a, _ in kept]
-    kmax = max(b - a for a, b in kept)
+    spans = {False: kept, True: refined}
+    starts = {k: [a for a, _ in v] for k, v in spans.items()}
+    longest = {k: max((b - a for a, b in v), default=0.0) for k, v in spans.items()}
     out: list[Cut] = []
     for c in cuts:
         if is_intra_restart(c) or _is_token_fragment(c, ctx.words):
             out.append(c)
             continue
         s, e = c.start, c.end
-        near = _window(kept, kstarts, kmax, s, e)
+        claim = _is_output_cut(c)
+        near = _window(spans[claim], starts[claim], longest[claim], s, e)
         pad = _pad(c.reason, ctx)
         pieces = [(s, e)]
         for _ in range(4):
