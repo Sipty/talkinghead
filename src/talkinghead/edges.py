@@ -1183,6 +1183,8 @@ def _grid(t: float, fps: float | None, *, up: bool) -> float:
 
 
 OUTWARD_SEC = 0.5
+# Provenance flag on a cut the fragment step placed: refine_joins leaves its edges where the step put them.
+SETTLED_KEY = "settled_by_edge_pass"
 
 
 def _quiet_outside(lo: float, hi: float, ctx: EdgeContext, *, late: bool) -> float | None:
@@ -1281,7 +1283,7 @@ def _give_back(c: Cut, r: RefinedWord, tail: bool, ctx: EdgeContext) -> Cut | No
     start, end = (c.start, min(c.end, a)) if tail else (max(c.start, b), c.end)
     if end - start <= ctx.min_cut:
         return None
-    return Cut(start, end, c.reason, c.text, dict(c.provenance))
+    return Cut(start, end, c.reason, c.text, {**c.provenance, SETTLED_KEY: True})
 
 
 def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> list[Cut]:
@@ -1331,8 +1333,8 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
             c = cuts_l[i]
             kind, t = _tail_edge(p, r, kept, kstarts, ctx) if tail else _head_edge(q, r, kept, kends, ctx)
             if t is not None:
-                moved = (Cut(c.start, t, c.reason, c.text, dict(c.provenance)) if tail
-                         else Cut(t, c.end, c.reason, c.text, dict(c.provenance)))
+                moved = (Cut(c.start, t, c.reason, c.text, {**c.provenance, SETTLED_KEY: True}) if tail
+                         else Cut(t, c.end, c.reason, c.text, {**c.provenance, SETTLED_KEY: True}))
                 cuts_l[i] = moved
                 spans, starts, longest = cover()
                 if not _kept_fragment(a, b, spans, starts, longest):
@@ -1450,6 +1452,9 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
                   if abs(c.start - prev.end) <= EDGE_CUT_MATCH_SEC and abs(c.end - seg.start) <= EDGE_CUT_MATCH_SEC),
                  None)
         source_cut = cuts[k] if k is not None else Cut(prev.end, seg.start, "content")
+        if k is not None and source_cut.provenance.get(SETTLED_KEY):
+            rec["skipped"] = "settled by the fragment step"
+            continue
         if k is not None and _is_output_cut(source_cut):
             # Already settled whole onto quiet audio inside its neighbours (settle_output_cuts); a join move would shrink it.
             rec["skipped"] = "output-pass cut already settled"
