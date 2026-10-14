@@ -4,8 +4,9 @@ import numpy as np
 
 from talkinghead import edges as E
 from talkinghead.audio import FRAME_SEC, Envelope, RefinedWord
-from talkinghead.edges import SPEAKER_KEY, EdgeContext, finalize_cuts, take_removed_whole
-from talkinghead.timeline import Cut
+from talkinghead.edges import SPEAKER_KEY, EdgeContext, finalize_cuts, keep_words_whole, take_removed_whole
+from talkinghead.timeline import Cut, Plan, SourceInfo
+from talkinghead.verify import plan_invariants
 
 FLOOR = -50.0
 LOUD = -20.0
@@ -120,3 +121,58 @@ def test_a_filler_fused_into_another_speakers_silence_cut_still_removes_its_word
     out = finalize_cuts([silence, filler], ctx)
     covered = sum(max(0.0, min(1.5, c.end) - max(1.2, c.start)) for c in out)
     assert covered >= 0.25   # "uh" (0.3 s) goes out up to the splice margin
+
+
+def test_a_pad_never_uncovers_a_decided_words_midpoint() -> None:
+    # "keep" ends at 1.00. The removed "it" (1.02-1.06, midpoint 1.04) sits inside the splice pad after it: the pad
+    # would move the cut's start past 1.04, so the edge stops at the kept word's boundary instead.
+    words = [_w("keep", 0.5, 1.0), _w("it", 1.02, 1.06)]
+    ctx = _ctx(words, _levels([(0.5, 2.0, LOUD)]))
+    ctx.pad = ctx.splice_pad = 0.06
+    out = keep_words_whole([Cut(0.8, 1.5, "polish", "it")], ctx, {id(words[1])})
+    assert any(c.start <= 1.04 < c.end for c in out), out
+    assert all(not (c.start < 1.0 and c.end > 0.5) for c in out), out
+
+
+def test_an_output_cut_never_clips_a_kept_words_asr_tail() -> None:
+    # "slop." refines to 0.50-0.90 but its ASR stamp runs to 1.00; verify's clipped check measures the stamp, so a
+    # cut inside that tail is a clip even though the refined audio is untouched.
+    words = [RefinedWord("slop.", 0.50, 0.90, 0.50, 1.00, 1.0, speaker="S0"), _w("next", 1.10, 1.50)]
+    ctx = _ctx(words, _levels([(0.5, 2.0, LOUD)]))
+    out = keep_words_whole([Cut(0.95, 1.05, "polish", "x")], ctx, set())
+    assert all(not (c.start < 1.00 and c.end > 0.50) for c in out), out
+
+
+def test_grid_cut_lands_on_the_frame_grid_and_keeps_a_decided_midpoint() -> None:
+    # 0.51-1.27 at 30 fps: the start moves up to 0.5333 unless a decided midpoint (0.52) sits in the first frame; then
+    # it moves down to 0.5. The end goes down to 1.2667.
+    out = E.grid_cuts([Cut(0.51, 1.27, "polish", "x")], 30.0, [0.52], [])
+    assert len(out) == 1
+    assert out[0].start <= 0.52 < out[0].end
+    assert all(abs(x * 30 - round(x * 30)) < 1e-6 for x in (out[0].start, out[0].end)), out
+
+
+def test_a_grid_move_that_would_enter_a_kept_word_stays_off_the_grid() -> None:
+    # The midpoint 0.52 forces the start down to 0.50, which would enter the kept word 0.40-0.505: it stays at 0.51.
+    out = E.grid_cuts([Cut(0.51, 1.27, "polish", "x")], 30.0, [0.52], [(0.40, 0.505)])
+    assert len(out) == 1 and out[0].start == 0.51
+
+
+def test_finalize_leaves_every_cut_edge_on_the_frame_grid() -> None:
+    words = [_w("so", 0.5, 1.3), _w("um", 1.3, 1.7), _w("next", 1.7, 2.4)]
+    ctx = _ctx(words, _levels([(0.5, 2.4, LOUD)]))
+    ctx.fps = 30.0
+    out = finalize_cuts([Cut(1.3, 1.7, "filler", "um")], ctx)
+    assert out, "the filler must still be cut"
+    assert all(abs(x * 30 - round(x * 30)) < 1e-6 for c in out for x in (c.start, c.end)), out
+
+
+def test_plan_invariants_reports_an_off_grid_edge_and_a_clean_plan_is_clean() -> None:
+    source = SourceInfo("main", "/v/in.mp4", "sha", 100.0)
+    words = [_w("so", 0.5, 1.3), _w("um", 1.3, 1.7), _w("next", 1.7, 2.4)]
+    off = Plan.from_cuts(source, [Cut(1.01, 1.7, "filler", "um")])
+    clean = Plan.from_cuts(source, [Cut(1.3333, 1.6667, "filler", "um")])
+    removing = [(1.3, 1.7, "filler")]
+    assert plan_invariants(off, words, [], removing, (), 30.0)["off_grid_edges"] >= 1
+    assert plan_invariants(clean, words, [], removing, (), 30.0)["off_grid_edges"] == 0
+    assert plan_invariants(clean, words, [], removing, (), None)["off_grid_edges"] == 0

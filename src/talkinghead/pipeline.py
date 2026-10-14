@@ -28,7 +28,15 @@ from .store import Cache, RunDir, sha256_file, stable_key
 from .timeline import Cut, Plan
 from .transcribe import Transcriber
 from .types import JUDGED_REASONS
-from .verify import CheckResult, collect_facts, project_words, residual_findings, run_checks, visuals_resolution
+from .verify import (
+    CheckResult,
+    collect_facts,
+    plan_invariants,
+    project_words,
+    residual_findings,
+    run_checks,
+    visuals_resolution,
+)
 from .visuals.cards import avatar_fingerprint
 from .visuals.headclip import check_head_clip
 from .visuals.render import render_visuals
@@ -261,7 +269,7 @@ def _retake_policy() -> str:
     )] + [prompts.RETAKE_SCHEMA, prompts.MARKER_SCHEMA])
 
 
-def _stored_round(run: RunDir, stage: str, inputs: dict, version: int):
+def _stored_round(run: RunDir, stage: str, inputs: dict, version: int, *, strict: bool = True):
     """A stored output round for this plan and render, replayed with the rendered transcript it was judged on.
 
     A round's key includes the rendered transcript's digest, which a plan-only rebuild never renders. So the round
@@ -273,6 +281,10 @@ def _stored_round(run: RunDir, stage: str, inputs: dict, version: int):
     if not path.is_file():
         return None
     stored = json.loads(path.read_text())
+    if not strict:
+        # Plan-only after an edge-pass change: the plan is rebuilt, so the identity no longer matches. The round's
+        # cuts are the judgement a full run made; they are replayed and the plan_only note says so.
+        return stored.get("value")
     identity = (stored.get("value") or {}).get("identity")
     if not identity or identity.get("inputs") != _digest(inputs):
         return None
@@ -512,7 +524,10 @@ def run_pipeline(
             if round_no >= rounds_max and residual_swept:
                 break
             value = _stored_round(run, f"{prefix}polish-output-{round_no + 1}", round_inputs,
-                                  STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION))
+                                  STAGE_VERSION_OVERRIDES.get("polish_output", STAGE_VERSION), strict=False)
+            if value is not None:
+                output["plan_only"] = ("stored output-round cuts replayed without the identity check: the plan was "
+                                       "rebuilt, so each round's judgement is reused, not re-judged")
             if value is None:
                 if round_no < rounds_max:
                     output.setdefault("skipped", "plan-only: no stored output round for this plan; a full run "
@@ -585,7 +600,10 @@ def run_pipeline(
                           "previous_kept_at": "stages/<stage>.superseded.json"}
     if plan_only:
         # Offline rebuild from the memos alone: nothing is rendered or verified. The CLI hands in a judge
-        # and transcriber that refuse to be called, so a memo miss fails rather than recomputing.
+        # and transcriber that refuse to be called, so a memo miss fails rather than recomputing. The edge invariants
+        # the render's verify and snap depend on are measured on this plan, so a plan that would fail is caught here.
+        notes["invariants"] = plan_invariants(plan, ctx.words, judged, removing, set(edge_ctx.given_back),
+                                              None if audio_only else float(settings.fps))
         return RunResult(plan_path, final, report_path, notes=notes)
     if config.polish:
         # The judged-keep findings of every round, all judged on renders the final check may still see.

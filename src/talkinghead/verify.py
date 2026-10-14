@@ -243,6 +243,28 @@ def clipped_words(plan: Plan, words: Sequence,
     return out
 
 
+def plan_invariants(plan: Plan, words: Sequence, judged: Sequence[tuple[float, float, str]],
+                    removing: Sequence[tuple[float, float, str]], given_back: Collection[tuple[float, float]],
+                    fps: float | None) -> dict:
+    """The edge-pass invariants of a plan as the render's verify measures them, plus the render's frame snap:
+    `snap_drift_ms`: worst shift the snap puts on the output timeline; source_timing fails past SOURCE_TIMING_TOL.
+    A plan-only build reports these, so a plan that would fail a full render fails before it."""
+    cut_plan = _word_cuts(plan)
+    off = 0
+    drift = worst = 0.0
+    if fps:
+        off = sum(1 for c in plan.cuts for x in (c.start, c.end) if abs(x * fps - round(x * fps)) > 0.02)
+        for s in plan.segments:
+            a, b = round(s.start * fps) / fps, round(s.end * fps) / fps
+            drift += (b - a if b > a else 0.0) - (s.end - s.start)
+            worst = max(worst, abs(drift))
+    return {"judged_leaks": len(judged_leaks(plan, words, judged, given_back)),
+            "clipped_words": len(clipped_words(cut_plan, words, removing)),
+            "fragments": len(cut_word_fragments(cut_plan, words, removing)["partial"]),
+            "off_grid_edges": off, "snap_drift_ms": round(worst * 1000, 1),
+            "drift_ok": worst <= SOURCE_TIMING_TOL}
+
+
 def _dead_air_runs(
     plan: Plan, silences: list[tuple[float, float]], min_gap: float,
 ) -> list[tuple[float, float, float]]:

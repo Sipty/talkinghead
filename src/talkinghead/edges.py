@@ -1058,23 +1058,90 @@ def _decided_removed(cuts: list[Cut], words: list[RefinedWord]) -> set[int]:
     return decided
 
 
-def _split_around(pieces: list[tuple[float, float]], a: float, b: float,
-                  pad: float) -> list[tuple[float, float]]:
-    """`pieces` with the kept word [a, b) taken out: each edge that lands inside it moves to its far side plus pad,
-    and a piece that covers it is split in two."""
+def _guarded(lo: float, hi: float, guard: list[float]) -> bool:
+    """Whether a guarded point (a decided word's midpoint; `guard` sorted) lies in [lo, hi): a cut covering it stops
+    covering it if its edge moves across lo or to hi."""
+    i = bisect_left(guard, lo)
+    return i < len(guard) and guard[i] < hi
+
+
+def _midpoints(words: list[RefinedWord]) -> list[float]:
+    return sorted((w.start + w.end) / 2 for w in words)
+
+
+def _after(b: float, pad: float, guard: list[float]) -> float:
+    """Where audio after a kept word ending at b may start: b plus pad, or b itself when the pad would uncover a
+    guarded point (a decided word's midpoint stays removed)."""
+    return b if _guarded(b, b + pad, guard) else b + pad
+
+
+def _before(a: float, pad: float, guard: list[float]) -> float:
+    """Where audio before a kept word starting at a must end: a minus pad, or a itself when the pad would uncover a
+    guarded point."""
+    return a if _guarded(a - pad, a, guard) else a - pad
+
+
+def _split_around(pieces: list[tuple[float, float]], a: float, b: float, pad: float,
+                  guard: list[float]) -> list[tuple[float, float]]:
+    """`pieces` with the kept word [a, b) taken out: each edge that lands inside it moves to its far side plus pad
+    (see _after and _before), and a piece that covers it is split in two."""
     out: list[tuple[float, float]] = []
     for s, e in pieces:
         if e <= s or e <= a or s >= b:
             if e > s:
                 out.append((s, e))
         elif s < a and e > b:
-            out += [(s, a - pad), (b + pad, e)]
+            out += [(s, _before(a, pad, guard)), (_after(b, pad, guard), e)]
         elif s >= a and e <= b:
             continue
         elif s < a:
-            out.append((s, a - pad))
+            out.append((s, _before(a, pad, guard)))
         else:
-            out.append((b + pad, e))
+            out.append((_after(b, pad, guard), e))
+    return out
+
+
+def _enters(lo: float, hi: float, kept: list[tuple[float, float]]) -> bool:
+    """Whether the span (lo, hi) overlaps the extent of a kept word."""
+    return any(a < hi and b > lo for a, b in kept)
+
+
+def _uncovers(old: Cut, new: Cut, guard: list[float]) -> bool:
+    """Whether moving `old` to `new` uncovers a guarded point (a decided word's midpoint) that `old` covered."""
+    lost = [(old.start, min(old.end, new.start)), (max(old.start, new.end), old.end)]
+    return any(_guarded(lo, hi, guard) for lo, hi in lost if hi > lo)
+
+
+def _grid_cut(c: Cut, fps: float, guard: list[float], kept: list[tuple[float, float]]) -> Cut | None:
+    """`c` shrunk onto the frame grid: start up, end down, so kept audio beside it is never clipped. An edge whose
+    step would uncover a guarded point moves outward instead, unless that would enter a kept word: then it stays
+    where it is, off the grid, and the render rounds it. None when no frame is left."""
+    start = math.ceil(c.start * fps - 1e-6) / fps
+    if _guarded(c.start, start, guard):
+        out_start = math.floor(c.start * fps + 1e-6) / fps
+        start = c.start if _enters(out_start, c.start, kept) else out_start
+    end = math.floor(c.end * fps + 1e-6) / fps
+    if _guarded(end, c.end, guard):
+        out_end = math.ceil(c.end * fps - 1e-6) / fps
+        end = c.end if _enters(c.end, out_end, kept) else out_end
+    if end - start <= MIN_CUT:
+        return None
+    return Cut(start, end, c.reason, c.text, dict(c.provenance))
+
+
+def grid_cuts(cuts: list[Cut], fps: float, guard: list[float], kept: list[tuple[float, float]]) -> list[Cut]:
+    """Every cut on the frame grid (see _grid_cut). A cut too short for a frame is dropped unless it covers a guarded
+    point, which then keeps it as placed. Intra-token restarts keep their span: they cut inside a word on purpose."""
+    out: list[Cut] = []
+    for c in cuts:
+        if is_intra_restart(c):
+            out.append(c)
+            continue
+        grid = _grid_cut(c, fps, guard, kept)
+        if grid is not None:
+            out.append(grid)
+        elif _guarded(c.start, c.end, guard):
+            out.append(c)
     return out
 
 
@@ -1082,35 +1149,31 @@ def keep_words_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> li
     """Last edge step: no cut edge lies inside a kept word.
 
     A kept word is one the stage decisions did not remove; its extent is word_extent (the ASR stamp widened by the
-    refined bounds). A cut that takes part of one gives that part back: an edge moves to the word's boundary on the
-    cut's side plus the cut's pad, and a cut that covers the word is split around it. An output-pass cut claims a
-    kept word only where its refined audio meets the cut (see _guard_extent). Mid-word valley edges on removed words
-    are left alone (hold_judged), and intra-token restarts keep their span: they cut inside a kept token on purpose.
+    refined bounds), the extent verify's clipped_words measures. A cut that takes part of one gives that part back: an
+    edge moves to the word's boundary on the cut's side plus the cut's pad, and a cut that covers the word is split
+    around it. An edge never moves past a decided word's midpoint, so decided words stay removed: a pad that would
+    uncover one stops at the kept boundary. Mid-word valley edges on removed words are left alone (hold_judged), and
+    intra-token restarts keep their span: they cut inside a kept token on purpose.
     """
     kept = sorted(ext for ext in (word_extent(w) for w in ctx.words if id(w) not in decided) if ext[1] > ext[0])
-    refined = sorted((w.start, w.end) for w in ctx.words if id(w) not in decided and w.end > w.start)
     if not kept:
         return cuts
+    guard = _midpoints([w for w in ctx.words if id(w) in decided])
     kstarts = [a for a, _ in kept]
     kmax = max(b - a for a, b in kept)
-    rfstarts = [a for a, _ in refined]
-    rfmax = max((b - a for a, b in refined), default=0.0)
     out: list[Cut] = []
     for c in cuts:
         if is_intra_restart(c) or _is_token_fragment(c, ctx.words):
             out.append(c)
             continue
         s, e = c.start, c.end
-        if _is_output_cut(c):
-            near = _window(refined, rfstarts, rfmax, s, e)
-        else:
-            near = _window(kept, kstarts, kmax, s, e)
+        near = _window(kept, kstarts, kmax, s, e)
         pad = _pad(c.reason, ctx)
         pieces = [(s, e)]
         for _ in range(4):
             before = pieces
             for a, b in near:
-                pieces = _split_around(pieces, a, b, pad)
+                pieces = _split_around(pieces, a, b, pad, guard)
             if pieces == before:
                 break
         for x, y in pieces:
@@ -1309,6 +1372,7 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
     kends = [b for _, b, _ in kept_by_end]
     removed = sorted((w for w in ctx.words if id(w) in decided and word_extent(w)[1] > word_extent(w)[0]),
                      key=lambda w: word_extent(w)[0])
+    guard = _midpoints([w for w in ctx.words if id(w) in decided])
     cuts_l: list[Cut | None] = list(cuts)
     given: list[tuple[float, float]] = []
 
@@ -1344,12 +1408,21 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
                          else Cut(t, c.end, c.reason, c.text, {**c.provenance, SETTLED_KEY: True}))
                 cuts_l[i] = moved
                 spans, starts, longest = cover()
-                if not fragment_pieces(a, b, spans, starts, longest):
+                if not fragment_pieces(a, b, spans, starts, longest) and not _uncovers(c, moved, guard):
                     stats[kind] += 1
                     ctx.decisions.append({"word": r.text, "start": round(a, 3), "end": round(b, 3), "side": "tail" if tail else "head",
                                           "frag": [round(p, 3), round(q, 3)], "outcome": kind, "edge": round(t, 3)})
                     break
-            cuts_l[i] = _give_back(c, r, tail, ctx)
+            back = _give_back(c, r, tail, ctx)
+            others = [m for m in guard if abs(m - (r.start + r.end) / 2) > 1e-9]
+            lost = _guarded(c.start, c.end, others) if back is None else _uncovers(c, back, others)
+            if lost:
+                # Giving the word back would uncover a decided neighbour's midpoint: the fragment stays (verify warns).
+                cuts_l[i] = c
+                spans, starts, longest = cover()
+                stats["uncut"] += 1
+                break
+            cuts_l[i] = back
             given.append((round(r.start, 6), round(r.end, 6)))
             stats["given_back"] += 1
             ctx.decisions.append({"word": r.text, "start": round(a, 3), "end": round(b, 3), "side": "tail" if tail else "head",
@@ -1373,10 +1446,31 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
     ctx.fragments = stats
     ctx.given_back = given
     return [c for c in cuts_l if c is not None]
+
+
+def _clip_conflicts(decided: set[int], ctx: EdgeContext) -> list[RefinedWord]:
+    """Removes from `decided` each word whose midpoint lies inside a kept word's extent, and returns those words.
+    Such a word cannot be cut without clipping that kept word, so it stays whole: the owner-approved give-back.
+    Repeats, since a word kept now can hold another decided midpoint."""
+    out: list[RefinedWord] = []
+    while True:
+        kept = sorted(ext for ext in (word_extent(w) for w in ctx.words if id(w) not in decided) if ext[1] > ext[0])
+        starts = [a for a, _ in kept]
+        longest = max((b - a for a, b in kept), default=0.0)
+        found = [w for w in ctx.words if id(w) in decided and w.end > w.start
+                 and _window(kept, starts, longest, (w.start + w.end) / 2, (w.start + w.end) / 2 + 1e-9)]
+        if not found:
+            return out
+        for w in found:
+            decided.discard(id(w))
+        out += found
+
+
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.given_back = []
     ctx.decisions = []
     decided = _decided_removed(cuts, ctx.words)
+    conflicts = _clip_conflicts(decided, ctx)
     ctx.decided_words = decided
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
@@ -1408,7 +1502,14 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     cuts = merge_cuts(cuts, ctx.duration)
     out = merge_cuts(cuts + _fit_placed(placed, cuts, ctx), ctx.duration)
     out = keep_words_whole(out, ctx, decided)
-    return merge_cuts(take_removed_whole(out, ctx, decided), ctx.duration)
+    out = merge_cuts(take_removed_whole(out, ctx, decided), ctx.duration)
+    if ctx.fps:
+        # Last: every edge on the frame grid, as the render cuts it. The grid step never uncovers a decided word.
+        decided_words = [w for w in ctx.words if id(w) in decided]
+        kept_ext = [word_extent(w) for w in ctx.words if id(w) not in decided and word_extent(w)[1] > word_extent(w)[0]]
+        out = grid_cuts(out, ctx.fps, _midpoints(decided_words), kept_ext)
+    ctx.given_back = [(round(w.start, 6), round(w.end, 6)) for w in conflicts] + ctx.given_back
+    return merge_cuts(out, ctx.duration)
 
 
 REFINED_JOINS = "refined_joins"
@@ -1491,6 +1592,12 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
         if target is not c and _leaves_fragment(target, removed):
             target = c
         moved = _with_lead_in(target, ctx)
+        if ctx.fps:
+            # Joins stay on the frame grid like every other edge (see grid_cuts).
+            removed_ids = {id(w) for w in removed}
+            kept_near = [word_extent(w) for w in _near(c, ctx) if id(w) not in removed_ids]
+            grid = _grid_cut(moved, ctx.fps, _midpoints(removed), kept_near)
+            moved = grid if grid is not None else moved
         if (moved.start, moved.end) != (c.start, c.end):
             segments[i - 1] = Segment(prev.source, prev.start, moved.start)
             segments[i] = Segment(seg.source, moved.end, seg.end)

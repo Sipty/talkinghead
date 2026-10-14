@@ -644,6 +644,14 @@ def _run_cmd(args: argparse.Namespace) -> int:
         edges = (result.notes or {}).get("edges", {})
         if "given_back" in edges:
             print(f"edges: fragments {edges['fragments']}, given_back {edges['given_back']}")
+        inv = (result.notes or {}).get("invariants")
+        if inv:
+            print(f"invariants: judged_leaks {inv['judged_leaks']}, clipped_words {inv['clipped_words']}, "
+                  f"fragments {inv['fragments']}, off_grid_edges {inv['off_grid_edges']}, "
+                  f"snap_drift {inv['snap_drift_ms']} ms")
+            if inv["judged_leaks"] or inv["clipped_words"] or not inv["drift_ok"]:
+                print("plan-only: this plan would fail verify or drift in the render; fix before a full render")
+                return 1
         return 0
     print(f"final: {result.final}\nreport: {result.report}")
     if result.final_visuals:
