@@ -1417,6 +1417,16 @@ def _join_key(source: str, prev_end: float, next_start: float) -> tuple[str, flo
     return (source, round(prev_end, 3), round(next_start, 3))
 
 
+def _leaves_fragment(c: Cut, removed: list[RefinedWord]) -> bool:
+    """Whether cut `c` leaves a removed word with FRAGMENT_MIN_SEC and FRAGMENT_SHARE of its audio in the output."""
+    for r in removed:
+        a, b = word_extent(r)
+        kept = (b - a) - max(0.0, min(b, c.end) - max(a, c.start))
+        if kept >= FRAGMENT_MIN_SEC and kept > FRAGMENT_SHARE * (b - a):
+            return True
+    return False
+
+
 def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
                  window: float = JOIN_MOVE_WINDOW) -> tuple[Plan, list[dict]]:
     """Re-place each same-recording join of an existing plan (hand-authored EDLs).
@@ -1472,6 +1482,8 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
         rec["cost_before"] = round(here, 3)
         rec["cost_after"] = None if found is None else round(found[0], 3)
         target = found[1] if found is not None and found[0] < here - margin else c
+        if target is not c and _leaves_fragment(target, removed):
+            target = c
         moved = _with_lead_in(target, ctx)
         if (moved.start, moved.end) != (c.start, c.end):
             segments[i - 1] = Segment(prev.source, prev.start, moved.start)
