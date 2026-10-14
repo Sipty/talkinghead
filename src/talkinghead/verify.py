@@ -22,12 +22,12 @@ from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
 from .edges import (
-    FRAGMENT_MIN_SEC,
-    FRAGMENT_SHARE,
     KEPT_CLIP_SHARE,
     WORD_CUT_REASONS,
+    fragment_pieces,
     is_intra_restart,
     judged_removes,
+    uncovered_pieces,
     word_extent,
 )
 from .isolate import LAG_MIN_STRONG, timing_audio
@@ -160,8 +160,8 @@ CLIP_KEPT_SHARE = KEPT_CLIP_SHARE
 
 
 def cut_word_fragments(plan: Plan, words: Sequence, removing: Sequence[tuple[float, float, str]]) -> dict:
-    """Removed words whose audio is partly in the output: `partial` lists them (at least FRAGMENT_SHARE and
-    FRAGMENT_MIN_SEC still kept, not nearly all); `audible` counts the removed words left almost whole."""
+    """Removed words whose audio is partly in the output: `partial` lists those with a fragment on one side (see
+    fragment_pieces); `audible` counts the removed words left almost whole."""
     cuts = sorted((c.start, c.end) for c in plan.cuts)
     cstarts = [s for s, _ in cuts]
     clong = max((e - s for s, e in cuts), default=0.0)
@@ -183,19 +183,13 @@ def cut_word_fragments(plan: Plan, words: Sequence, removing: Sequence[tuple[flo
             i += 1
         if not decided:
             continue
-        covered = 0.0
-        j = bisect_left(cstarts, a - clong)
-        while j < len(cuts) and cuts[j][0] < b:
-            covered += max(0.0, min(b, cuts[j][1]) - max(a, cuts[j][0]))
-            j += 1
-        kept_len = max(0.0, (b - a) - covered)
-        if kept_len < FRAGMENT_MIN_SEC or kept_len <= FRAGMENT_SHARE * (b - a):
-            continue
-        if kept_len >= 0.9 * (b - a):
-            audible += 1
-        else:
+        left = uncovered_pieces(a, b, cuts, cstarts, clong)
+        kept_len = sum(q - p for p, q in left)
+        if fragment_pieces(a, b, cuts, cstarts, clong):
             partial.append({"text": w.text, "start": round(a, 3), "end": round(b, 3),
                             "kept_sec": round(kept_len, 3), "speaker": getattr(w, "speaker", None)})
+        elif kept_len >= 0.9 * (b - a):
+            audible += 1
     return {"partial": partial, "audible": audible}
 
 

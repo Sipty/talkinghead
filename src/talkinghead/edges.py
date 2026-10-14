@@ -1152,12 +1152,19 @@ def _uncovered(a: float, b: float, spans: list[tuple[float, float]], starts: lis
     return [(p, q) for p, q in out if q > p]
 
 
-def _kept_fragment(a: float, b: float, spans: list[tuple[float, float]], starts: list[float],
-                   longest: float) -> bool:
-    """Whether the audio of [a, b) that no cut covers is a fragment: FRAGMENT_MIN_SEC and FRAGMENT_SHARE in total,
-    summed over both sides. Matches verify's cut_word_fragments."""
-    kept = sum(q - p for p, q in _uncovered(a, b, spans, starts, longest))
-    return kept >= FRAGMENT_MIN_SEC and kept > FRAGMENT_SHARE * (b - a)
+def uncovered_pieces(a: float, b: float, spans: list[tuple[float, float]], starts: list[float],
+                     longest: float) -> list[tuple[float, float]]:
+    """The parts of [a, b) that no cut covers (see _uncovered)."""
+    return _uncovered(a, b, spans, starts, longest)
+
+
+def fragment_pieces(a: float, b: float, spans: list[tuple[float, float]], starts: list[float],
+                    longest: float) -> list[tuple[float, float]]:
+    """The uncovered pieces of [a, b) that are fragments: each at least FRAGMENT_MIN_SEC and FRAGMENT_SHARE of the word.
+
+    One side at a time. A splice margin (splice_pad on each side, under FRAGMENT_MIN_SEC) is not a scrap."""
+    return [(p, q) for p, q in _uncovered(a, b, spans, starts, longest)
+            if q - p >= FRAGMENT_MIN_SEC and q - p > FRAGMENT_SHARE * (b - a)]
 
 
 def _quietest(ctx: EdgeContext, lo: float, hi: float, *, late: bool) -> tuple[float, float] | None:
@@ -1222,7 +1229,7 @@ def _overlap_edge(hit: list, p: float, q: float, *, tail: bool, speaker) -> tupl
 
 
 def _tail_edge(p: float, r: RefinedWord, kept: list, kstarts: list[float],
-               ctx: EdgeContext) -> tuple[str, float | None]:
+               ctx: EdgeContext, pad: float) -> tuple[str, float | None]:
     """(kind, t) for a cut whose edge sits at p inside removed word r, given the kept word that follows r.
 
     kind "quiet" when no kept word lies on this side, "overlap" or "gap"/"touch" for a boundary; kind "fail" when
@@ -1235,7 +1242,7 @@ def _tail_edge(p: float, r: RefinedWord, kept: list, kstarts: list[float],
     j = bisect_left(kstarts, q - 1e-9)
     if j >= len(kept):
         t = _quiet_outside(q, q + OUTWARD_SEC, ctx, late=False)
-        return ("quiet", t) if t is not None else ("fail", None)
+        return "quiet", (t if t is not None else min(ctx.duration, q + pad))
     ka, kb, k = kept[j]
     if ka - q >= BOUNDARY_GAP_SEC:
         kind = "gap"
@@ -1252,7 +1259,7 @@ def _tail_edge(p: float, r: RefinedWord, kept: list, kstarts: list[float],
 
 
 def _head_edge(q: float, r: RefinedWord, kept: list, kends: list[float],
-               ctx: EdgeContext) -> tuple[str, float | None]:
+               ctx: EdgeContext, pad: float) -> tuple[str, float | None]:
     """(kind, t) for a cut whose edge sits at q inside removed word r, given the kept word that precedes r."""
     p = word_extent(r)[0]
     hit = [k for a, b, k in kept if a < q and b > p]
@@ -1261,7 +1268,7 @@ def _head_edge(q: float, r: RefinedWord, kept: list, kends: list[float],
     j = bisect_right(kends, p + 1e-9) - 1
     if j < 0:
         t = _quiet_outside(p - OUTWARD_SEC, p, ctx, late=True)
-        return ("quiet", t) if t is not None else ("fail", None)
+        return "quiet", (t if t is not None else max(0.0, p - pad))
     ka, kb, k = kept[j]
     if p - kb >= BOUNDARY_GAP_SEC:
         kind = "gap"
@@ -1314,8 +1321,7 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
     for r in removed:
         a, b = word_extent(r)
         for _ in range(4):
-            frags = [(p, q) for p, q in _uncovered(a, b, spans, starts, longest)] \
-                if _kept_fragment(a, b, spans, starts, longest) else []
+            frags = fragment_pieces(a, b, spans, starts, longest)
             if not frags:
                 break
             p, q = frags[0]
@@ -1331,13 +1337,14 @@ def take_removed_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> 
             tail = i_tail is not None
             i = i_tail if tail else i_head
             c = cuts_l[i]
-            kind, t = _tail_edge(p, r, kept, kstarts, ctx) if tail else _head_edge(q, r, kept, kends, ctx)
+            pad = _pad(c.reason, ctx)
+            kind, t = _tail_edge(p, r, kept, kstarts, ctx, pad) if tail else _head_edge(q, r, kept, kends, ctx, pad)
             if t is not None:
                 moved = (Cut(c.start, t, c.reason, c.text, {**c.provenance, SETTLED_KEY: True}) if tail
                          else Cut(t, c.end, c.reason, c.text, {**c.provenance, SETTLED_KEY: True}))
                 cuts_l[i] = moved
                 spans, starts, longest = cover()
-                if not _kept_fragment(a, b, spans, starts, longest):
+                if not fragment_pieces(a, b, spans, starts, longest):
                     stats[kind] += 1
                     ctx.decisions.append({"word": r.text, "start": round(a, 3), "end": round(b, 3), "side": "tail" if tail else "head",
                                           "frag": [round(p, 3), round(q, 3)], "outcome": kind, "edge": round(t, 3)})
@@ -1418,11 +1425,10 @@ def _join_key(source: str, prev_end: float, next_start: float) -> tuple[str, flo
 
 
 def _leaves_fragment(c: Cut, removed: list[RefinedWord]) -> bool:
-    """Whether cut `c` leaves a removed word with FRAGMENT_MIN_SEC and FRAGMENT_SHARE of its audio in the output."""
+    """Whether cut `c` leaves a fragment (see fragment_pieces) of a removed word in the output."""
     for r in removed:
         a, b = word_extent(r)
-        kept = (b - a) - max(0.0, min(b, c.end) - max(a, c.start))
-        if kept >= FRAGMENT_MIN_SEC and kept > FRAGMENT_SHARE * (b - a):
+        if fragment_pieces(a, b, [(c.start, c.end)], [c.start], c.end - c.start):
             return True
     return False
 
