@@ -306,17 +306,19 @@ def test_a_polish_cut_renders_verifies_and_replays_from_its_memo(clip: Path, tmp
     assert not _covers_third(Plan.from_json(second.plan_path.read_text()))
 
 
-def test_no_cut_takes_part_of_a_word_whose_asr_stamp_runs_ahead_of_its_refined_bounds() -> None:
+@pytest.mark.parametrize("silence_end", [7.766, 7.70])
+def test_no_cut_takes_part_of_a_word_whose_asr_stamp_runs_ahead_of_its_refined_bounds(silence_end) -> None:
     # Shape of the voiced-gap fixture: the next word's refined burst starts at 7.745 but its ASR stamp at 7.30. A
-    # silence cut from the pause stage (7.334-7.766) reaches into that stamp; with the gap cut before it, the pair
-    # fuses into one gap cut that clips the word. Guards must use the stamped extent, so nothing lands in 7.30-8.00.
+    # silence cut from the pause stage reaches into that stamp (7.334-7.766, or one that ends just before the refined
+    # onset at 7.70); with the gap cut before it, the pair fuses into one gap cut that clips the word. Mechanical
+    # cuts keep the stamped extent, so nothing lands in 7.30-8.00.
     db = np.full(int(10.0 / FRAME_SEC), -50.0)
     env = Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
     words = [RefinedWord(" tasks", 4.9, 5.3, 4.9, 5.3, 1.0),
              RefinedWord(" And", 7.745, 7.875, 7.30, 8.00, 1.0)]
     ctx = EdgeContext(duration=10.0, env=env, floor=-50.0, words=words, fps=None)
     out = finalize_cuts([Cut(5.315, 7.15, "gap", None, {"boundary": "sentence"}),
-                         Cut(7.334, 7.766, "silence")], ctx)
+                         Cut(7.334, silence_end, "silence")], ctx)
     assert out, "the gap must still be cut"
     assert all(c.end <= 7.30 or c.start >= 8.00 for c in out), out
 

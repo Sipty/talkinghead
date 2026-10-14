@@ -261,12 +261,16 @@ def mark_asr_guard(cuts: list[Cut], placed: list[Cut]) -> list[Cut]:
 def _guard_extent(cut: Cut, w: RefinedWord) -> tuple[float, float]:
     """The audio a kept word claims against `cut`.
 
-    An ASR-guarded cut claims the word's ASR-widened extent, but only where the word's refined audio meets the cut:
-    a stamp that runs into the cut from a word the cut does not touch claims nothing there.
+    A mechanical ASR-guarded cut (a silence beside a placed gap) always claims the word's ASR-widened extent: that
+    guard exists so a cut never takes part of stamped speech. An output-confirmed cut claims it only where the word's
+    refined audio meets the cut, because its removal was judged on the render: a stamp that runs into the cut from a
+    word the cut does not touch claims nothing there.
     """
-    if asr_guarded(cut) and _overlap(cut.start, cut.end, w.start, w.end) > 0:
-        return word_extent(w)
-    return (w.start, w.end)
+    if not asr_guarded(cut):
+        return (w.start, w.end)
+    if _is_output_cut(cut) and _overlap(cut.start, cut.end, w.start, w.end) <= 0:
+        return (w.start, w.end)
+    return word_extent(w)
 
 
 def _kept_spans(cut: Cut, ctx: EdgeContext, *, voices: bool = True) -> list[tuple[float, float]]:
