@@ -22,6 +22,7 @@ from .color import probe_color
 from .config import Config
 from .derive import pause_boundary, pause_cap
 from .edges import (
+    FRAGMENT_MIN_SEC,
     KEPT_CLIP_SHARE,
     WORD_CUT_REASONS,
     fragment_pieces,
@@ -185,11 +186,13 @@ def cut_word_fragments(plan: Plan, words: Sequence, removing: Sequence[tuple[flo
             continue
         left = uncovered_pieces(a, b, cuts, cstarts, clong)
         kept_len = sum(q - p for p, q in left)
-        if fragment_pieces(a, b, cuts, cstarts, clong):
+        if kept_len < FRAGMENT_MIN_SEC:
+            continue
+        if kept_len >= 0.9 * (b - a):
+            audible += 1
+        elif fragment_pieces(a, b, cuts, cstarts, clong):
             partial.append({"text": w.text, "start": round(a, 3), "end": round(b, 3),
                             "kept_sec": round(kept_len, 3), "speaker": getattr(w, "speaker", None)})
-        elif kept_len >= 0.9 * (b - a):
-            audible += 1
     return {"partial": partial, "audible": audible}
 
 
