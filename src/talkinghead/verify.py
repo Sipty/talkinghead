@@ -246,14 +246,18 @@ def clipped_words(plan: Plan, words: Sequence,
 def plan_invariants(plan: Plan, words: Sequence, judged: Sequence[tuple[float, float, str]],
                     removing: Sequence[tuple[float, float, str]], given_back: Collection[tuple[float, float]],
                     fps: float | None) -> dict:
-    """The edge-pass invariants of a plan as the render's verify measures them, plus the render's frame snap:
-    `snap_drift_ms`: worst shift the snap puts on the output timeline; source_timing fails past SOURCE_TIMING_TOL.
-    A plan-only build reports these, so a plan that would fail a full render fails before it."""
+    """The edge-pass invariants of a plan as the render's verify measures them.
+    `off_grid_edges` counts cut and segment edges off the frame grid: a settled plan has none (the source's own start
+    and end are exempt). `snap_drift_ms` is the worst shift the render's snap puts on the output timeline;
+    source_timing fails past SOURCE_TIMING_TOL. A plan-only build reports these, so a bad plan fails first."""
     cut_plan = _word_cuts(plan)
     off = 0
     drift = worst = 0.0
     if fps:
-        off = sum(1 for c in plan.cuts for x in (c.start, c.end) if abs(x * fps - round(x * fps)) > 0.02)
+        end = plan.sources[plan.main].duration
+        edges = [x for c in plan.cuts for x in (c.start, c.end)]
+        edges += [x for s in plan.segments for x in (s.start, s.end) if x not in (0.0, end)]
+        off = sum(1 for x in edges if abs(x * fps - round(x * fps)) > 0.02)
         for s in plan.segments:
             a, b = round(s.start * fps) / fps, round(s.end * fps) / fps
             drift += (b - a if b > a else 0.0) - (s.end - s.start)

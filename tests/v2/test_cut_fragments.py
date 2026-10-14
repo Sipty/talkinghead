@@ -143,19 +143,73 @@ def test_an_output_cut_never_clips_a_kept_words_asr_tail() -> None:
     assert all(not (c.start < 1.00 and c.end > 0.50) for c in out), out
 
 
-def test_grid_cut_lands_on_the_frame_grid_and_keeps_a_decided_midpoint() -> None:
-    # 0.51-1.27 at 30 fps: the start moves up to 0.5333 unless a decided midpoint (0.52) sits in the first frame; then
-    # it moves down to 0.5. The end goes down to 1.2667.
-    out = E.grid_cuts([Cut(0.51, 1.27, "polish", "x")], 30.0, [0.52], [])
-    assert len(out) == 1
-    assert out[0].start <= 0.52 < out[0].end
-    assert all(abs(x * 30 - round(x * 30)) < 1e-6 for x in (out[0].start, out[0].end)), out
+def test_shrink_moves_each_edge_inward_onto_the_frame_grid() -> None:
+    out = E._shrink(Cut(0.51, 1.27, "polish", "x"), 30.0)
+    assert out is not None
+    assert (out.start, out.end) == (16 / 30, 38 / 30)
 
 
-def test_a_grid_move_that_would_enter_a_kept_word_stays_off_the_grid() -> None:
-    # The midpoint 0.52 forces the start down to 0.50, which would enter the kept word 0.40-0.505: it stays at 0.51.
-    out = E.grid_cuts([Cut(0.51, 1.27, "polish", "x")], 30.0, [0.52], [(0.40, 0.505)])
-    assert len(out) == 1 and out[0].start == 0.51
+def test_settle_grid_covers_a_decided_word_the_shrink_uncovers_when_no_kept_word_is_in_the_way() -> None:
+    um = _w("um", 0.52, 0.56)
+    ctx = _ctx([um], _levels([]))
+    ctx.fps = 30.0
+    out, given = E.settle_grid([Cut(0.50, 0.545, "filler", "um")], ctx, {id(um)}, [Cut(0.50, 0.545, "filler", "um")])
+    assert given == []
+    assert any(c.start <= 0.54 < c.end for c in out), out
+    assert all(abs(x * 30 - round(x * 30)) < 1e-6 for c in out for x in (c.start, c.end)), out
+
+
+def test_settle_grid_gives_a_decided_word_back_when_covering_it_would_clip_a_kept_word() -> None:
+    so = _w("so", 0.30, 0.505)
+    um = _w("um", 0.52, 0.56)
+    ctx = _ctx([so, um], _levels([]))
+    ctx.fps = 30.0
+    decided = {id(um)}
+    out, given = E.settle_grid([Cut(0.51, 0.545, "filler", "um")], ctx, decided, [Cut(0.51, 0.545, "filler", "um")])
+    assert given == [um] and decided == set()
+    assert not any(c.start < 0.505 and c.end > 0.30 for c in out), out
+    assert not any(c.start < 0.56 and c.end > 0.52 for c in out), out
+
+
+def test_an_edge_moved_by_the_keep_pad_after_the_snap_is_snapped_and_kept_words_survive() -> None:
+    so = _w("so", 0.5, 1.0)
+    um = _w("um", 1.03, 1.5)
+    ctx = _ctx([so, um], _levels([]))
+    ctx.fps = 30.0
+    decided = {id(um)}
+    moved = E.keep_words_whole([Cut(0.8, 1.5, "filler", "um")], ctx, decided)
+    out, given = E.settle_grid(moved, ctx, decided, [Cut(0.8, 1.5, "filler", "um")])
+    assert given == []
+    assert all(abs(x * 30 - round(x * 30)) < 1e-6 for c in out for x in (c.start, c.end)), out
+    assert all(c.start >= 1.0 for c in out), out
+    assert any(c.start <= 1.265 < c.end for c in out), out
+
+
+def test_a_judged_word_left_uncovered_before_the_grid_is_covered_again() -> None:
+    um = _w("um", 0.52, 0.56)
+    ctx = _ctx([um], _levels([]))
+    ctx.fps = 30.0
+    out, given = E.settle_grid([], ctx, {id(um)}, [Cut(0.50, 0.545, "filler", "um")])
+    assert given == []
+    assert any(c.start <= 0.54 < c.end for c in out), out
+
+
+def test_a_removed_word_left_with_a_kept_fragment_by_the_grid_is_covered_whole() -> None:
+    um = _w("um", 1.00, 1.20)
+    ctx = _ctx([um], _levels([]))
+    ctx.fps = 30.0
+    out, given = E.settle_grid([Cut(1.045, 1.20, "filler", "um")], ctx, {id(um)}, [])
+    assert given == []
+    assert [(c.start, c.end) for c in out] == [(1.0, 1.2)], out
+
+
+def test_the_last_segment_ends_on_the_frame_grid_at_an_off_grid_source_end() -> None:
+    source = SourceInfo("main", "/v/in.mp4", "sha", 10.01)
+    plan = Plan.from_cuts(source, [Cut(1.0, 2.0, "filler", "um")])
+    ctx = _ctx([], _levels([]))
+    ctx.fps = 30.0
+    out, _ = E.refine_joins(plan, ctx)
+    assert out.segments[-1].end == 10.0, out.segments
 
 
 def test_finalize_leaves_every_cut_edge_on_the_frame_grid() -> None:

@@ -649,7 +649,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
             print(f"invariants: judged_leaks {inv['judged_leaks']}, clipped_words {inv['clipped_words']}, "
                   f"fragments {inv['fragments']}, off_grid_edges {inv['off_grid_edges']}, "
                   f"snap_drift {inv['snap_drift_ms']} ms")
-            if inv["judged_leaks"] or inv["clipped_words"] or not inv["drift_ok"]:
+            if inv["judged_leaks"] or inv["clipped_words"] or inv["off_grid_edges"] or not inv["drift_ok"]:
                 print("plan-only: this plan would fail verify or drift in the render; fix before a full render")
                 return 1
         return 0

@@ -1101,48 +1101,131 @@ def _split_around(pieces: list[tuple[float, float]], a: float, b: float, pad: fl
     return out
 
 
-def _enters(lo: float, hi: float, kept: list[tuple[float, float]]) -> bool:
-    """Whether the span (lo, hi) overlaps the extent of a kept word."""
-    return any(a < hi and b > lo for a, b in kept)
-
-
 def _uncovers(old: Cut, new: Cut, guard: list[float]) -> bool:
     """Whether moving `old` to `new` uncovers a guarded point (a decided word's midpoint) that `old` covered."""
     lost = [(old.start, min(old.end, new.start)), (max(old.start, new.end), old.end)]
     return any(_guarded(lo, hi, guard) for lo, hi in lost if hi > lo)
 
 
-def _grid_cut(c: Cut, fps: float, guard: list[float], kept: list[tuple[float, float]]) -> Cut | None:
-    """`c` shrunk onto the frame grid: start up, end down, so kept audio beside it is never clipped. An edge whose
-    step would uncover a guarded point moves outward instead, unless that would enter a kept word: then it stays
-    where it is, off the grid, and the render rounds it. None when no frame is left."""
+def _shrink(c: Cut, fps: float) -> Cut | None:
+    """`c` shrunk onto the frame grid: a start rounds up and an end rounds down, so the cut never reaches the kept audio
+    beside it. None when no frame is left."""
     start = math.ceil(c.start * fps - 1e-6) / fps
-    if _guarded(c.start, start, guard):
-        out_start = math.floor(c.start * fps + 1e-6) / fps
-        start = c.start if _enters(out_start, c.start, kept) else out_start
     end = math.floor(c.end * fps + 1e-6) / fps
-    if _guarded(end, c.end, guard):
-        out_end = math.ceil(c.end * fps - 1e-6) / fps
-        end = c.end if _enters(c.end, out_end, kept) else out_end
     if end - start <= MIN_CUT:
         return None
     return Cut(start, end, c.reason, c.text, dict(c.provenance))
 
 
-def grid_cuts(cuts: list[Cut], fps: float, guard: list[float], kept: list[tuple[float, float]]) -> list[Cut]:
-    """Every cut on the frame grid (see _grid_cut). A cut too short for a frame is dropped unless it covers a guarded
-    point, which then keeps it as placed. Intra-token restarts keep their span: they cut inside a word on purpose."""
+def _merged_spans(cuts: list[Cut]) -> list[tuple[float, float]]:
+    """The sorted, merged spans the non-restart cuts cover."""
+    out: list[tuple[float, float]] = []
+    for s, e in sorted((c.start, c.end) for c in cuts if not is_intra_restart(c)):
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def _covers(spans: list[tuple[float, float]], t: float) -> bool:
+    """Whether a merged, sorted span list covers instant t."""
+    i = bisect_right([s for s, _ in spans], t) - 1
+    return i >= 0 and spans[i][0] <= t < spans[i][1]
+
+
+def _carve(cuts: list[Cut], a: float, b: float, fps: float) -> list[Cut]:
+    """`cuts` with [a, b) taken out on the frame grid: a piece left of it ends at the frame at or before a,
+    a piece right of it starts at the frame at or after b, so neither reaches the span."""
+    lo = math.floor(a * fps + 1e-6) / fps
+    hi = math.ceil(b * fps - 1e-6) / fps
     out: list[Cut] = []
     for c in cuts:
-        if is_intra_restart(c):
+        if c.end <= a or c.start >= b:
             out.append(c)
             continue
-        grid = _grid_cut(c, fps, guard, kept)
-        if grid is not None:
-            out.append(grid)
-        elif _guarded(c.start, c.end, guard):
-            out.append(c)
+        if c.start < lo:
+            out.append(Cut(c.start, lo, c.reason, c.text, dict(c.provenance)))
+        if c.end > hi:
+            out.append(Cut(hi, c.end, c.reason, c.text, dict(c.provenance)))
     return out
+
+
+def _gaps(lo: float, hi: float, spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """The parts of [lo, hi) that the sorted, merged spans do not cover."""
+    out: list[tuple[float, float]] = []
+    cur = lo
+    for s, e in spans:
+        if e <= cur:
+            continue
+        if s >= hi:
+            break
+        if s > cur:
+            out.append((cur, s))
+        cur = max(cur, e)
+    if cur < hi:
+        out.append((cur, hi))
+    return out
+
+
+def _unsettled(w: RefinedWord, wanted: list[tuple[float, float]], spans: list[tuple[float, float]],
+                is_decided: bool) -> bool:
+    """Whether a word needs the settle step: a judged midpoint left uncovered (any word a judged span covers, decided or
+    not), or, for a decided word, a kept piece of at least FRAGMENT_MIN_SEC inside the word's refined bounds while part
+    of the word stays covered (verify's fragment rule, counted per side)."""
+    mid = (w.start + w.end) / 2
+    if _covers(wanted, mid) and not _covers(spans, mid):
+        return True
+    if not is_decided:
+        return False
+    gaps = _gaps(w.start, w.end, spans)
+    kept = sum(q - p for p, q in gaps)
+    return kept < 0.9 * (w.end - w.start) and any(q - p >= FRAGMENT_MIN_SEC for p, q in gaps)
+
+
+def settle_grid(cuts: list[Cut], ctx: EdgeContext, decided: set[int],
+                judged: list[Cut]) -> tuple[list[Cut], list[RefinedWord]]:
+    """The last edge step: every cut edge on the frame grid, the grid the render snaps to, so the render moves nothing.
+
+    Each cut shrinks onto the grid (see _shrink), which never reaches kept audio. Then a decided word is checked: a
+    judged midpoint (`judged`, as the edge pass received it) must stay covered, and a removed word must not keep a
+    fragment of FRAGMENT_MIN_SEC or more. Either is fixed by a grid cut over the word's extent, unless a kept word lies
+    in that extent; then the word is given back whole. A carve that uncovers another such word gives it back the same
+    way. Words the take-removed step gave back keep that give-back. Intra-token restarts keep their span."""
+    fps = ctx.fps
+    wanted = _merged_spans(judged)
+    taken = {(round(a, 6), round(b, 6)) for a, b in ctx.given_back}
+    kept = sorted(ext for ext in (word_extent(w) for w in ctx.words if id(w) not in decided) if ext[1] > ext[0])
+    kstarts = [a for a, _ in kept]
+    kmax = max((b - a for a, b in kept), default=0.0)
+    intra = [c for c in cuts if is_intra_restart(c)]
+    cover = [g for c in cuts if not is_intra_restart(c) for g in [_shrink(c, fps)] if g is not None]
+    given: list[RefinedWord] = []
+    added: set[int] = set()
+    while True:
+        result = merge_cuts(cover + intra, ctx.duration)
+        for w in given:
+            a, b = word_extent(w)
+            result = _carve(result, a, b, fps)
+        spans = _merged_spans(result)
+        given_ids = {id(g) for g in given}
+        missing = [w for w in ctx.words if w.end > w.start and id(w) not in given_ids
+                   and (round(w.start, 6), round(w.end, 6)) not in taken
+                   and _unsettled(w, wanted, spans, id(w) in decided)]
+        if not missing:
+            return merge_cuts(result, ctx.duration), given
+        for w in missing:
+            mid = (w.start + w.end) / 2
+            a, b = word_extent(w)
+            a, b = math.floor(a * fps + 1e-6) / fps, math.ceil(b * fps - 1e-6) / fps
+            if id(w) in added or _window(kept, kstarts, kmax, a, b):
+                decided.discard(id(w))
+                given.append(w)
+                continue
+            src = next((c for c in judged + cuts if c.start <= mid < c.end), None)
+            reason, text, prov = (src.reason, src.text, dict(src.provenance)) if src else ("polish", w.text, {})
+            cover.append(Cut(a, b, reason, text, prov))
+            added.add(id(w))
 
 
 def keep_words_whole(cuts: list[Cut], ctx: EdgeContext, decided: set[int]) -> list[Cut]:
@@ -1470,6 +1553,7 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.given_back = []
     ctx.decisions = []
     decided = _decided_removed(cuts, ctx.words)
+    judged_in = [c for c in cuts if c.reason in JUDGED_REASONS and not is_intra_restart(c)]
     conflicts = _clip_conflicts(decided, ctx)
     ctx.decided_words = decided
     ctx.dropped_fillers = 0
@@ -1503,12 +1587,11 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     out = merge_cuts(cuts + _fit_placed(placed, cuts, ctx), ctx.duration)
     out = keep_words_whole(out, ctx, decided)
     out = merge_cuts(take_removed_whole(out, ctx, decided), ctx.duration)
+    given_grid: list[RefinedWord] = []
     if ctx.fps:
-        # Last: every edge on the frame grid, as the render cuts it. The grid step never uncovers a decided word.
-        decided_words = [w for w in ctx.words if id(w) in decided]
-        kept_ext = [word_extent(w) for w in ctx.words if id(w) not in decided and word_extent(w)[1] > word_extent(w)[0]]
-        out = grid_cuts(out, ctx.fps, _midpoints(decided_words), kept_ext)
-    ctx.given_back = [(round(w.start, 6), round(w.end, 6)) for w in conflicts] + ctx.given_back
+        # Last edge step: the render snaps every edge to the frame grid, so the cut edges must already be on it.
+        out, given_grid = settle_grid(out, ctx, decided, judged_in)
+    ctx.given_back = [(round(w.start, 6), round(w.end, 6)) for w in conflicts + given_grid] + ctx.given_back
     return merge_cuts(out, ctx.duration)
 
 
@@ -1593,11 +1676,10 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
             target = c
         moved = _with_lead_in(target, ctx)
         if ctx.fps:
-            # Joins stay on the frame grid like every other edge (see grid_cuts).
-            removed_ids = {id(w) for w in removed}
-            kept_near = [word_extent(w) for w in _near(c, ctx) if id(w) not in removed_ids]
-            grid = _grid_cut(moved, ctx.fps, _midpoints(removed), kept_near)
-            moved = grid if grid is not None else moved
+            # Joins stay on the frame grid (the render snaps to it): a shrunk edge that would uncover a removed word
+            # keeps the join's original, grid-placed cut.
+            grid = _shrink(moved, ctx.fps)
+            moved = grid if grid is not None and not _uncovers(moved, grid, _midpoints(removed)) else c
         if (moved.start, moved.end) != (c.start, c.end):
             segments[i - 1] = Segment(prev.source, prev.start, moved.start)
             segments[i] = Segment(seg.source, moved.end, seg.end)
@@ -1609,4 +1691,12 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
     refined = [{"source": seg.source, "prev_end": round(prev.end, 3), "next_start": round(seg.start, 3)}
                for prev, seg in zip(segments, segments[1:]) if _is_refinable(plan, prev, seg)]
     provenance = {**plan.provenance, REFINED_JOINS: refined}
+    if ctx.fps and segments:
+        # The last segment ends at its source's end, rarely on the frame grid: floor it (at most one frame of tail goes)
+        # so the render's snap moves nothing.
+        last = segments[-1]
+        if last.end >= plan.sources[last.source].duration - 1e-9:
+            floored = math.floor(last.end * ctx.fps + 1e-6) / ctx.fps
+            if floored > last.start:
+                segments[-1] = Segment(last.source, last.start, floored)
     return replace(plan, segments=segments, cuts=cuts, provenance=provenance), records
