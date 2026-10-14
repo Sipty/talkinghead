@@ -255,8 +255,9 @@ The settings most people change first are `votes` and `agree` (the vote size), `
 
 `isolate_voice = true` in the config file, or `--isolate-voice` on the command line, renders the audio through Apple's voice isolation (AUSoundIsolation).
 It is for noisy places: a hotel lobby, a restaurant, a handheld mic.
-Transcription, judging and edge placement keep reading the original audio, so turning it on re-judges nothing.
-Only the rendered track, its loudness mastering and the output transcript use the isolated audio.
+Silence for the pauses stage and the dead-air check is measured on the isolated track, so room tone the unit gates to digital silence counts as silence. The source transcript, the judges' candidates and edge placement keep reading the original audio.
+The output pass judges the transcript of an original-audio companion render, one per round (an extra render and transcription each round). The isolated render's own transcript is used only for the `isolation_words` count.
+Turning it on re-keys the pauses stage. Later stages that build on the pause cuts (restructure, polish, output rounds) recompute, and their judge calls may run again. Structure, retakes and content replay from their memos.
 
 - `isolate_mix` (default `1.0`) is the isolated share of the track, from `0` (the original microphone audio) to `1` (fully isolated). `--isolate-mix F` sets it.
 - The unit delays its output. talkinghead measures that delay by cross-correlating the output with the original at six loud points, and trims it. The points must agree, or the run stops.

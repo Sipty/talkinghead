@@ -50,7 +50,7 @@ the memos are hand-editable, so a re-key must not discard manual cuts without a 
 | 5 | content | which whole sentences do not earn their runtime (and a coherence veto) | judge + coherence pass | stage memo |
 | 6 | pauses | pause trims, fillers, similarity-detected restarts, mouth noises | deterministic | stage memo |
 | 6b | restructure (opt-in: `restructure = true`) | topic blocks: which have no payoff (dropped), which open the cut (moved first) | judge: one sample per window, then one vote | stage memo, `plan.json` layout |
-| 6c | polish (on by default; `polish = false` opts out) | gap tightening between kept words (deterministic); word spans a judge names as disfluent; output pass: stutters and fillers the render still has | judge per window, k-vote agreement (gaps need no judge); output pass judges one batch per round | stage memo, one per output round |
+| 6c | polish (on by default; `polish = false` opts out) | gap tightening between kept words (deterministic); word spans a judge names as disfluent; output pass: fillers, repeats and fragment restarts the render still has | judge per window, k-vote agreement (gaps need no judge); output pass judges one batch per round | stage memo, one per output round |
 | 7 | edges | final span of every cut | deterministic | `plan.json` |
 | 8 | render | picture and mastered audio, or mastered audio alone | deterministic | `final.mp4` or `final.wav`, `render.json` |
 | 9 | verify | did the render keep the plan's promises | deterministic, declarative checks | `verify/facts.json` |
@@ -165,6 +165,7 @@ a boundary-typed, length-scaled amount split across the two edges, leading and t
 silence goes entirely), filler cuts for every hesitation token emitted as a word (`min_filler_dur`, default 0, sets an optional length floor), and `restart` cuts - an abandoned sentence that the next one
 restates, found by token similarity. The mouth-noise cuts computed during analysis are
 appended unchanged.
+With voice isolation on, the silence the pauses stage and the dead-air check read comes from the isolated track (16 kHz, unrepaired, cached per source). The pauses memo keys on that silence; stages after it recompute only when their input cuts change.
 
 A pause of raw length `raw` keeps `min(raw - 0.02, cap(boundary), pause_keep +
 pause_keep_ratio * (raw - pause_above))`. `pause_keep` (0.30 s) was chosen on a reference narrative cut, where
@@ -225,7 +226,7 @@ On a plan-only rebuild the polish judge is the one judge allowed to answer (`--p
 #### Output pass (`residual.py`, rounds in `stages/polish.py`)
 
 The source transcript cannot show a stutter Scribe merged into one word ("I, I, I" comes back as one "I"), so after
-each render the pipeline transcribes the render itself and scans that transcript (`residual.scan`) for three things:
+each render the pipeline transcribes the render and scans that transcript (`residual.scan`) for three things. With voice isolation on, the transcript comes from an original-audio companion of the render, because the unit changes which words and stamps the transcriber returns; the isolated render is transcribed only for its word count.
 
 - fillers: uh, um, erm, hmm, hm, mm, in any case or spelling;
 - a 1-3 word phrase said twice in a row, after normalising case and punctuation ("I, I", "it's, it's");
@@ -240,11 +241,17 @@ in the source (a gap cut sits there, and the cut runs through the removed silenc
 backward (a moved block) is reported and not cut. Output-pass filler cuts settle their voiced edges like source fillers
 (`edges.settle_filler_edges`); a filler the source transcript never named can still keep a tail, which the residual check reports.
 
+A fragment restarted inside one token ("impl-implement") is placed on the source audio, not the render. `intraword.locate` aligns the token's onset within `ALIGN_SEC` (80 ms) of Scribe's stamp, since the stamp can start and end tens of milliseconds off the sound. It then takes the restart as the candidate whose onset matches best (similarity at least `MIN_SIMILARITY`, 0.90) among those whose cut point is a closure at least `MIN_DIP_DB` (8 dB) below the loudest frame before it. A token that does not qualify is skipped, and the report says why: `skipped: no restart in the audio` (the match or the closure failed), `skipped: too short for a restart`, `skipped: crosses a join`, or `skipped: too short` (the cut would be below `min_cut_sec`). A skipped finding stays in the residual list.
+
+These thresholds were set on one recording: four of its five stutters pass with their numbers steady across stamp offsets, the fifth is not placed, and about one ordinary word in ten also passes the onset test. A placement therefore needs Scribe's X-Xy token and the judge's confirmation first. Nothing guarantees that every stutter is removed or that no word is clipped: read the residual list and the placed cuts in the report.
+
 The rounds run up to `polish_output_rounds` (default 2, 0 disables). Each round re-renders the plan, transcribes the
 render again and stops early when a round confirms nothing. The round's memo is keyed on the cuts it builds on, so a
 plan-only rebuild replays it without transcribing. The final check `residual_disfluencies` (warn, never fatal) lists
 findings the last render still shows that the judge did not keep, with output times. The report's Polish section
 lists every round, the skipped findings, the residuals and the judged-keep list.
+
+A round runs one more time when the final render shows a repeat or restart that no round covered (its transcript changed after the cuts): one extra judged round at most, and only when `polish_output_rounds` is above 0. Plan-only replays that stored round.
 
 The pass runs only when the render is transcribed. With `--no-output-asr` it is skipped, and the report says so.
 

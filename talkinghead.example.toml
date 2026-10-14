@@ -67,8 +67,9 @@
 # Output frame rate. Cut edges snap to this grid.
 # fps = 30
 
-# Voice isolation (macOS only): render the audio through Apple's voice isolation. Transcription and judging keep the
-# original audio. isolate_mix is the isolated share, 0 to 1.
+# Voice isolation (macOS only, off by default): render the audio through Apple's voice isolation. Transcription,
+# judging and edge placement keep the original audio; the pauses stage measures silence on the isolated track, and the
+# output pass judges an original-audio companion render. isolate_mix is the isolated share, 0 to 1.
 # isolate_voice = false
 # isolate_mix = 1.0
 
