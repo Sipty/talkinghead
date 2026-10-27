@@ -219,13 +219,16 @@ def _settle_lock(plan: Plan, master: Path, lock_path: Path, transcript_path: Pat
                  stop_at_lock: bool) -> tuple[dict, Path, str | None]:
     """The lock the picture renders against: (lock, locked audio path, plan sha it replaced).
 
-    A lock `check_lock` accepts stays byte for byte. A missing lock is written. A stale lock is replaced and its plan
-    sha recorded, unless it is HELD (a `--stop-at-lock` run left the hold file for the owner's listen): a held lock
-    binds, so only another `--stop-at-lock` run may replace it."""
+    A lock `check_lock` accepts and whose transcript `locked_transcript` can load stays byte for byte. A missing lock
+    is written. A stale lock, or one with no usable transcript (`talkinghead lock` records none; the file may also be
+    deleted or edited), is replaced and its plan sha recorded, unless it is HELD (a `--stop-at-lock` run left the hold
+    file for the owner's listen): a held lock binds, so only another `--stop-at-lock` run may replace it."""
     relocked_from: str | None = None
     try:
         lock = read_lock(lock_path)
-        return lock, check_lock(lock, plan, fps=fps, lock_path=lock_path), None
+        audio = check_lock(lock, plan, fps=fps, lock_path=lock_path)
+        locked_transcript(lock, lock_path=lock_path)  # the visuals plan on it, so a lock without it cannot be reused
+        return lock, audio, None
     except LockMismatch as e:
         if lock_path.exists():
             if _hold_path(lock_path).exists() and not stop_at_lock:

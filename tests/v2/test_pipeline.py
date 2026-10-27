@@ -888,6 +888,40 @@ def test_an_edit_after_the_lock_relocks_when_it_is_unheld_and_renders_the_pictur
     assert result.final.is_file()
 
 
+def _strip_the_transcript(lock_path: Path) -> str:
+    """Rewrite a lock as `talkinghead lock` writes it (no transcript record); return its plan sha."""
+    lock = json.loads(lock_path.read_text())
+    del lock["transcript"]
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n")
+    return lock["plan_sha"]
+
+
+def test_a_lock_without_a_transcript_is_relocked(clip: Path, tmp_path: Path) -> None:
+    from talkinghead.lock import locked_transcript, read_lock
+
+    out = tmp_path / "out"
+    _cook(clip, tmp_path)
+    sha = _strip_the_transcript(out / "edit-lock.json")
+    result = _cook(clip, tmp_path)
+    assert result.ok and result.final.is_file()
+    assert result.notes["lock"]["relocked_from"] == sha
+    lock = read_lock(out / "edit-lock.json")
+    assert locked_transcript(lock, lock_path=out / "edit-lock.json").words
+
+
+def test_a_held_lock_without_a_transcript_stops_the_cook_with_a_report(clip: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _cook(clip, tmp_path)
+    _strip_the_transcript(out / "edit-lock.json")
+    lock_bytes = (out / "edit-lock.json").read_bytes()
+    (out / "edit-lock.hold").write_text("{}\n")
+    with pytest.raises(PipelineError, match="--stop-at-lock"):
+        _cook(clip, tmp_path)
+    assert (out / "edit-lock.json").read_bytes() == lock_bytes
+    report = (out / "report.md").read_text()
+    assert "FAILED" in report and "edit_lock" in report
+
+
 def test_the_hold_released_after_the_full_run_renders_the_held_picture(clip: Path, tmp_path: Path) -> None:
     out = tmp_path / "out"
     cache = Cache(tmp_path / "cache")
