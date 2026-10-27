@@ -272,6 +272,12 @@ def render_board(run_dir: Path, spec: BoardSpec, out: Path | None = None) -> Pat
     run_dir = Path(run_dir)
     base = run_dir / "final.mp4"
     if not base.is_file():
+        if (run_dir / "final-visuals.mp4").is_file():
+            raise FileNotFoundError(
+                f"verified base cut not found: {base}. This cook drew its overlays into its only picture, "
+                "final-visuals.mp4, so the board has no clean base. Rerun "
+                "`talkinghead run VIDEO --no-visuals` on the same run dir to render final.mp4 from the same lock."
+            )
         raise FileNotFoundError(f"verified base cut not found: {base}")
     tablet = Path(spec.tablet)
     if not tablet.is_file():

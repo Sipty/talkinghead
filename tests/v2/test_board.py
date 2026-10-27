@@ -2,7 +2,15 @@
 
 import pytest
 
-from talkinghead.board.render import appear_alpha, ease, expand_rect, map_view_to_output, source_at_output, view_rect_at
+from talkinghead.board.render import (
+    appear_alpha,
+    ease,
+    expand_rect,
+    map_view_to_output,
+    render_board,
+    source_at_output,
+    view_rect_at,
+)
 from talkinghead.board.spec import BoardView, load_spec, save_spec, validate
 from talkinghead.timeline import Segment
 
@@ -114,3 +122,17 @@ def test_full_canvas_before_first_view_and_after_last():
     assert view_rect_at(0, immediate, 0.8) == (0, 0, 1, 1)
     assert view_rect_at(0.8, immediate, 0.8) == immediate[0].rect
     assert view_rect_at(15, views, 0) == views[0].rect
+
+
+def test_a_visuals_cook_without_final_mp4_tells_the_user_to_rerun_with_no_visuals(tmp_path):
+    (tmp_path / "final-visuals.mp4").write_bytes(b"x")
+    spec = validate(sample_spec())
+    with pytest.raises(FileNotFoundError, match="--no-visuals"):
+        render_board(tmp_path, spec)
+
+
+def test_a_run_dir_without_any_cut_keeps_the_plain_message(tmp_path):
+    spec = validate(sample_spec())
+    with pytest.raises(FileNotFoundError, match="verified base cut not found") as info:
+        render_board(tmp_path, spec)
+    assert "--no-visuals" not in str(info.value)

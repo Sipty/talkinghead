@@ -569,6 +569,7 @@ They are experimental, and the spec format may change before a stable release.
 The spec is `<RUN_DIR>/board/board.json`. It holds the tablet recording's path, an `offset` that aligns the tablet's clock with the phone's, and views (time ranges with a rectangle on the canvas).
 `board` renders `final-board.mp4` in the run directory.
 `board` needs the cut in source order. A restructure cut that moves topic blocks ahead of earlier material is refused with a message.
+The board composites onto `final.mp4`, which a cook with overlays does not write, so cook with `--no-visuals` for a board video.
 
 ## Limitations
 
