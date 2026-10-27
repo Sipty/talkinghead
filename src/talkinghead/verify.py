@@ -549,14 +549,25 @@ def _color(plan: Plan, f: dict) -> CheckResult:
 
 
 def _audio_stream(plan: Plan, f: dict) -> CheckResult:
-    """An audio-only render must be the 48 kHz 16-bit PCM WAV the renderer promises."""
+    """An audio-only render must be the codec the renderer promises for its container: pcm_s16le in a .wav, AAC in
+    the .m4a master; both at 48 kHz."""
     s = f.get("audio_stream")
     if not s:
         return CheckResult("audio_stream", "fatal", False, "no audio stream facts measured")
-    ok = s["codec"] == "pcm_s16le" and s["sample_rate"] == AUDIO_RATE and s["duration"] > 0
+    expected = s.get("expected_codec", "pcm_s16le")
+    ok = s["codec"] == expected and s["sample_rate"] == AUDIO_RATE and s["duration"] > 0
     return CheckResult("audio_stream", "fatal", ok,
                        f"{s['codec']} {s['sample_rate']} Hz, {s['channels']} ch, {s['duration']:.2f}s "
-                       f"(pcm_s16le {AUDIO_RATE} Hz required)")
+                       f"({expected} {AUDIO_RATE} Hz required)")
+
+
+def _audio_locked(plan: Plan, f: dict) -> CheckResult:
+    """The picture render carries the locked audio master untouched: a re-encoded track would no longer be the audio
+    the checks and the lock were made on."""
+    lock = f["audio_lock"]
+    locked, rendered = lock["locked"], lock["rendered"]
+    return CheckResult("audio_locked", "fatal", rendered == locked,
+                       f"video audio packets md5 {rendered[:12]} vs locked master {locked[:12]}")
 
 
 def _resolution(plan: Plan, f: dict) -> CheckResult:
@@ -629,6 +640,14 @@ def _cut_word_fragments(plan: Plan, f: dict) -> CheckResult:
     return CheckResult("cut_word_fragments", "warn", False,
                        f"{len(partial)} removed words leave a fragment: {head}"
                        + (" ..." if len(partial) > 5 else "") + f"; {note}")
+
+
+PICTURE_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [_av_sync, _color, _resolution, _audio_locked]
+
+
+def run_picture_checks(plan: Plan, facts: dict) -> list[CheckResult]:
+    """The picture table: sync, colour, frame size and the locked audio. Audio quality was judged on the master."""
+    return [check(plan, facts) for check in PICTURE_CHECKS]
 
 
 CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
@@ -1053,7 +1072,9 @@ def collect_facts(
     return {
         "mode": "audio" if audio_only else "video",
         "output_asr": "independent" if output_asr else "source-projection",
-        "audio_stream": audio_stream_facts(render_path) if audio_only else None,
+        "audio_stream": ({**audio_stream_facts(render_path),
+                          "expected_codec": "pcm_s16le" if Path(render_path).suffix.lower() == ".wav" else "aac"}
+                         if audio_only else None),
         "duration": float(json.loads(out)["format"]["duration"]),
         "video_duration": v, "audio_duration": a,
         "lufs": measure_lufs(render_path), "lufs_target": lufs_target,
@@ -1087,4 +1108,22 @@ def collect_facts(
         # `scale` is the render's deliberate downscale (demo tier); None = native.
         "frame": {"source": list(display_size(source_path)), "render": list(display_size(render_path)),
                   "scale": scale} if picture else None,
+    }
+
+
+def collect_picture_facts(
+    plan: Plan, render_path: str, *, source_path: str, scale: str | None,
+    locked_audio_md5: str, rendered_audio_md5: str,
+) -> dict:
+    """The facts only a picture render adds, for audio-first cooks that measured the audio once on the master.
+
+    The caller measures both audio packet MD5s; equal MD5s prove the video carries the locked master, so no audio
+    check is repeated on the video."""
+    v, a = av_durations(render_path)
+    return {
+        "video_duration": v, "audio_duration": a,
+        "color": color_facts(source_path, render_path),
+        "frame": {"source": list(display_size(source_path)), "render": list(display_size(render_path)),
+                  "scale": scale},
+        "audio_lock": {"locked": locked_audio_md5, "rendered": rendered_audio_md5},
     }

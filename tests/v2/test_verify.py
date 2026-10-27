@@ -557,11 +557,87 @@ def test_a_transcriber_that_replays_the_source_is_refused_as_output_asr(tmp_path
 
 def test_an_audio_render_that_is_not_the_promised_wav_fails_a_fatal_check(tmp_path, monkeypatch) -> None:
     source = _wav(tmp_path / "src.wav", 6.0)
-    render = _wav(tmp_path / "out.m4a", 6.0, codec="aac")
+    render = _wav(tmp_path / "out.wav", 6.0, codec="pcm_s24le")
     monkeypatch.setattr(verify, "measure_lufs", lambda path: -16.0)
     plan = Plan.from_cuts(SourceInfo("main", source, "x", 6.0), [])
     results = {r.name: r for r in run_checks(plan, _audio_facts(tmp_path, render, source, plan=plan))}
     assert not results["audio_stream"].ok and results["audio_stream"].severity == "fatal"
+
+
+def _audio_stream_result(tmp_path, monkeypatch, render: str, source: str) -> CheckResult:
+    monkeypatch.setattr(verify, "measure_lufs", lambda path: -16.0)
+    plan = Plan.from_cuts(SourceInfo("main", source, "x", 6.0), [])
+    return {r.name: r for r in run_checks(plan, _audio_facts(tmp_path, render, source, plan=plan))}["audio_stream"]
+
+
+def test_audio_stream_accepts_an_aac_48k_m4a_master(tmp_path, monkeypatch) -> None:
+    source = _wav(tmp_path / "src.wav", 6.0)
+    render = _wav(tmp_path / "out.m4a", 6.0, codec="aac")
+    result = _audio_stream_result(tmp_path, monkeypatch, render, source)
+    assert result.ok and "aac 48000 Hz" in result.detail and "(aac 48000 Hz required)" in result.detail
+
+
+def test_audio_stream_rejects_an_aac_44k_m4a_master(tmp_path, monkeypatch) -> None:
+    source = _wav(tmp_path / "src.wav", 6.0)
+    render = tmp_path / "out.m4a"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=r=44100:c=white:a=0.2:d=6",
+                    "-ar", "44100", "-c:a", "aac", str(render)], check=True)
+    result = _audio_stream_result(tmp_path, monkeypatch, str(render), source)
+    assert not result.ok and result.severity == "fatal"
+
+
+def test_audio_stream_still_requires_pcm_for_a_wav(tmp_path, monkeypatch) -> None:
+    source = _wav(tmp_path / "src.wav", 6.0)
+    ok = _audio_stream_result(tmp_path, monkeypatch, _wav(tmp_path / "ok.wav", 6.0), source)
+    bad = _audio_stream_result(tmp_path, monkeypatch, _wav(tmp_path / "bad.wav", 6.0, codec="pcm_s24le"), source)
+    assert ok.ok and "(pcm_s16le 48000 Hz required)" in ok.detail
+    assert not bad.ok
+
+
+def _packet_md5(path: str) -> str:
+    out = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"],
+                         capture_output=True, text=True, check=True).stdout
+    return out.strip().split("=", 1)[1]
+
+
+def _picture_case(tmp_path, *, copy_audio: bool) -> tuple[Plan, str, str, str]:
+    """A source mp4, its m4a master, and an mp4 that either stream-copied the master or re-encoded it."""
+    source = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=15:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(source)], check=True)
+    master = tmp_path / "master.m4a"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-vn", "-c:a", "aac", "-b:a", "192k",
+                    str(master)], check=True)
+    video = tmp_path / "video.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-i", str(master), "-map", "0:v", "-map", "1:a",
+                    "-c:v", "copy", "-c:a", "copy" if copy_audio else "aac", "-b:a", "96k", str(video)], check=True)
+    plan = Plan.from_cuts(SourceInfo("main", str(source), "x", 2.0), [])
+    return plan, str(source), str(master), str(video)
+
+
+def _picture_results(tmp_path, *, copy_audio: bool) -> dict[str, CheckResult]:
+    plan, source, master, video = _picture_case(tmp_path, copy_audio=copy_audio)
+    facts = verify.collect_picture_facts(plan, video, source_path=source, scale=None,
+                                         locked_audio_md5=_packet_md5(master), rendered_audio_md5=_packet_md5(video))
+    return {r.name: r for r in verify.run_picture_checks(plan, facts)}
+
+
+def test_a_video_that_stream_copied_the_master_passes_audio_locked(tmp_path) -> None:
+    result = _picture_results(tmp_path, copy_audio=True)["audio_locked"]
+    assert result.ok and result.severity == "fatal"
+
+
+def test_a_video_with_re_encoded_audio_fails_audio_locked_as_fatal(tmp_path) -> None:
+    result = _picture_results(tmp_path, copy_audio=False)["audio_locked"]
+    assert not result.ok and result.severity == "fatal"
+    assert len([t for t in result.detail.split() if len(t) == 12]) == 2
+
+
+def test_picture_checks_are_only_sync_colour_resolution_and_the_audio_lock(tmp_path) -> None:
+    results = _picture_results(tmp_path, copy_audio=True)
+    assert list(results) == ["av_sync", "color", "resolution", "audio_locked"]
+    assert all(r.ok for r in results.values()), [r.line() for r in results.values()]
 
 
 def test_a_muted_audio_render_is_caught_by_the_silence_and_timing_checks(tmp_path, monkeypatch) -> None:
