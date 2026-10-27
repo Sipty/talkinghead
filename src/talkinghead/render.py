@@ -79,10 +79,9 @@ class RenderSettings:
     strategy: str = "concat"
 
 
-def _parts(out_path: str) -> tuple[str, str, str, str]:
-    """The temporary files a render writes beside its output: picture, audio, mux, joined PCM."""
-    return (f"{out_path}.picture.mp4", f"{out_path}.audio.m4a", f"{out_path}.mux.mp4",
-            f"{out_path}.joined.pcm")
+def _parts(out_path: str) -> tuple[str, str, str]:
+    """The temporary files a video render writes beside its output: picture, audio master, mux."""
+    return f"{out_path}.picture.mp4", f"{out_path}.audio.m4a", f"{out_path}.mux.mp4"
 
 
 def _snap(segments: list[Segment], fps: float) -> list[Segment]:
@@ -437,50 +436,47 @@ def _mastering_command(settings: RenderSettings, pcm: str, codec: list[str], des
     ]
 
 
-def build_commands(plan: Plan, out_path: str, settings: RenderSettings,
-                   audio: dict[str, str] | None = None) -> list[list[str]]:
-    """The picture pass, the audio pass, and the stream-copy mux, in order.
-
-    The audio pass reads the already-joined PCM that `render_plan` writes first
-    (see `_write_joined_audio`); it only runs the final chain and encodes. `audio` names the
-    file each source's audio is read from (default: `_audio_sources`).
-    """
+def _picture_command(plan: Plan, dest: str, settings: RenderSettings) -> list[str]:
+    """The picture pass alone: the plan's frame-snapped cut, colour handling and encoder, no audio stream."""
     if not plan.segments:
         raise RuntimeError("nothing to render: the plan removes the whole video")
     if settings.strategy != "concat":
         raise NotImplementedError(f"render strategy {settings.strategy!r}")
     order = _source_order(plan)
-    audio = _audio_sources(plan) if audio is None else audio
     input_index = {sid: i for i, sid in enumerate(order)}
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
     profile = plan_color(plan, order)
-    picture, audio_tmp, staged, pcm = _parts(out_path)
-
-    head = ["ffmpeg", "-y", "-v", "error", "-nostdin"]
     seeked = _run_inputs(segments, order, settings.fps)
     inputs = seeked if seeked is not None else [(sid, 0.0) for sid in order]
     decode = {sid: decode_args(probe_color(plan.sources[sid].path).pix_fmt) for sid in order}
-    picture_cmd = head
+    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin"]
     for sid, seek in inputs:
-        picture_cmd = (picture_cmd + decode[sid] + (["-ss", f"{seek:.6f}"] if seek else [])
-                       + ["-i", plan.sources[sid].path])
+        cmd = cmd + decode[sid] + (["-ss", f"{seek:.6f}"] if seek else []) + ["-i", plan.sources[sid].path]
     per_run = [(i, seek) for i, (_, seek) in enumerate(seeked)] if seeked is not None else None
-    picture_cmd = picture_cmd + [
+    return cmd + [
         "-filter_complex", _video_graph(segments, input_index, settings, profile, per_run),
         "-map", "[vout]", "-an",
         *encode_args(profile, crf=settings.crf, preset=settings.preset),
-        picture,
+        dest,
     ]
-    audio_cmd = _mastering_command(settings, pcm, ["-c:a", "aac", "-b:a", "192k"], audio_tmp,
-                                   _channels(audio[order[0]], _timeout(plan)))
+
+
+def build_commands(plan: Plan, out_path: str, settings: RenderSettings, audio_file: str) -> list[list[str]]:
+    """The picture pass and the stream-copy mux of `audio_file`'s first audio stream, in order.
+
+    The audio is never encoded here: it is the master `render_audio_plan` wrote, so the video carries
+    those packets unchanged.
+    """
+    picture, _, staged = _parts(out_path)
+    picture_cmd = _picture_command(plan, picture, settings)
     mux_cmd = [
         "ffmpeg", "-y", "-v", "error", "-nostdin",
-        "-i", picture, "-i", audio_tmp,
+        "-i", picture, "-i", audio_file,
         "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
         "-map_metadata", "-1", "-movflags", "+faststart",
         staged,
     ]
-    return [picture_cmd, audio_cmd, mux_cmd]
+    return [picture_cmd, mux_cmd]
 
 
 def _timeout(plan: Plan) -> float:
@@ -513,41 +509,66 @@ def _run_decoding(cmd: list[str], timeout: float) -> list[str]:
     return soft
 
 
-def render_plan(plan: Plan, out_path: str, settings: RenderSettings) -> str:
-    """Render and return the command lines used (for the report)."""
-    if not plan.segments:
-        raise RuntimeError("nothing to render: the plan removes the whole video")
-    audio = _audio_sources(plan)
-    picture, audio_tmp, staged, pcm = _parts(out_path)
-    order = _source_order(plan)
-    segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
-    scratch = [f"{out_path}.src{i}.pcm" for i in range(len(order))]
+def render_picture(plan: Plan, out_path: str, settings: RenderSettings) -> str:
+    """Render the picture alone (no audio stream) and return the command line.
+
+    Any plan can be rendered this way, an excerpt included, without touching audio. The file is staged
+    beside the output and replaced atomically, so `out_path` never holds a half-written picture.
+    """
+    staged = f"{out_path}.staged.mp4"
+    cmd = _picture_command(plan, staged, settings)
     try:
-        _write_joined_audio(plan, order, segments, settings, pcm, scratch, audio)
-        timeout = _timeout(plan)
-        settings = replace(settings, audio_filter=_final_filter(
-            settings, pcm, _channels(audio[order[0]], timeout), timeout))
-        cmds = [_run_decoding(cmd, timeout) for cmd in build_commands(plan, out_path, settings, audio)]
+        ran = _run_decoding(cmd, _timeout(plan))
         os.replace(staged, out_path)
     finally:
-        for part in (picture, audio_tmp, staged, pcm, *scratch):
+        Path(staged).unlink(missing_ok=True)
+    return " ".join(str(c) for c in ran)
+
+
+def render_plan(plan: Plan, out_path: str, settings: RenderSettings, *, audio_file: str | None = None) -> str:
+    """Render the picture and mux an audio master onto it by stream copy; return the command lines for the report.
+
+    `audio_file` is the master to carry. Without it the master is rendered first by `render_audio_plan`
+    (the one audio encoder), so a video's audio is always a standalone master whose packets the mux keeps.
+    """
+    if not plan.segments:
+        raise RuntimeError("nothing to render: the plan removes the whole video")
+    picture, audio_tmp, staged = _parts(out_path)
+    made_master = audio_file is None
+    cmds: list[str] = []
+    try:
+        if audio_file is None:
+            cmds.append(render_audio_plan(plan, audio_tmp, settings))
+            audio_file = audio_tmp
+        cmds.append(render_picture(plan, picture, settings))
+        mux = build_commands(plan, out_path, settings, audio_file)[1]
+        _run(mux, _timeout(plan))
+        cmds.append(" ".join(str(c) for c in mux))
+        os.replace(staged, out_path)
+    finally:
+        for part in (picture, staged, *((audio_tmp,) if made_master else ())):
             Path(part).unlink(missing_ok=True)
-    return " && ".join(" ".join(str(c) for c in cmd) for cmd in cmds)
+    return " && ".join(cmds)
 
 
-def _audio_parts(out_path: str) -> tuple[str, str]:
-    """The temporary files an audio-only render writes beside its output: staged WAV, joined PCM."""
-    return f"{out_path}.staged.wav", f"{out_path}.joined.pcm"
+# The audio containers a master can be written to, and the codec arguments each one carries.
+AUDIO_CODECS = {
+    ".wav": ["-c:a", "pcm_s16le"],
+    ".m4a": ["-c:a", "aac", "-b:a", "192k"],
+}
 
 
 def render_audio_plan(plan: Plan, out_path: str, settings: RenderSettings, *, original: bool = False) -> str:
-    """Render an audio-only plan to a 48 kHz PCM WAV and return the command (for the report).
+    """Render a plan's audio to a 48 kHz `.wav` (PCM) or `.m4a` (the AAC 192k master) and return the command.
 
-    The same overlap-add join and mastering chain as the video render's audio
-    pass, without a picture. The WAV is staged and replaced atomically, so
-    `out_path` never holds a half-written file. `original` reads the source audio
+    The same overlap-add join and mastering chain for both; the `.m4a` is the exact audio a video render
+    muxes, so it is what a lock hashes. The file is staged beside the output (keeping its suffix) and
+    replaced atomically, so `out_path` never holds a half-written file. `original` reads the source audio
     instead of the isolated track (what the output pass transcribes under isolation).
     """
+    suffix = Path(out_path).suffix.lower()
+    if suffix not in AUDIO_CODECS:
+        raise ValueError(f"cannot render audio to {out_path!r}: use a {' or '.join(AUDIO_CODECS)} output path")
     if not plan.segments:
         raise RuntimeError("nothing to render: the plan removes the whole recording")
     if settings.strategy != "concat":
@@ -555,14 +576,14 @@ def render_audio_plan(plan: Plan, out_path: str, settings: RenderSettings, *, or
     order = _source_order(plan)
     audio = {sid: si.path for sid, si in plan.sources.items()} if original else _audio_sources(plan)
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
-    staged, pcm = _audio_parts(out_path)
+    staged, pcm = f"{out_path}.staged{suffix}", f"{out_path}.joined.pcm"
     scratch = [f"{out_path}.src{i}.pcm" for i in range(len(order))]
     try:
         _write_joined_audio(plan, order, segments, settings, pcm, scratch, audio)
         timeout = _timeout(plan)
         channels = _channels(audio[order[0]], timeout)
         settings = replace(settings, audio_filter=_final_filter(settings, pcm, channels, timeout))
-        cmd = _mastering_command(settings, pcm, ["-c:a", "pcm_s16le"], staged, channels)
+        cmd = _mastering_command(settings, pcm, AUDIO_CODECS[suffix], staged, channels)
         _run(cmd, timeout)
         os.replace(staged, out_path)
     finally:

@@ -29,6 +29,7 @@ from talkinghead.render import (
     build_commands,
     join_audio,
     render_audio_plan,
+    render_picture,
     render_plan,
 )
 from talkinghead.timeline import Cut, Plan, Segment, SourceInfo
@@ -318,7 +319,7 @@ def test_a_plan_mixing_hdr_and_sdr_sources_is_refused(tmp_path: Path) -> None:
         segments=[Segment("h", 0.0, 0.5), Segment("s", 0.0, 0.5)],
     )
     with pytest.raises(RuntimeError, match="mixes HDR and SDR"):
-        build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings())
+        build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(), "master.m4a")
 
 
 def test_a_plan_cannot_relabel_pq_as_hlg(monkeypatch, tmp_path: Path) -> None:
@@ -541,7 +542,7 @@ def test_hardware_decode_gives_the_cut_the_software_frames(tmp_path: Path, hdr: 
     _hlg_clip(src, 3.0) if hdr else _clip(src, 3.0, pix_fmt="yuv420p")
     plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 3.0),
                           [Cut(0.5, 1.0, "silence"), Cut(2.0, 2.2, "filler")])
-    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(audio_filter="anull"))[0]
+    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(), "master.m4a")[0]
     assert cmd[cmd.index("-hwaccel") + 1] == "videotoolbox"
     pix_fmt = "yuv420p10le" if hdr else "yuv420p"
     hard, log = _graph_frames(cmd, pix_fmt)
@@ -558,7 +559,7 @@ def test_every_reordered_input_decodes_on_the_hardware(tmp_path: Path) -> None:
     source = SourceInfo("main", str(src), "x", 4.0)
     plan = Plan(sources={"main": source}, main="main", cuts=[],
                 segments=[Segment("main", 2.0, 3.0), Segment("main", 0.5, 1.5)])
-    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(audio_filter="anull"))[0]
+    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(), "master.m4a")[0]
     assert cmd.count("-i") == 2 and cmd.count("-hwaccel") == 2
     hard, _ = _graph_frames(cmd, "yuv420p")
     soft, _ = _graph_frames(without_hwaccel(cmd), "yuv420p")
@@ -571,7 +572,7 @@ def test_a_444_source_decodes_in_software(tmp_path: Path) -> None:
     src = tmp_path / "src.mp4"
     _clip(src, 2.0)
     plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 2.0), [Cut(0.5, 1.0, "silence")])
-    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(audio_filter="anull"))[0]
+    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(), "master.m4a")[0]
     assert "-hwaccel" not in cmd
 
 
@@ -618,3 +619,93 @@ def test_a_join_between_two_room_tone_sides_keeps_unity_gain() -> None:
     rng = np.random.default_rng(0)
     x = (0.001 * rng.standard_normal((AUDIO_RATE, 1))).astype(np.float32)
     assert _join_gain_db(x, AUDIO_RATE // 4, x, AUDIO_RATE // 2) == 0.0
+
+
+# --- the AAC master and the picture render on their own ---
+
+def _packet_md5(path: Path) -> str:
+    """The MD5 of a file's first audio stream's packets, which survives a stream-copy mux."""
+    return subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _cut_plan(tmp_path: Path, seconds: float = 4.0) -> Plan:
+    src = tmp_path / "src.mp4"
+    _clip(src, seconds)
+    return Plan.from_cuts(SourceInfo("main", str(src), "x", seconds), [Cut(0.5, 1.0, "silence"), Cut(2.0, 2.2, "filler")])
+
+
+def test_a_video_render_muxes_the_given_master_unchanged(tmp_path: Path) -> None:
+    plan = _cut_plan(tmp_path)
+    master = tmp_path / "master.m4a"
+    render_audio_plan(plan, str(master), RenderSettings(preset="ultrafast"))
+    out = tmp_path / "out.mp4"
+    cmd = render_plan(plan, str(out), RenderSettings(crf=28, preset="ultrafast"), audio_file=str(master))
+    assert _packet_md5(out) == _packet_md5(master)
+    assert " && " in cmd and "master.m4a" in cmd and "aac" not in cmd
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["master.m4a", "out.mp4", "src.mp4"]
+
+
+def test_a_video_render_without_a_master_has_the_same_master_as_a_separate_render(tmp_path: Path) -> None:
+    plan = _cut_plan(tmp_path)
+    settings = RenderSettings(crf=28, preset="ultrafast")
+    master = tmp_path / "master.m4a"
+    render_audio_plan(plan, str(master), settings)
+    out = tmp_path / "out.mp4"
+    render_plan(plan, str(out), settings)
+    assert _packet_md5(out) == _packet_md5(master)
+    assert _audio(master)["codec_name"] == "aac" and _audio(master)["sample_rate"] == "48000"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["master.m4a", "out.mp4", "src.mp4"]
+
+
+def test_a_supplied_master_at_the_automatic_path_survives_success_and_failure(tmp_path: Path) -> None:
+    plan = _cut_plan(tmp_path)
+    settings = RenderSettings(crf=28, preset="ultrafast")
+    out = tmp_path / "out.mp4"
+    master = tmp_path / "out.mp4.audio.m4a"
+    render_audio_plan(plan, str(master), settings)
+    before = master.read_bytes()
+    render_plan(plan, str(out), settings, audio_file=str(master))
+    assert master.read_bytes() == before
+    bad = RenderSettings(crf=28, preset="no-such-preset")
+    out.unlink()
+    with pytest.raises(Exception):
+        render_plan(plan, str(out), bad, audio_file=str(master))
+    assert master.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.mp4.audio.m4a", "src.mp4"]
+
+
+def test_the_m4a_master_snaps_segment_edges_to_the_frame_grid(tmp_path: Path) -> None:
+    src = tmp_path / "src.mp4"
+    _clip(src, 4.0)
+    plan = Plan(sources={"main": SourceInfo("main", str(src), "x", 4.0)}, main="main", cuts=[],
+                segments=[Segment("main", 0.0, 1.0135), Segment("main", 2.0135, 3.0135)])
+    snapped, free = tmp_path / "snapped.m4a", tmp_path / "free.m4a"
+    render_audio_plan(plan, str(snapped), RenderSettings(fps=30))
+    render_audio_plan(plan, str(free), RenderSettings(fps=0))
+
+    def samples(path: Path) -> float:
+        return float(_probe(path)["format"]["duration"]) * AUDIO_RATE
+
+    # Off-grid edges move by up to half a frame each: the grid render is not the free one.
+    assert abs(samples(snapped) - samples(free)) > 100
+
+
+def test_a_picture_only_render_has_no_audio_and_the_frames_of_the_video(tmp_path: Path) -> None:
+    plan = _cut_plan(tmp_path)
+    settings = RenderSettings(crf=28, preset="ultrafast")
+    picture, video = tmp_path / "picture.mp4", tmp_path / "video.mp4"
+    render_picture(plan, str(picture), settings)
+    render_plan(plan, str(video), settings)
+    assert [s["codec_type"] for s in _probe(picture)["streams"]] == ["video"]
+    assert _video(picture)["nb_frames"] == _video(video)["nb_frames"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["picture.mp4", "src.mp4", "video.mp4"]
+
+
+def test_an_audio_render_to_an_unsupported_suffix_is_refused_before_any_work(tmp_path: Path) -> None:
+    src = tmp_path / "src.wav"
+    _tone_wav(src)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 6.0), [])
+    with pytest.raises(ValueError, match="m4a"):
+        render_audio_plan(plan, str(tmp_path / "out.flac"), RenderSettings(fps=0))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["src.wav"]
