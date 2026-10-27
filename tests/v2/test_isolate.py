@@ -302,8 +302,6 @@ def test_the_cli_takes_the_isolation_flags():
 
     args = build_parser().parse_args(["run", "x.mov", "--isolate-voice", "--isolate-mix", "0.5"])
     assert args.isolate_voice is True and args.isolate_mix == 0.5
-    plain = build_parser().parse_args(["run", "x.mov"])
-    assert plain.isolate_voice is False and plain.isolate_mix is None
 
 
 def test_a_word_spanning_a_phrase_is_not_repaired():

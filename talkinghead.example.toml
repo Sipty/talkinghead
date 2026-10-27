@@ -69,7 +69,8 @@
 
 # Voice isolation (macOS only, off by default): render the audio through Apple's voice isolation. Transcription,
 # judging and edge placement keep the original audio; the pauses stage measures silence on the isolated track, and the
-# output pass judges an original-audio companion render. isolate_mix is the isolated share, 0 to 1.
+# output pass judges an original-audio companion render. isolate_mix is the isolated share, 0 to 1. A cook overrides
+# isolate_voice with --isolate-voice or --no-isolate-voice.
 # isolate_voice = false
 # isolate_mix = 1.0
 

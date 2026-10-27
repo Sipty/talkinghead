@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .isolate import report_facts as isolation_facts
+from .render import MASTER_CHAIN_NOTE
 from .timeline import Plan
 from .verify import CheckResult
 
@@ -61,6 +62,70 @@ def _isolation(plan: Plan) -> list[str]:
             rows.append(f"| {_fmt(r['start'])} | {out} | {r['text']} | {r['ratio']:.3f} |")
         rows.append("")
     return rows
+
+
+def _val(value, unit: str = "") -> str:
+    """A measured fact for the report: its value and unit, or 'unavailable' when the measurement could not be made."""
+    return "unavailable" if value is None else f"{value}{unit}"
+
+
+def _audio(plan: Plan, notes: dict, checks: list[CheckResult]) -> list[str]:
+    """The audio section: the master as built, what was measured and the judge's advice. Nothing here applies a filter."""
+    if plan.isolation:
+        isolation = (f"on, mix {isolation_facts(plan)['mix']:.2f}: the delivered audio is the isolated track "
+                     "(chosen for this cook)")
+    else:
+        isolation = "off (not requested for this cook)"
+    loud = next((c for c in checks if c.name == "loudness"), None)
+    if loud is None:
+        loudness = "not measured"
+    elif loud.ok:
+        loudness = f"within target: {loud.detail}"
+    elif loud.severity == "warn":
+        loudness = (f"{loud.detail}. Accepting the quieter master, or asking for a compressor or limiter pass, is "
+                    "your decision.")
+    else:
+        loudness = f"louder than target: {loud.detail}"
+    rows = ["## Audio", "",
+            f"- master: {MASTER_CHAIN_NOTE}",
+            f"- isolation: {isolation}",
+            f"- loudness: {loudness}",
+            "- not in the master: denoise, compression, EQ, highpass, limiting. Adding any of them is your decision.",
+            ""]
+    assessed = notes.get("audio_assessment") or {}
+    if "skipped" in assessed:
+        return rows + [f"- judge reading: {assessed['skipped']}", ""]
+    if not assessed:
+        return rows + ["- judge reading: not run", ""]
+    facts, answer = assessed["facts"], assessed["assessment"]
+    if facts.get("status") == "silence":
+        rows.append("- measured (original audio): the source has no sound; no level, peak or spectrum can be measured")
+    else:
+        rows.append(f"- measured (original audio): floor {_val(facts['floor_dbfs'], ' dBFS')}, quiet share "
+                    f"{_val(facts['quiet_frame_share'])}, speech p90 {_val(facts['speech_p90_dbfs'], ' dBFS')}, "
+                    f"integrated {_val(facts['input_integrated_lufs'], ' LUFS')}, true peak "
+                    f"{_val(facts['input_true_peak_dbtp'], ' dBTP')}, LRA {_val(facts['input_lra_lu'], ' LU')}, "
+                    f"mono analysis peak {_val(facts['mono_sample_peak_dbfs'], ' dBFS')} (a mono downmix can sum "
+                    "above the original peak, so it is not clipping evidence)")
+        ceiling, to_target = facts.get("gain_ceiling_from_peak_db"), facts.get("gain_to_target_db")
+        if ceiling is not None and to_target is not None and ceiling < to_target:
+            rows.append(f"- level: on the original-audio measurement the true peak allows {ceiling} dB of gain and the "
+                        f"target needs {to_target} dB, so the peaks would cap the gain. The render's own measurement "
+                        "is not recorded in the report.")
+        spec = facts.get("quiet_spectrum")
+        if spec:
+            rows.append(f"- measured (quiet windows, {spec['windows']}): hum 50 Hz {_val(spec['hum_50hz_db'], ' dB')}, "
+                        f"60 Hz {_val(spec['hum_60hz_db'], ' dB')} above nearby bins; band shares "
+                        f"{spec['band_share']}")
+        else:
+            rows.append("- measured (quiet windows): unavailable; the room never stayed quiet long enough to read its "
+                        "spectrum")
+    noise, leveling = answer["noise"], answer["leveling"]
+    rows += [f"- judge ({assessed['judge']}) noise: {noise['source']}, severity {noise['severity']}. {noise['evidence']}",
+             f"- judge leveling: {leveling['verdict']}. {leveling['evidence']}",
+             f"- judge recommendation: {answer['recommendation']}"]
+    rows += [f"- owner decision: {question}" for question in answer["owner_decisions"]]
+    return rows + [""]
 
 
 def _table(head: list[str], items: list[list[str]], limit: int = 15) -> list[str]:
@@ -264,7 +329,7 @@ def build_report(
     rows.append("")
     rows += ["## Stage notes", ""]
     for stage, n in notes.items():
-        if stage == "isolation":
+        if stage in ("isolation", "audio_assessment"):
             continue
         rows.append(f"- {stage}: " + ", ".join(f"{k}={v}" for k, v in n.items() if k not in ("prompt_sha", "coherence_prompt_sha")))
     rows.append("")
@@ -278,6 +343,7 @@ def build_report(
     rows += _blocks(plan)
     rows += _polish(plan, notes)
     rows += _isolation(plan)
+    rows += _audio(plan, notes, checks)
     rows += ["## Cuts", "", "| start | end | dur | reason | votes | text |", "|---|---|---|---|---|---|"]
     for c in plan.cuts:
         votes = c.provenance.get("votes", "")

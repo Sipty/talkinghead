@@ -198,9 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--fresh", action="store_true", help="ignore stage memos (LLM answers stay cached)")
     run.add_argument("--allow-av-mismatch", action="store_true")
     run.add_argument("--no-content", action="store_true", help="skip content cuts for this run")
-    run.add_argument("--isolate-voice", action="store_true",
+    run.add_argument("--isolate-voice", action="store_true", default=None,
                      help="render the audio through Apple's voice isolation (macOS only); transcription and "
                           "judging stay on the original audio")
+    run.add_argument("--no-isolate-voice", dest="isolate_voice", action="store_false", default=None,
+                     help="render this cook's audio without voice isolation, even when the config file sets "
+                          "isolate_voice = true")
     run.add_argument("--isolate-mix", type=float, default=None, metavar="F",
                      help="with --isolate-voice: wet fraction of the isolated audio, 0 to 1 (default 1)")
     run.add_argument("--no-visuals", action="store_true", help="skip the visuals overlay pass")
@@ -538,12 +541,13 @@ def _command(args: argparse.Namespace) -> int:
         if args.refine_joins:
             plan = _refine_for_render(plan, cfg, Path(args.out), audio_only=args.audio_only)
         if args.audio_only:
-            cmd = render_audio_plan(plan, args.out, RenderSettings(fps=0, crossfade_sec=cfg.splice_crossfade_sec))
+            cmd = render_audio_plan(plan, args.out, RenderSettings(
+                fps=0, crossfade_sec=cfg.splice_crossfade_sec, loudness_lufs=cfg.loudness_lufs))
         elif plan.provenance.get("audio_only"):
             raise ValueError(f"{args.plan} is an audio-only plan: pass --audio-only to render its WAV")
         else:
             settings = RenderSettings(fps=settings_fps(cfg), crf=cfg.crf, preset=cfg.preset,
-                                      crossfade_sec=cfg.splice_crossfade_sec)
+                                      crossfade_sec=cfg.splice_crossfade_sec, loudness_lufs=cfg.loudness_lufs)
             cmd = render_plan(plan, args.out, settings)
         print(f"rendered {args.out}")
         print(cmd, file=sys.stderr)
@@ -581,7 +585,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
         visuals_scale_card=args.visuals_scale_card,
         visuals_scale_shot=args.visuals_scale_shot,
         diarize=(True if args.diarize else None),
-        isolate_voice=(True if args.isolate_voice else None),
+        isolate_voice=args.isolate_voice,
         isolate_mix=args.isolate_mix,
     )
     if cfg.judge is None:

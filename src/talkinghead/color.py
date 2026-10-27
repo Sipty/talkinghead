@@ -28,6 +28,14 @@ HDR_PROFILE = "main10"
 # Each encoder takes its own 10-bit layout: videotoolbox MSB-aligned p010, libx265 yuv420p10le.
 HDR_PIX_FMT = "p010le"
 SOFTWARE_HDR_PIX_FMT = "yuv420p10le"
+# Hardware decode for the passes that read video (cut, visuals). For a 4:2:0 source VideoToolbox
+# returns the same frames as software decode, bit for bit (HEVC 10-bit HLG and H.264, measured on
+# an iPhone source and in tests/v2/test_render.py), so pixels and the render memo are unchanged; it
+# only takes 15-30% off those passes on an M-series Mac. A 4:4:4 source is NOT the same: the
+# hardware subsamples the chroma itself, one level off swscale's, so anything but 4:2:0 decodes in
+# software as before.
+HWACCEL = "videotoolbox"
+HWACCEL_PIX_FMTS = ("yuv420p", "yuvj420p", "nv12", "yuv420p10le", "p010le")
 
 # BT.2408: SDR graphics white sits at 203 nits in an HDR program.
 GRAPHICS_WHITE_NITS = 203.0
@@ -140,6 +148,46 @@ def hdr_codec() -> str:
 def hdr_pix_fmt(codec: str) -> str:
     """The pixel format `codec` takes for 10-bit HDR output."""
     return HDR_PIX_FMT if codec == HDR_CODEC else SOFTWARE_HDR_PIX_FMT
+
+
+@functools.lru_cache(maxsize=1)
+def _ffmpeg_hwaccels() -> frozenset[str]:
+    """Hardware decode methods this ffmpeg build has (`ffmpeg -hwaccels`), read once per process.
+
+    A missing ffmpeg reads as none: the pass that runs next reports it with the install hint.
+    """
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-hwaccels"], capture_output=True, text=True).stdout
+    except FileNotFoundError:
+        return frozenset()
+    # The first line is the "Hardware acceleration methods:" heading.
+    return frozenset(line.strip() for line in out.splitlines()[1:] if line.strip())
+
+
+def decode_args(pix_fmt: str) -> list[str]:
+    """Input flags that decode the next `-i`, a `pix_fmt` stream, on VideoToolbox; [] decodes in software.
+
+    Hardware only where it is verified identical: this ffmpeg has VideoToolbox and the source is
+    4:2:0. ffmpeg itself falls back to software for a stream the hardware cannot take; a pass
+    that fails outright with these flags is rerun with `without_hwaccel`.
+    """
+    if pix_fmt in HWACCEL_PIX_FMTS and HWACCEL in _ffmpeg_hwaccels():
+        return ["-hwaccel", HWACCEL]
+    return []
+
+
+def without_hwaccel(cmd: list[str]) -> list[str]:
+    """`cmd` with every `-hwaccel METHOD` pair removed: the software-decode rerun of a failed pass."""
+    out: list[str] = []
+    skip = False
+    for arg in cmd:
+        if skip:
+            skip = False
+        elif arg == "-hwaccel":
+            skip = True
+        else:
+            out.append(arg)
+    return out
 
 
 def encode_args(profile: ColorProfile, *, crf: int = 18, preset: str = "medium",

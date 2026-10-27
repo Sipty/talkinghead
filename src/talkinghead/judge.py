@@ -101,6 +101,15 @@ class Judge(Protocol):
     def decide(self, prompt: str, schema: dict) -> dict: ...
 
 
+# The fixed reading a scripted judge gives the advisory audio assessment. It is not part of any editorial sequence.
+AUDIO_READING = {
+    "noise": {"source": "unknown", "severity": "none", "evidence": "scripted test judge"},
+    "leveling": {"verdict": "unknown", "evidence": "scripted test judge"},
+    "recommendation": "No action.",
+    "owner_decisions": [],
+}
+
+
 class FakeJudge:
     """Scripted answers for tests; an Exception in the script is raised."""
 
@@ -111,6 +120,9 @@ class FakeJudge:
         self.calls = 0
 
     def decide(self, prompt: str, schema: dict) -> dict:
+        if schema.get("title") == "AudioAssessment":
+            # Advisory measurement reading: it neither consumes a scripted answer nor counts as an editorial call.
+            return validate(AUDIO_READING, schema)
         self.calls += 1
         item = next(self._it)
         if isinstance(item, Exception):

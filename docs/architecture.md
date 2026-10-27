@@ -317,12 +317,28 @@ cuts never loses a judged reason to a mechanical cut that comes first.
 structural decisions, the anchors, and the provenance block (hashes, backend, floor,
 effective config) that stage memos are keyed on.
 
+### 7b. Audio assessment (advisory, memoised, before render)
+
+`audio_assess.measure` reads the recorded source audio as it is (before isolation): integrated loudness, true peak and
+LRA from loudnorm's analysis of the original channels, and a 10 ms level envelope (floor, quiet-frame share, speech p90)
+and the average spectrum of windows where every frame is quiet (band shares, 50/60 Hz tone ratios). The envelope, the
+spectrum and `mono_sample_peak_dbfs` are computed on a mono downmix, which can sum channels above the original peak, so
+only the original-channel true peak is clipping evidence. `audio_assess.assess` hands those numbers to the configured
+judge once (no fallback), with the owner's preferences in the prompt and a guidelines fingerprint, and returns its
+reading. The stage memo (`stages/audio-assessment.json`) keys on the source file's sha, the judge name, the two level
+targets, a guidelines digest and a preferences digest, plus `ASSESS_VERSION`; no editorial memo re-keys. Plan-only
+rebuilds replay a stored reading whose key matches and never call the judge. The reading is written to the report's
+Audio section; no stage reads it, so it cannot enable isolation, denoise or compression.
+
 ### 8. Render (deterministic, once)
 
 `render.render_plan` builds three ffmpeg runs: a picture pass (one CFR decode per source
 run, `fps` then chained half-open `select` filters that drop the removed spans, frame-snapped),
-an audio pass (segments decoded and joined in numpy, then the broadcast chain - highpass, compressor, de-esser, `loudnorm` to
-`Config.loudness_lufs` - applied exactly once), then a stream-copy mux.
+an audio pass (segments decoded and joined in numpy, with fades only at program edges and joins), then one fixed gain
+measured on the joined audio by `render._loudness_gain_db`: the gain aims at `Config.loudness_lufs` and never takes the
+true peak past -1.5 dBTP, so a peak-limited source lands quieter. The default master has no compressor, EQ, highpass or
+dynamic normalisation (`loudnorm` only measures). Then a stream-copy mux. Verification fails a master that is louder
+than target and reports a quieter one as a warning.
 The picture pass avoids per-segment trim fan-out, which stalled on a native 4K HLG recording.
 The branch queue was a suspected cause; the observed failure was no output growth for 20 minutes.
 `render.join_audio` overlap-adds the segments with equal-power (sine/cosine) crossfades of

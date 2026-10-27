@@ -17,6 +17,8 @@ from talkinghead.color import (
     BT2020_TO_BT709,
     ColorProfile,
     _ffmpeg_encoders,
+    _ffmpeg_hwaccels,
+    decode_args,
     encode_args,
     hdr_codec,
     hdr_pix_fmt,
@@ -25,6 +27,7 @@ from talkinghead.color import (
     linear_to_pq,
     probe_color,
     sdr_to_hdr,
+    without_hwaccel,
     write_sdr_to_hdr_cube,
 )
 
@@ -221,3 +224,48 @@ def test_ffmpeg_encoder_list_is_parsed_from_its_table(monkeypatch: pytest.Monkey
         assert _ffmpeg_encoders() == frozenset({"libx265", "hevc_videotoolbox", "aac"})
     finally:
         _ffmpeg_encoders.cache_clear()
+
+
+# -- decode choice -----------------------------------------------------------
+def test_decode_uses_videotoolbox_only_when_ffmpeg_has_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("talkinghead.color._ffmpeg_hwaccels", lambda: frozenset({"videotoolbox"}))
+    assert decode_args("yuv420p") == ["-hwaccel", "videotoolbox"]
+    assert decode_args("yuv420p10le") == ["-hwaccel", "videotoolbox"]
+    monkeypatch.setattr("talkinghead.color._ffmpeg_hwaccels", lambda: frozenset({"cuda"}))
+    assert decode_args("yuv420p") == []
+
+
+def test_only_a_420_source_decodes_on_the_hardware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VideoToolbox subsamples 4:4:4 chroma itself, one level off swscale: not the same frames."""
+    monkeypatch.setattr("talkinghead.color._ffmpeg_hwaccels", lambda: frozenset({"videotoolbox"}))
+    assert decode_args("yuv444p") == []
+    assert decode_args("yuv422p10le") == []
+
+
+def test_ffmpeg_hwaccel_list_skips_its_heading(monkeypatch: pytest.MonkeyPatch) -> None:
+    listing = "Hardware acceleration methods:\nvideotoolbox\n\n"
+    monkeypatch.setattr("talkinghead.color.subprocess.run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=listing, stderr=""))
+    _ffmpeg_hwaccels.cache_clear()
+    try:
+        assert _ffmpeg_hwaccels() == frozenset({"videotoolbox"})
+    finally:
+        _ffmpeg_hwaccels.cache_clear()
+
+
+def test_a_missing_ffmpeg_decodes_in_software_and_leaves_the_hint_to_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "ffmpeg")
+    monkeypatch.setattr("talkinghead.color.subprocess.run", missing)
+    _ffmpeg_hwaccels.cache_clear()
+    try:
+        assert decode_args("yuv420p") == []
+    finally:
+        _ffmpeg_hwaccels.cache_clear()
+
+
+def test_the_software_rerun_drops_every_hwaccel_pair_and_nothing_else() -> None:
+    cmd = ["ffmpeg", "-hwaccel", "videotoolbox", "-i", "a.mp4",
+           "-hwaccel", "videotoolbox", "-ss", "1.000000", "-i", "b.mp4", "out.mp4"]
+    assert without_hwaccel(cmd) == ["ffmpeg", "-i", "a.mp4", "-ss", "1.000000", "-i", "b.mp4", "out.mp4"]
+    assert without_hwaccel(["ffmpeg", "-i", "a.mp4", "out.mp4"]) == ["ffmpeg", "-i", "a.mp4", "out.mp4"]

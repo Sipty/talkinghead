@@ -34,10 +34,19 @@ video through before a still's stream begins.
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-from ..color import HDR_BITRATE, ColorProfile, encode_args, probe_color, write_sdr_to_hdr_cube
+from ..color import (
+    HDR_BITRATE,
+    ColorProfile,
+    decode_args,
+    encode_args,
+    probe_color,
+    without_hwaccel,
+    write_sdr_to_hdr_cube,
+)
 from ..config import OVERLAY_CORNERS
 from .schedule import Placement
 
@@ -117,7 +126,8 @@ def build_overlay_command(
                 "-movflags", "+faststart", out]
     if profile.hdr and not cube:
         raise ValueError("HDR base: overlays need the SDR->HDR cube from write_sdr_to_hdr_cube")
-    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin", "-i", base]
+    # Only the base is decoded on the hardware; the stills are PNGs.
+    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin", *decode_args(profile.pix_fmt), "-i", base]
     for p in placements:
         # Only this still's own window, not from t=0 to it. Six decimals
         # because -t rounded UP to 20.067 on a 20.066667 s base once put an
@@ -175,6 +185,10 @@ def render_visuals(base: str, placements: list[Placement], out: str, *,
                                     color=color, cube=cube,
                                     hdr_codec=hdr_codec, hdr_bitrate=hdr_bitrate)
         proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0 and (soft := without_hwaccel(cmd)) != cmd:
+            print("talkinghead: hardware decode failed; rerunning the visuals pass with software decode",
+                  file=sys.stderr)
+            cmd, proc = soft, subprocess.run(soft, capture_output=True, text=True)
         if proc.returncode != 0:
             tail = "\n".join((proc.stderr or "").strip().splitlines()[-15:])
             raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}):\n{tail}")

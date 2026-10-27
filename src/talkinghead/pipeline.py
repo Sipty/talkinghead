@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from . import isolate, prompts
+from . import audio_assess, isolate, prompts
 from .align import AlignResult, align
 from .analysis import analyze
 from .config import ISOLATE_KEYS, Config
@@ -325,6 +325,32 @@ def _stage_inputs(ctx: Context, guidelines: str, extra: dict | None = None) -> d
     }
 
 
+def _audio_assessment(run: RunDir, ctx: Context, *, source_sha: str, target_lufs: float, true_peak_dbtp: float,
+                      judge: Judge, guidelines: str, fresh: bool, plan_only: bool) -> dict:
+    """The judge's reading of the recording's measured sound, memoised on its own key.
+
+    Keyed on the assessed file, the judge, the level targets, the editing guidelines and the owner's snapshotted
+    preferences: every instruction the judge receives. No editorial stage key changes. Advisory: the answer goes to the
+    report and nothing downstream reads it. A plan-only rebuild replays a stored reading whose key matches and never
+    calls the judge.
+    """
+    inputs = {"source_sha": source_sha, "judge": judge.name, "target_lufs": target_lufs,
+              "true_peak_dbtp": true_peak_dbtp, "guidelines": audio_assess.guidelines_fingerprint(guidelines),
+              "preferences": _digest(ctx.preferences)}
+    if plan_only:
+        stored = run.read_json(run.memo_dir / "audio-assessment.json", default={})
+        if stored.get("key") == stable_key(inputs, audio_assess.ASSESS_VERSION):
+            return stored["value"]
+        return {"skipped": "plan-only: no stored audio assessment for this recording; a full run measures and judges it"}
+    return run.memo(
+        "audio-assessment", inputs, audio_assess.ASSESS_VERSION,
+        lambda: audio_assess.assess(ctx.source.path, judge, ctx.llm_cache, target_lufs=target_lufs,
+                                    true_peak_dbtp=true_peak_dbtp, guidelines=guidelines,
+                                    preferences=ctx.preferences),
+        fresh=fresh,
+    )
+
+
 def run_pipeline(
     video: str,
     out_dir: str | Path,
@@ -473,13 +499,20 @@ def run_pipeline(
 
     if audio_only:
         # No picture: no frame grid, no encoder settings; only the join and mastering inputs apply.
-        settings = RenderSettings(fps=0, crossfade_sec=config.splice_crossfade_sec)
+        settings = RenderSettings(fps=0, crossfade_sec=config.splice_crossfade_sec, loudness_lufs=config.loudness_lufs)
     else:
         settings = RenderSettings(crf=config.crf, preset=config.preset, fps=config.fps,
-                                  crossfade_sec=config.splice_crossfade_sec)
+                                  crossfade_sec=config.splice_crossfade_sec, loudness_lufs=config.loudness_lufs)
     if demo_minutes is not None:
         settings = RenderSettings(crf=config.demo_crf, preset=config.demo_preset, scale=config.demo_scale,
-                                  fps=config.fps, crossfade_sec=config.splice_crossfade_sec)
+                                  fps=config.fps, crossfade_sec=config.splice_crossfade_sec,
+                                  loudness_lufs=config.loudness_lufs)
+
+    # Before any render: the judge reads the recording's measured sound. Advisory; nothing downstream reads it.
+    notes["audio_assessment"] = _audio_assessment(
+        run, ctx, source_sha=sha256_file(ctx.source.path), target_lufs=config.loudness_lufs,
+        true_peak_dbtp=settings.true_peak_dbtp,
+        judge=judge, guidelines=guidelines, fresh=fresh, plan_only=plan_only)
 
     output: dict = {}
     if config.polish:

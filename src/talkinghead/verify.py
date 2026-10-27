@@ -112,8 +112,18 @@ def _av_sync(plan: Plan, f: dict) -> CheckResult:
 
 def _loudness(plan: Plan, f: dict) -> CheckResult:
     target = f.get("lufs_target", -16.0)
-    return CheckResult("loudness", "fatal", abs(f["lufs"] - target) <= LUFS_TOL,
-                       f"{f['lufs']:.1f} LUFS (target {target:.0f} +-{LUFS_TOL:.0f})")
+    lufs = f["lufs"]
+    detail = f"{lufs:.1f} LUFS (target {target:.0f} +-{LUFS_TOL:.0f})"
+    if lufs > target + LUFS_TOL:
+        return CheckResult("loudness", "fatal", False, f"{detail}: louder than target")
+    if lufs < target - LUFS_TOL:
+        # Only the measured shortfall is known here: the render's limiting constraint is not recorded in the facts.
+        # The master applied one fixed gain and no compression, so a quiet master is reported for the owner's decision
+        # rather than failing the cook.
+        return CheckResult("loudness", "warn", False,
+                           f"{detail}: quieter than target by {target - lufs:.1f} LU; one fixed gain and no "
+                           "compression were applied")
+    return CheckResult("loudness", "fatal", True, detail)
 
 
 def _cold_open(plan: Plan, f: dict) -> CheckResult:

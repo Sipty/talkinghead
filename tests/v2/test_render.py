@@ -8,12 +8,13 @@ identical trims and encodes, so the bytes are the ones a single pass owed.
 
 import json
 import subprocess
+import wave
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from talkinghead.color import ColorProfile, hdr_codec, hdr_pix_fmt
+from talkinghead.color import ColorProfile, decode_args, hdr_codec, hdr_pix_fmt, without_hwaccel
 from talkinghead.pipeline import render_memo_key
 from talkinghead.render import (
     AUDIO_RATE,
@@ -23,6 +24,7 @@ from talkinghead.render import (
     _handles,
     _join_gain_db,
     _run,
+    _run_decoding,
     _timeout,
     build_commands,
     join_audio,
@@ -30,17 +32,20 @@ from talkinghead.render import (
     render_plan,
 )
 from talkinghead.timeline import Cut, Plan, Segment, SourceInfo
+from talkinghead.verify import _loudness, measure_lufs
 
 HLG = ColorProfile(primaries="bt2020", transfer="arib-std-b67", matrix="bt2020nc",
                    range="tv", pix_fmt="yuv420p10le", hdr=True)
 
 
-def _clip(path: Path, seconds: float = 6.0) -> None:
+def _clip(path: Path, seconds: float = 6.0, pix_fmt: str | None = None) -> None:
+    """An H.264 clip with audio. libx264 keeps testsrc's RGB as 4:4:4 unless `pix_fmt` says otherwise."""
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error",
          "-f", "lavfi", "-i", f"testsrc=size=320x240:rate=30:duration={seconds}",
          "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={seconds}",
-         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(path)],
+         "-c:v", "libx264", "-preset", "ultrafast", *(["-pix_fmt", pix_fmt] if pix_fmt else []),
+         "-c:a", "aac", str(path)],
         check=True,
     )
 
@@ -98,18 +103,17 @@ def _volume_max(path: Path) -> float:
 
 
 @pytest.mark.parametrize("fps", [0, 30])
-def test_render_removes_the_planned_time_and_applies_the_audio_chain_once(tmp_path: Path, fps: int) -> None:
+def test_render_removes_the_planned_time(tmp_path: Path, fps: int) -> None:
     src = tmp_path / "src.mp4"
     _clip(src)
     source = SourceInfo("main", str(src), "x", 6.0)
     plan = Plan.from_cuts(source, [Cut(1.0, 2.0, "silence"), Cut(4.0, 4.5, "filler")])
     out = tmp_path / "out.mp4"
-    cmd = render_plan(plan, str(out), RenderSettings(crf=28, preset="ultrafast", fps=fps))
+    render_plan(plan, str(out), RenderSettings(crf=28, preset="ultrafast", fps=fps))
     info = _probe(out)
     assert float(info["format"]["duration"]) == pytest.approx(4.5, abs=0.15)
     audio = next(s for s in info["streams"] if s["codec_type"] == "audio")
     assert audio["sample_rate"] == "48000"
-    assert cmd.count("loudnorm") == 1
 
 
 def test_render_demo_tier_downscales(tmp_path: Path) -> None:
@@ -121,19 +125,99 @@ def test_render_demo_tier_downscales(tmp_path: Path) -> None:
     assert int(_video(out)["height"]) == 120
 
 
-def test_render_with_no_cuts_still_runs_the_chain(tmp_path: Path) -> None:
+def test_render_with_no_cuts_keeps_the_full_length(tmp_path: Path) -> None:
     src = tmp_path / "src.mp4"
     _clip(src, 2.0)
     plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 2.0), [])
     out = tmp_path / "same.mp4"
-    cmd = render_plan(plan, str(out), RenderSettings(crf=28, preset="ultrafast"))
-    assert out.is_file() and "loudnorm" in cmd
+    render_plan(plan, str(out), RenderSettings(crf=28, preset="ultrafast"))
+    assert out.is_file()
+    assert float(_probe(out)["format"]["duration"]) == pytest.approx(2.0, abs=0.1)
 
 
 def test_render_refuses_a_plan_that_removes_everything(tmp_path: Path) -> None:
     plan = Plan.from_cuts(SourceInfo("main", "/nonexistent.mp4", "x", 2.0), [Cut(0.0, 2.0, "outro")])
     with pytest.raises(RuntimeError, match="nothing to render"):
         render_plan(plan, str(tmp_path / "x.mp4"), RenderSettings())
+
+
+# -- the audio master, judged on its samples -------------------------------------
+def _write_wav(path: Path, x: np.ndarray) -> None:
+    pcm = np.clip(np.round(x * 32767), -32768, 32767).astype("<i2")
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(AUDIO_RATE)
+        w.writeframes(pcm.tobytes())
+
+
+def _read_wav(path: Path) -> np.ndarray:
+    with wave.open(str(path), "rb") as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float64) / 32768
+
+
+def _rms_db(x: np.ndarray) -> float:
+    return 20 * np.log10(np.sqrt(np.mean(x * x)))
+
+
+def _crest_db(x: np.ndarray) -> float:
+    return 20 * np.log10(np.max(np.abs(x)) / np.sqrt(np.mean(x * x)))
+
+
+def _peak_db(x: np.ndarray) -> float:
+    return 20 * np.log10(np.max(np.abs(x)))
+
+
+def _master(tmp_path: Path, recording: np.ndarray) -> Path:
+    src = tmp_path / "recording.wav"
+    _write_wav(src, recording)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", len(recording) / AUDIO_RATE), [])
+    out = tmp_path / "master.wav"
+    render_audio_plan(plan, str(out), RenderSettings(fps=0))
+    return out
+
+
+def test_the_master_keeps_the_recordings_dynamics_and_crest_factor(tmp_path: Path) -> None:
+    t = np.arange(4 * AUDIO_RATE) / AUDIO_RATE
+    tone = np.sin(2 * np.pi * 220 * t) + 0.6 * np.sin(2 * np.pi * 330 * t + 1.0)
+    recording = np.where(t >= 2.0, 0.1, 0.01) * tone          # quiet, then loud: 20 dB apart
+    master = _read_wav(_master(tmp_path, recording))
+    quiet, loud = slice(int(0.5 * AUDIO_RATE), int(1.5 * AUDIO_RATE)), slice(int(2.5 * AUDIO_RATE), int(3.5 * AUDIO_RATE))
+    # One fixed gain: the loud part stays exactly as far above the quiet part, and its peaks keep their rise over RMS.
+    gap_in = _rms_db(recording[loud]) - _rms_db(recording[quiet])
+    gap_out = _rms_db(master[loud]) - _rms_db(master[quiet])
+    assert gap_out == pytest.approx(gap_in, abs=0.2)
+    assert _crest_db(master[loud]) == pytest.approx(_crest_db(recording[loud]), abs=0.2)
+
+
+def test_a_hot_peak_caps_the_master_and_the_quiet_master_is_reported_without_a_cause(tmp_path: Path) -> None:
+    t = np.arange(4 * AUDIO_RATE) / AUDIO_RATE
+    recording = 0.1 * np.sin(2 * np.pi * 220 * t)
+    recording[2 * AUDIO_RATE:2 * AUDIO_RATE + 96] = 0.95       # a 2 ms hot peak above the bed
+    out = _master(tmp_path, recording)
+    assert _peak_db(_read_wav(out)) <= -1.4                    # the true-peak ceiling holds
+    result = _loudness(None, {"lufs": measure_lufs(str(out)), "lufs_target": -16.0})
+    assert result.severity == "warn" and not result.ok         # quiet, reported, not a failed cook
+    assert "quieter than target by" in result.detail and "compression were applied" in result.detail
+
+
+def test_a_master_with_headroom_reaches_the_target_and_passes_the_loudness_check(tmp_path: Path) -> None:
+    t = np.arange(4 * AUDIO_RATE) / AUDIO_RATE
+    out = _master(tmp_path, 0.02 * np.sin(2 * np.pi * 220 * t))
+    assert measure_lufs(str(out)) == pytest.approx(-16.0, abs=1.0)
+    assert _loudness(None, {"lufs": measure_lufs(str(out)), "lufs_target": -16.0}).ok
+
+
+def test_a_short_hot_click_is_still_peak_capped(tmp_path: Path) -> None:
+    recording = np.zeros(AUDIO_RATE)                           # one second: too short to gate an integrated level
+    recording[24000:24096] = 0.95
+    assert _peak_db(_read_wav(_master(tmp_path, recording))) <= -1.4
+
+
+def test_silence_renders_as_exact_silence(tmp_path: Path) -> None:
+    master = _read_wav(_master(tmp_path, np.zeros(AUDIO_RATE)))
+    assert master.size == AUDIO_RATE and not np.any(master)
+
 
 
 # -- a plain render's output ---------------------------------------------------
@@ -382,13 +466,12 @@ def test_an_audio_plan_renders_a_48k_pcm_wav_of_the_planned_length(tmp_path: Pat
     _tone_wav(src)
     plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 6.0), [Cut(1.0, 1.4, "silence"), Cut(3.0, 3.5, "filler")])
     out = tmp_path / "out.wav"
-    cmd = render_audio_plan(plan, str(out), RenderSettings(fps=0))
-    assert "loudnorm" in cmd
+    render_audio_plan(plan, str(out), RenderSettings(fps=0))
     probed = _probe(out)
     assert [s["codec_type"] for s in probed["streams"]] == ["audio"]
     assert probed["streams"][0]["codec_name"] == "pcm_s16le" and probed["streams"][0]["sample_rate"] == "48000"
     assert float(probed["format"]["duration"]) == pytest.approx(plan.output_duration, abs=0.01)
-    assert _volume_max(out) > -30
+    assert -30 < _volume_max(out) <= -1.0
     assert sorted(p.name for p in tmp_path.iterdir()) == ["out.wav", "src.wav"]
 
 
@@ -427,6 +510,92 @@ def test_the_pass_timeout_scales_with_the_output_length() -> None:
     long = Plan.from_cuts(SourceInfo("main", "/x.mp4", "x", 3600.0), [])
     assert _timeout(short) == RENDER_MIN_TIMEOUT_SEC
     assert _timeout(long) == pytest.approx(3 * 3600.0)
+
+
+# -- hardware decode ---------------------------------------------------------
+needs_hwaccel = pytest.mark.skipif(not decode_args("yuv420p"), reason="this ffmpeg has no VideoToolbox decode")
+
+
+def _graph_frames(cmd: list[str], pix_fmt: str) -> tuple[bytes, str]:
+    """The picture pass's filtered frames before the encode, and its debug log.
+
+    The encoder is left out on purpose: decode is the only thing hardware changes, and
+    comparing raw frames does not depend on the encoder being deterministic.
+    """
+    head = cmd[:cmd.index("-map")]
+    head[head.index("-v") + 1] = "debug"
+    proc = subprocess.run([*head, "-map", "[vout]", "-f", "rawvideo", "-pix_fmt", pix_fmt, "-"],
+                          capture_output=True, check=True)
+    return proc.stdout, proc.stderr.decode(errors="replace")
+
+
+@needs_hwaccel
+@pytest.mark.parametrize("hdr", [False, True])
+def test_hardware_decode_gives_the_cut_the_software_frames(tmp_path: Path, hdr: bool) -> None:
+    """VideoToolbox is only a speed-up: the cut's frames are the software decode's, bit for bit.
+
+    The log check keeps the comparison honest -- a hardware decoder that quietly fell
+    back to software would compare equal without testing anything.
+    """
+    src = tmp_path / "src.mp4"
+    _hlg_clip(src, 3.0) if hdr else _clip(src, 3.0, pix_fmt="yuv420p")
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 3.0),
+                          [Cut(0.5, 1.0, "silence"), Cut(2.0, 2.2, "filler")])
+    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(audio_filter="anull"))[0]
+    assert cmd[cmd.index("-hwaccel") + 1] == "videotoolbox"
+    pix_fmt = "yuv420p10le" if hdr else "yuv420p"
+    hard, log = _graph_frames(cmd, pix_fmt)
+    soft, _ = _graph_frames(without_hwaccel(cmd), pix_fmt)
+    assert "videotoolbox_vld" in log
+    assert hard and hard == soft
+
+
+@needs_hwaccel
+def test_every_reordered_input_decodes_on_the_hardware(tmp_path: Path) -> None:
+    """A plan that revisits a source gives each run its own seeked input; each one gets the flag."""
+    src = tmp_path / "src.mp4"
+    _clip(src, 4.0, pix_fmt="yuv420p")
+    source = SourceInfo("main", str(src), "x", 4.0)
+    plan = Plan(sources={"main": source}, main="main", cuts=[],
+                segments=[Segment("main", 2.0, 3.0), Segment("main", 0.5, 1.5)])
+    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(audio_filter="anull"))[0]
+    assert cmd.count("-i") == 2 and cmd.count("-hwaccel") == 2
+    hard, _ = _graph_frames(cmd, "yuv420p")
+    soft, _ = _graph_frames(without_hwaccel(cmd), "yuv420p")
+    assert hard and hard == soft
+
+
+def test_a_444_source_decodes_in_software(tmp_path: Path) -> None:
+    """Found by this suite: VideoToolbox subsamples 4:4:4 chroma itself and lands one level off
+    the software decode, so such a source keeps the software path and its exact frames."""
+    src = tmp_path / "src.mp4"
+    _clip(src, 2.0)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 2.0), [Cut(0.5, 1.0, "silence")])
+    cmd = build_commands(plan, str(tmp_path / "out.mp4"), RenderSettings(audio_filter="anull"))[0]
+    assert "-hwaccel" not in cmd
+
+
+def test_a_pass_the_hardware_cannot_decode_reruns_in_software(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """A real ffmpeg failure, not a mock: an unknown hwaccel makes the picture pass exit
+    nonzero. The render still completes, and the command it reports is the one that ran."""
+    monkeypatch.setattr("talkinghead.render.decode_args", lambda pix_fmt: ["-hwaccel", "no-such-hwaccel"])
+    src = tmp_path / "src.mp4"
+    _clip(src, 2.0)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 2.0), [Cut(0.5, 1.0, "silence")])
+    out = tmp_path / "out.mp4"
+    cmd = render_plan(plan, str(out), RenderSettings(crf=28, preset="ultrafast"))
+    assert float(_probe(out)["format"]["duration"]) == pytest.approx(1.5, abs=0.1)
+    assert "-hwaccel" not in cmd
+    assert "software decode" in capsys.readouterr().err
+
+
+def test_a_pass_that_also_fails_in_software_still_raises(tmp_path: Path) -> None:
+    """The rerun is for hardware decode only: a pass that fails in software too raises as before."""
+    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin", "-hwaccel", "no-such-hwaccel",
+           "-i", str(tmp_path / "missing.mp4"), "-f", "null", "-"]
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        _run_decoding(cmd, 30.0)
 
 
 def test_a_voiced_join_gain_matches_the_incoming_side_then_eases_back_to_unity() -> None:

@@ -4,6 +4,8 @@ judge may answer with. Judges never see or emit timestamps as answers."""
 
 from __future__ import annotations
 
+import json
+
 from .audio import RefinedWord
 from .semantic import Sentence
 
@@ -451,3 +453,63 @@ RESEARCH_SCHEMA = {
     "required": ["sources"],
     "additionalProperties": False,
 }
+
+
+# Audio assessment: the judge reads measured numbers of the original audio and advises. It never enables processing.
+AUDIO_ASSESSMENT_SCHEMA = {
+    "title": "AudioAssessment",
+    "type": "object",
+    "properties": {
+        "noise": {
+            "type": "object",
+            "properties": {
+                "source": {"enum": ["none", "hum", "broadband", "unknown"]},
+                "severity": {"enum": ["none", "low", "moderate", "high", "unknown"]},
+                "evidence": {"type": "string"},
+            },
+            "required": ["source", "severity", "evidence"],
+            "additionalProperties": False,
+        },
+        "leveling": {
+            "type": "object",
+            "properties": {
+                "verdict": {"enum": ["ok", "quiet", "hot", "peak_limited", "unknown"]},
+                "evidence": {"type": "string"},
+            },
+            "required": ["verdict", "evidence"],
+            "additionalProperties": False,
+        },
+        "recommendation": {"type": "string"},
+        "owner_decisions": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["noise", "leveling", "recommendation", "owner_decisions"],
+    "additionalProperties": False,
+}
+
+
+def audio_assessment_prompt(facts: dict, guidelines_fingerprint: str) -> str:
+    return (
+        "Read the measured sound of one recording's original audio and advise the owner on it. You get numbers "
+        "only, no audio. A null value means that measurement is unavailable; never treat it as zero.\n\n"
+        "Rules:\n"
+        "- If status is \"silence\", the source has no sound: answer noise source \"none\" and leveling \"unknown\".\n"
+        "- If status is \"mono_analysis_unavailable\", the original has sound but its mono analysis cancelled. "
+        "Use the original loudness/peak facts; noise source and room severity are unknown.\n"
+        "- Name a noise source only when these measurements establish it: a tone at 50 or 60 Hz (hum), or broadband "
+        "noise with no tone. Otherwise answer \"unknown\". Never name a specific source (birds, wind, traffic, fans "
+        "and the like) from these numbers: that is a guess.\n"
+        "- Leveling: compare input_integrated_lufs with target_lufs. \"quiet\" when it sits well below target and "
+        "gain_to_target_db is not capped by gain_ceiling_from_peak_db; \"hot\" when above target; "
+        "\"peak_limited\" only when gain_to_target_db is larger than gain_ceiling_from_peak_db, so the measured peaks "
+        "would stop the gain short of target; \"ok\" when neither applies; \"unknown\" when the numbers cannot settle "
+        "it.\n"
+        "- mono_sample_peak_dbfs is the peak of a mono downmix. Summing channels can push it above 0 dBFS even when the "
+        "original channels never clip, so it does not establish source clipping. Judge clipping only from "
+        "input_true_peak_dbtp of the original audio; a true peak at or below 0 dBTP means no clipping.\n"
+        "- You advise only. Isolation, denoising and compression are the owner's decision. Never say they are "
+        "applied or should be applied. Recommendation: at most two sentences.\n"
+        "- owner_decisions: the questions the owner must answer before any processing is chosen. Empty when none.\n"
+        "- Answer with the JSON object only.\n\n"
+        f"Instruction fingerprint: {guidelines_fingerprint}\n"
+        "Measurements:\n" + json.dumps(facts, indent=2, sort_keys=True, allow_nan=False)
+    )

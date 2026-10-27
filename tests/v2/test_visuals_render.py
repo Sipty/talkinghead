@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from talkinghead.color import ColorProfile, hdr_codec, hdr_pix_fmt, write_sdr_to_hdr_cube
+from talkinghead.color import ColorProfile, decode_args, hdr_codec, hdr_pix_fmt, without_hwaccel, write_sdr_to_hdr_cube
 from talkinghead.visuals.render import _even, build_overlay_command, render_visuals
 from talkinghead.visuals.schedule import Placement
 
@@ -293,3 +293,56 @@ def test_hdr_compositor_preserves_source_precision_outside_graphics(tmp_path):
     got = struct.unpack_from(f"<{width}H", raw, row_start)
     expected = struct.unpack_from(f"<{width}H", source, row_start)
     assert max(abs(a - b) for a, b in zip(got, expected)) <= 1
+
+
+# -- hardware decode ---------------------------------------------------------
+def test_only_the_base_is_decoded_on_the_hardware(monkeypatch):
+    monkeypatch.setattr("talkinghead.visuals.render.decode_args", lambda pix_fmt: ["-hwaccel", "videotoolbox"])
+    c = cmd_for(Placement("a", "/a.png", 1.0, 5.0, 0.28), Placement("b", "/b.png", 6.0, 9.0, 0.28))
+    assert c.count("-hwaccel") == 1
+    assert c.index("-hwaccel") < c.index("base.mp4") < c.index("/a.png")
+
+
+def test_a_stream_copy_decodes_nothing():
+    c = build_overlay_command("base.mp4", [], "out.mp4", margin=40, fade=0.4, width=1920)
+    assert "-hwaccel" not in c
+
+
+@pytest.mark.skipif(not decode_args("p010le"), reason="this ffmpeg has no VideoToolbox decode")
+def test_hardware_decode_gives_the_bake_the_software_frames(tmp_path):
+    """The composited HLG frames are the same whichever decoder read the base, and the
+    debug log proves VideoToolbox did the decoding rather than quietly falling back."""
+    base, card = tmp_path / "base.mp4", tmp_path / "card.png"
+    _bake_clip(base)
+    _card(card)
+    cube = write_sdr_to_hdr_cube(tmp_path / "graphics.cube", HLG)
+    cmd = build_overlay_command(str(base), [Placement("card", str(card), 0.5, 1.5, 0.3)],
+                                str(tmp_path / "unused.mp4"), width=320, color=HLG, cube=str(cube),
+                                base_duration=2.0)
+    assert cmd[cmd.index("-hwaccel") + 1] == "videotoolbox"
+
+    def frames(c):
+        graph_end = c.index("-filter_complex") + 2
+        head = c[:graph_end]
+        head[head.index("-v") + 1] = "debug"
+        proc = subprocess.run(head + ["-map", "[vout]", "-pix_fmt", "yuv420p10le", "-f", "rawvideo", "-"],
+                              capture_output=True, check=True)
+        return proc.stdout, proc.stderr.decode(errors="replace")
+
+    hard, log = frames(cmd)
+    soft, _ = frames(without_hwaccel(cmd))
+    assert "videotoolbox_vld" in log
+    assert hard and hard == soft
+
+
+def test_a_bake_the_hardware_cannot_decode_reruns_in_software(tmp_path, monkeypatch, capsys):
+    """A real ffmpeg failure from an unknown hwaccel: the bake still lands, and the command
+    the report records is the software one that ran."""
+    monkeypatch.setattr("talkinghead.visuals.render.decode_args", lambda pix_fmt: ["-hwaccel", "no-such-hwaccel"])
+    base, card, out = tmp_path / "base.mp4", tmp_path / "card.png", tmp_path / "out.mp4"
+    _bake_clip(base, hdr=False)
+    _card(card)
+    cmd = render_visuals(str(base), [Placement("card", str(card), 0.5, 1.5, 0.3)], str(out))
+    assert "-hwaccel" not in cmd
+    assert _audio_hash(out) == _audio_hash(base)
+    assert "software decode" in capsys.readouterr().err

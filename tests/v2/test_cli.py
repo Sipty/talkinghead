@@ -36,6 +36,19 @@ def test_run_parser_takes_the_external_recording() -> None:
     assert args.audio == "rec.mov" and args.fix_drift and args.allow_bad_align
 
 
+def test_the_cli_flags_decide_a_cooks_isolation_over_the_config_file(tmp_path: Path) -> None:
+    config = tmp_path / "talkinghead.toml"
+    config.write_text("isolate_voice = true\n")
+
+    def cook_isolates(*flags: str) -> bool:
+        args = build_parser().parse_args(["run", "v.mp4", *flags])
+        return load_config(config, isolate_voice=args.isolate_voice).isolate_voice
+
+    assert cook_isolates() is True                 # the config file enables it and no flag names it
+    assert cook_isolates("--no-isolate-voice") is False
+    assert cook_isolates("--isolate-voice") is True
+
+
 def test_align_parser_defaults_and_flags() -> None:
     args = build_parser().parse_args(["align", "v.mov", "rec.mov"])
     assert args.cmd == "align" and (args.video, args.audio) == ("v.mov", "rec.mov")

@@ -340,7 +340,7 @@ def test_an_untrustworthy_alignment_stops_the_run_unless_allowed(
 def test_visuals_pass_writes_a_deliverable_and_leaves_the_cut_alone(clip: Path, tmp_path: Path) -> None:
     """The whole promise of the second pass: `final.mp4` is untouched and
     `final-visuals.mp4` has the same duration and the same audio stream."""
-    from talkinghead.judge import validate
+    from talkinghead.judge import AUDIO_READING, validate
     from talkinghead.visuals.render import probe_duration
 
     assets = tmp_path / "assets"
@@ -355,6 +355,8 @@ def test_visuals_pass_writes_a_deliverable_and_leaves_the_cut_alone(clip: Path, 
             self.calls = 0
 
         def decide(self, prompt: str, schema: dict) -> dict:
+            if schema.get("title") == "AudioAssessment":
+                return validate(AUDIO_READING, schema)
             self.calls += 1
             if "TASK: EDITORIAL PLAN" in prompt:
                 return validate({

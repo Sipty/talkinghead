@@ -13,6 +13,12 @@ def test_overlay_corner_is_a_framing_choice_with_a_validated_name() -> None:
         Config(visuals_corner="top-middle").validate()
 
 
+def test_a_cook_can_switch_off_isolation_that_the_config_file_enables(tmp_path: Path) -> None:
+    f = tmp_path / "talkinghead.toml"
+    f.write_text("isolate_voice = true\n")
+    assert load_config(f).isolate_voice is True
+    assert load_config(f, isolate_voice=False).isolate_voice is False
+    assert "isolate_voice" not in load_config(f, isolate_voice=False).to_dict()
 
 
 def test_toml_overrides_known_keys_and_rejects_unknown(tmp_path: Path) -> None:

@@ -10,31 +10,34 @@ preserved, and a completed mux replaces the destination atomically.
 
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
 import subprocess
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
 from . import isolate
-from .color import HDR_PIX_FMT, ColorProfile, encode_args, probe_color
+from .color import HDR_PIX_FMT, ColorProfile, decode_args, encode_args, probe_color, without_hwaccel
 from .store import DEFAULT_CACHE_DIR
 from .timeline import Plan, Segment
 
 # Bumped whenever this module's pixels or audio would differ for an identical
 # plan and settings. Version 4: the picture is one CFR decode per source run
 # filtered by `select`, replacing per-segment trim branches. Version 5: voiced
-# joins are gain-matched (join_audio).
-RENDERER_VERSION = 5
+# joins are gain-matched (join_audio). Version 6: the master is one fixed,
+# true-peak-limited gain (`_loudness_gain_db`) instead of loudnorm, whose dynamic
+# mode time-varies the level whenever linear gain would break the peak ceiling.
+RENDERER_VERSION = 6
 
-FINAL_AUDIO_FILTER = (
-    "highpass=f=80,"
-    "acompressor=threshold=-22dB:ratio=2.5:attack=10:release=200:makeup=2,"
-    "equalizer=f=6500:t=q:w=3:g=-2.5,"
-    "loudnorm=I=-16:TP=-1.5:LRA=11"
-)
+# The master is the joined audio times one fixed gain. No compressor, EQ, highpass or dynamic normalisation: the only
+# shaping is the fades in join_audio (program edges and every join). Shown in the report's Audio section.
+MASTER_CHAIN_NOTE = ("one fixed gain (no compressor, EQ, highpass or dynamic normalisation); "
+                     "fades only at program edges and joins")
 # Raw audio is decoded and joined at the output rate.
 AUDIO_RATE = 48000
 # Program start/end fade, so the first and last sample cannot click.
@@ -69,7 +72,10 @@ class RenderSettings:
     preset: str = "medium"
     scale: str | None = None          # e.g. "-2:480" for the demo tier
     fps: int = 30
-    audio_filter: str = FINAL_AUDIO_FILTER
+    # The final pass's filter. None measures the fixed gain from the joined audio (the cook's path); a string runs verbatim.
+    audio_filter: str | None = None
+    loudness_lufs: float = -16.0      # integrated loudness the gain aims at
+    true_peak_dbtp: float = -1.5      # the gain never takes the true peak past this
     strategy: str = "concat"
 
 
@@ -377,9 +383,49 @@ def _source_order(plan: Plan) -> list[str]:
     return order
 
 
+def _loudness_gain_db(pcm: str, channels: int, settings: RenderSettings, timeout: float) -> float:
+    """The one fixed gain (dB) toward the loudness target, stopped by the true-peak ceiling.
+
+    Measured with loudnorm's analysis on the joined audio, before any filter. The gain is the lower of the gain to
+    target and the gain the true-peak ceiling allows, and is never compressed up to the target. Where the cap is the
+    lower one the master lands quieter; verification reports the measured shortfall, not its cause.
+    Silence (no peak and no level) takes unity gain. A signal too short for an integrated measurement has no level
+    to aim at, so it is only attenuated when its finite peaks exceed the ceiling; it is never boosted. NaN or
+    infinite-peak measurements are an error, not silence.
+    """
+    cmd = ["ffmpeg", "-v", "info", "-nostdin", "-f", "f32le", "-ar", str(AUDIO_RATE), "-ac", str(channels), "-i", pcm,
+           "-af", f"loudnorm=I={settings.loudness_lufs}:TP={settings.true_peak_dbtp}:print_format=json",
+           "-f", "null", "-"]
+    proc = _tool(cmd, timeout)
+    blocks = re.findall(r"\{[^{}]*\}", proc.stderr or "")
+    if proc.returncode != 0 or not blocks:
+        tail = "\n".join((proc.stderr or "").strip().splitlines()[-15:])
+        raise RuntimeError(f"could not measure the loudness of the joined audio (exit {proc.returncode}):\n{tail}")
+    measured = json.loads(blocks[-1])
+    level, peak = float(measured["input_i"]), float(measured["input_tp"])
+    if math.isnan(level) or math.isnan(peak) or level == math.inf or peak == math.inf:
+        raise RuntimeError(f"loudness measurement of the joined audio is invalid: input_i={level}, input_tp={peak}")
+    if peak == -math.inf:
+        if level == -math.inf:
+            return 0.0
+        raise RuntimeError(f"loudness measurement is inconsistent: input_i={level} with no true peak")
+    if level == -math.inf:
+        return min(0.0, settings.true_peak_dbtp - peak)
+    return min(settings.loudness_lufs - level, settings.true_peak_dbtp - peak)
+
+
+def _final_filter(settings: RenderSettings, pcm: str, channels: int, timeout: float) -> str:
+    """The final pass's filter: the settings' own when given, else the measured fixed gain as one volume step."""
+    if settings.audio_filter is not None:
+        return settings.audio_filter
+    return f"volume={_loudness_gain_db(pcm, channels, settings, timeout):.3f}dB"
+
+
 def _mastering_command(settings: RenderSettings, pcm: str, codec: list[str], dest: str,
                        channels: int) -> list[str]:
     """The final-chain pass over the joined PCM, encoded by `codec` into `dest`."""
+    if settings.audio_filter is None:
+        raise RuntimeError("the final audio pass has no filter: measure the loudness gain first (_final_filter)")
     return [
         "ffmpeg", "-y", "-v", "error", "-nostdin",
         "-f", "f32le", "-ar", str(AUDIO_RATE), "-ac", str(channels),
@@ -413,9 +459,11 @@ def build_commands(plan: Plan, out_path: str, settings: RenderSettings,
     head = ["ffmpeg", "-y", "-v", "error", "-nostdin"]
     seeked = _run_inputs(segments, order, settings.fps)
     inputs = seeked if seeked is not None else [(sid, 0.0) for sid in order]
+    decode = {sid: decode_args(probe_color(plan.sources[sid].path).pix_fmt) for sid in order}
     picture_cmd = head
     for sid, seek in inputs:
-        picture_cmd = picture_cmd + (["-ss", f"{seek:.6f}"] if seek else []) + ["-i", plan.sources[sid].path]
+        picture_cmd = (picture_cmd + decode[sid] + (["-ss", f"{seek:.6f}"] if seek else [])
+                       + ["-i", plan.sources[sid].path])
     per_run = [(i, seek) for i, (_, seek) in enumerate(seeked)] if seeked is not None else None
     picture_cmd = picture_cmd + [
         "-filter_complex", _video_graph(segments, input_index, settings, profile, per_run),
@@ -448,18 +496,38 @@ def _run(cmd: list[str], timeout: float) -> None:
         raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}):\n{tail}")
 
 
+def _run_decoding(cmd: list[str], timeout: float) -> list[str]:
+    """Run a pass; one that fails with hardware decode reruns in software. Returns the command that ran.
+
+    Only an ffmpeg failure reruns: a stall raises from `_tool` as before, since a second
+    attempt would double a pass that is already over its time.
+    """
+    soft = without_hwaccel(cmd)
+    if soft == cmd:
+        _run(cmd, timeout)
+        return cmd
+    if _tool(cmd, timeout).returncode == 0:
+        return cmd
+    print("talkinghead: hardware decode failed; rerunning the pass with software decode", file=sys.stderr)
+    _run(soft, timeout)
+    return soft
+
+
 def render_plan(plan: Plan, out_path: str, settings: RenderSettings) -> str:
     """Render and return the command lines used (for the report)."""
+    if not plan.segments:
+        raise RuntimeError("nothing to render: the plan removes the whole video")
     audio = _audio_sources(plan)
-    cmds = build_commands(plan, out_path, settings, audio)
     picture, audio_tmp, staged, pcm = _parts(out_path)
     order = _source_order(plan)
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
     scratch = [f"{out_path}.src{i}.pcm" for i in range(len(order))]
     try:
         _write_joined_audio(plan, order, segments, settings, pcm, scratch, audio)
-        for cmd in cmds:
-            _run(cmd, _timeout(plan))
+        timeout = _timeout(plan)
+        settings = replace(settings, audio_filter=_final_filter(
+            settings, pcm, _channels(audio[order[0]], timeout), timeout))
+        cmds = [_run_decoding(cmd, timeout) for cmd in build_commands(plan, out_path, settings, audio)]
         os.replace(staged, out_path)
     finally:
         for part in (picture, audio_tmp, staged, pcm, *scratch):
@@ -489,10 +557,13 @@ def render_audio_plan(plan: Plan, out_path: str, settings: RenderSettings, *, or
     segments = _snap(plan.segments, settings.fps) if settings.fps else plan.segments
     staged, pcm = _audio_parts(out_path)
     scratch = [f"{out_path}.src{i}.pcm" for i in range(len(order))]
-    cmd = _mastering_command(settings, pcm, ["-c:a", "pcm_s16le"], staged, _channels(audio[order[0]], _timeout(plan)))
     try:
         _write_joined_audio(plan, order, segments, settings, pcm, scratch, audio)
-        _run(cmd, _timeout(plan))
+        timeout = _timeout(plan)
+        channels = _channels(audio[order[0]], timeout)
+        settings = replace(settings, audio_filter=_final_filter(settings, pcm, channels, timeout))
+        cmd = _mastering_command(settings, pcm, ["-c:a", "pcm_s16le"], staged, channels)
+        _run(cmd, timeout)
         os.replace(staged, out_path)
     finally:
         for part in (staged, pcm, *scratch):

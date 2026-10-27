@@ -253,8 +253,8 @@ The settings most people change first are `votes` and `agree` (the vote size), `
 
 #### Voice isolation (macOS only, opt-in)
 
-`isolate_voice = true` in the config file, or `--isolate-voice` on the command line, renders the audio through Apple's voice isolation (AUSoundIsolation).
-It is for noisy places: a hotel lobby, a restaurant, a handheld mic.
+`--isolate-voice` on the command line, or `isolate_voice = true` in the config file, renders the audio through Apple's voice isolation (AUSoundIsolation). Off unless one of them is set. Precedence: `--isolate-voice` and `--no-isolate-voice` (per cook) override the config file; `--no-isolate-voice` switches a config-enabled isolation off for a single cook.
+It is never enabled by the audio assessment. Before render, the configured judge reads the measured sound of the original audio (floor, loudness, true peak, LRA, quiet-window spectrum and 50/60 Hz tone ratios) once per recording and states what it can establish, saying `unknown` when the numbers do not name a noise source. The reading appears in the report's `## Audio` section, which also lists what was not applied (isolation, denoise, compression, EQ). Enabling any of them is your decision.
 Silence for the pauses stage and the dead-air check is measured on the isolated track, so room tone the unit gates to digital silence counts as silence. The source transcript, the judges' candidates and edge placement keep reading the original audio.
 The output pass judges the transcript of an original-audio companion render, one per round (an extra render and transcription each round). The isolated render's own transcript is used only for the `isolation_words` count.
 Turning it on re-keys the pauses stage. Later stages that build on the pause cuts (restructure, polish, output rounds) recompute, and their judge calls may run again. Structure, retakes and content replay from their memos.
@@ -594,7 +594,7 @@ uv sync
 - **Stage**: one decision step: cold open and outro, retakes, content, then the mechanical pauses and edges.
 - **Memo**: a stage's saved result, keyed on the hash of its inputs, so a rerun replays it.
 - **HLG**: hybrid log-gamma, an HDR transfer format that many phone cameras record in. talkinghead keeps 10-bit HLG as 10-bit HLG.
-- **LUFS**: loudness units relative to full scale. The final audio targets -16 LUFS.
+- **LUFS**: loudness units relative to full scale. The final audio aims at -16 LUFS with one fixed gain that never takes the true peak past -1.5 dBTP; a source whose peaks block the gain masters quieter, and the report says so rather than compressing it.
 - **Overlay**: a picture drawn over the finished cut: a quote card, a screenshot or the chapter roadmap.
 - **Board**: an experimental panel that shows a tablet canvas beside the speaker.
 
