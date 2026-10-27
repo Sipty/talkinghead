@@ -679,3 +679,85 @@ def test_a_plan_only_rebuild_replays_the_stored_assessment_without_calling_asses
                          cache=cache, guidelines="G", topic="t", plan_only=True)
     assert again.notes["audio_assessment"] == {"skipped": "stub reading"}
     assert _live_extra_threads() == []
+
+
+# ------------------------------------------------- audio master first, picture once
+
+def _counted(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
+    """Count the pipeline's renders: the picture (`render_plan`) and every audio render (`render_audio_plan`)."""
+    import talkinghead.pipeline as pl
+
+    calls: dict[str, list] = {"picture": [], "audio": []}
+    real_picture, real_audio = pl.render_plan, pl.render_audio_plan
+    monkeypatch.setattr(pl, "render_plan", lambda *a, **k: calls["picture"].append(k) or real_picture(*a, **k))
+    monkeypatch.setattr(pl, "render_audio_plan", lambda *a, **k: calls["audio"].append(a[1]) or real_audio(*a, **k))
+    return calls
+
+
+def _cook(clip: Path, tmp_path: Path, cfg: Config | None = None, judge=None):
+    out = tmp_path / "out"
+    return run_pipeline(str(clip), out, cfg or _cfg(), transcriber=PlanAwareTranscriber(out),
+                        judge=judge or FakeJudge(_answers()), cache=Cache(tmp_path / "cache"), guidelines="G")
+
+
+def test_the_video_carries_the_audio_master_bytes_and_the_report_lists_audio_locked(
+    clip: Path, tmp_path: Path
+) -> None:
+    from talkinghead.lock import audio_stream_md5
+
+    result = _cook(clip, tmp_path)
+    master = tmp_path / "out" / "audio-master.m4a"
+    assert result.audio_master == master and master.is_file()
+    assert audio_stream_md5(result.final) == audio_stream_md5(master)
+    checks = {c.name: c for c in result.checks}
+    assert checks["audio_locked"].ok and "audio_stream" in checks and "av_sync" in checks
+    assert "audio_locked: OK" in result.report.read_text()
+    memo = json.loads((tmp_path / "out" / "audio-render.json").read_text())
+    assert set(memo) == {"key", "cmd", "sha256"}
+    facts = json.loads((tmp_path / "out" / "verify" / "facts.json").read_text())
+    assert facts["picture"]["audio_lock"]["locked"] == facts["picture"]["audio_lock"]["rendered"]
+    assert not {"mode", "color", "frame", "video_duration"} & set(facts)
+
+
+def test_a_fatal_audio_check_stops_the_cook_before_any_picture_is_rendered(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import talkinghead.pipeline as pl
+    from talkinghead.verify import CheckResult
+
+    real = pl.run_checks
+    monkeypatch.setattr(pl, "run_checks", lambda plan, facts: [*real(plan, facts),
+                                                              CheckResult("loudness", "fatal", False, "forced")])
+    calls = _counted(monkeypatch)
+    with pytest.raises(PipelineError, match="loudness"):
+        _cook(clip, tmp_path)
+    out = tmp_path / "out"
+    assert calls["picture"] == [] and calls["audio"]
+    assert not (out / "final.mp4").exists() and (out / "audio-master.m4a").is_file()
+    assert "FAILED" in (out / "report.md").read_text()
+
+
+def test_changing_crf_renders_only_the_picture(clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _cook(clip, tmp_path)
+    calls = _counted(monkeypatch)
+    cfg = _cfg()
+    cfg.crf = 31
+    strict = FakeJudge([])
+    result = _cook(clip, tmp_path, cfg, strict)
+    assert len(calls["picture"]) == 1 and calls["audio"] == [] and strict.calls == 0
+    assert result.ok, [c.line() for c in result.checks if not c.ok]
+
+
+def test_an_overwritten_audio_master_is_rendered_again_not_replayed(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from talkinghead.lock import audio_stream_md5
+
+    _cook(clip, tmp_path)
+    master = tmp_path / "out" / "audio-master.m4a"
+    master.write_bytes(b"not an audio master")
+    calls = _counted(monkeypatch)
+    result = _cook(clip, tmp_path, judge=FakeJudge([]))
+    assert calls["audio"] == [str(master)]
+    assert result.ok, [c.line() for c in result.checks if not c.ok]
+    assert audio_stream_md5(result.final) == audio_stream_md5(master)

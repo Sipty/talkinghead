@@ -318,3 +318,64 @@ def test_a_broken_off_fragment_removes_only_its_part_of_the_source_token() -> No
     assert len(out) == 1
     assert out[0].start >= 1.34 - 1e-6 and out[0].end <= 1.76, out  # the fragment, not the whole token
     assert all(c.end <= 1.76 or c.start >= 2.16 for c in out), "the kept restart was removed"
+
+
+def test_a_round_that_cuts_renders_audio_masters_and_the_picture_once(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    picture, audio = [], []
+    real_picture, real_audio = pipeline.render_plan, pipeline.render_audio_plan
+    monkeypatch.setattr(pipeline, "render_plan", lambda *a, **k: picture.append(a[1]) or real_picture(*a, **k))
+    monkeypatch.setattr(pipeline, "render_audio_plan", lambda *a, **k: audio.append(a[1]) or real_audio(*a, **k))
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    result = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                          judge=FakeJudge(_sources() + SOURCE_POLISH + [_verdict("cut")] * 3),
+                          cache=cache, guidelines="G", topic="t")
+    assert result.ok, [c.line() for c in result.checks if not c.ok]
+    assert [x.rsplit("/", 1)[-1] for x in picture] == ["final.mp4"]
+    assert len(audio) >= 2 and {x.rsplit("/", 1)[-1] for x in audio} == {"audio-master.m4a"}
+    assert _output_cuts(Plan.from_json(result.plan_path.read_text()))
+
+
+def test_changing_crf_after_a_cutting_round_renders_only_the_picture(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    first = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                         judge=FakeJudge(_sources() + SOURCE_POLISH + [_verdict("cut")] * 3),
+                         cache=cache, guidelines="G", topic="t")
+    assert _output_cuts(Plan.from_json(first.plan_path.read_text()))
+    picture, audio = [], []
+    real_picture, real_audio = pipeline.render_plan, pipeline.render_audio_plan
+    monkeypatch.setattr(pipeline, "render_plan", lambda *a, **k: picture.append(a[1]) or real_picture(*a, **k))
+    monkeypatch.setattr(pipeline, "render_audio_plan", lambda *a, **k: audio.append(a[1]) or real_audio(*a, **k))
+    cfg = _cfg()
+    cfg.crf = 31
+    strict = FakeJudge([])
+    again = run_pipeline(str(clip), out, cfg, transcriber=PlanAwareTranscriber(out), judge=strict,
+                         cache=cache, guidelines="G", topic="t")
+    assert again.ok, [c.line() for c in again.checks if not c.ok]
+    assert len(picture) == 1 and audio == [] and strict.calls == 0
+
+
+def test_an_overwritten_audio_master_after_a_cutting_round_is_rendered_again(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from talkinghead.lock import audio_stream_md5
+
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    first = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                         judge=FakeJudge(_sources() + SOURCE_POLISH + [_verdict("cut")] * 3),
+                         cache=cache, guidelines="G", topic="t")
+    assert _output_cuts(Plan.from_json(first.plan_path.read_text()))
+    master = out / "audio-master.m4a"
+    good_md5 = audio_stream_md5(master)
+    master.write_bytes(b"not an audio master")
+    audio = []
+    real_audio = pipeline.render_audio_plan
+    monkeypatch.setattr(pipeline, "render_audio_plan", lambda *a, **k: audio.append(a[1]) or real_audio(*a, **k))
+    again = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge([]),
+                         cache=cache, guidelines="G", topic="t")
+    assert again.ok, [c.line() for c in again.checks if not c.ok]
+    assert audio == [str(master)]
+    assert audio_stream_md5(master) == good_md5 == audio_stream_md5(again.final)

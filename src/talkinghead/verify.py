@@ -651,13 +651,6 @@ def run_picture_checks(plan: Plan, facts: dict) -> list[CheckResult]:
 
 
 CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
-    _duration, _av_sync, _loudness, _cold_open, _judged_removals, _clipped_words, _cut_word_fragments,
-    _residual_gaps,
-    _residual_disfluencies, _render_silence,
-    _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice, _color, _resolution,
-]
-
-AUDIO_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
     _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _clipped_words, _cut_word_fragments,
     _residual_gaps, _residual_disfluencies,
     _render_silence, _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice,
@@ -713,8 +706,8 @@ ISOLATION_CHECKS: list[Callable[[Plan, dict], CheckResult]] = [_isolation_alignm
 
 
 def run_checks(plan: Plan, facts: dict) -> list[CheckResult]:
-    """The video table, or the audio table (no picture: no AV sync, colour or resolution)."""
-    table = AUDIO_CHECKS if facts.get("mode") == "audio" else CHECKS
+    """The audio table (the master's checks), plus the isolation checks when the plan carries an isolated track."""
+    table = CHECKS
     if plan.isolation:
         table = [*table, *ISOLATION_CHECKS]
     results = [check(plan, facts) for check in table]
@@ -1012,21 +1005,19 @@ def collect_facts(
     source_duration: float, source_silences: list[tuple[float, float]], lufs_target: float = -16.0,
     source_path: str | None = None, voices: Sequence[tuple[float, float]] = (),
     speech_probes: Sequence[dict] = (), config: Config | None = None,
-    scale: str | None = None,
     env: Envelope | None = None, floor: float | None = None, source_words: Sequence = (),
-    audio_only: bool = False, output_asr: bool = True,
+    output_asr: bool = True,
     judged: Sequence[tuple[float, float, str]] | None = None,
     removing: Sequence[tuple[float, float, str]] | None = None,
     given_back: Collection[tuple[float, float]] = (),
 ) -> dict:
-    """Measure the render: durations, loudness, transcript (cached), join grades,
+    """Measure the render, an audio master or WAV: durations, loudness, transcript (cached), join grades,
     the dead air that survives the plan, and - when the source path is known -
-    where the rendered speech actually sits against that source and what colour
-    the render produced. `env`/`floor` are the source envelope and noise floor
-    the analysis already computed (edge check and seam quiet); `source_words`
-    are its refined words (pacing). Without `env` those facts are None.
+    where the rendered speech actually sits against that source. `env`/`floor`
+    are the source envelope and noise floor the analysis already computed (edge
+    check and seam quiet); `source_words` are its refined words (pacing).
+    Without `env` those facts are None. The picture's facts are `collect_picture_facts`.
 
-    `audio_only` measures a WAV: no picture, so no video/colour/frame facts.
     `output_asr=False` skips transcribing the render; the transcript is then the
     source words projected through the plan, recorded as `output_asr:
     "source-projection"` because it is an expectation, not a measurement.
@@ -1037,10 +1028,7 @@ def collect_facts(
     A transcriber that replays one fixed source response is refused as an
     output ASR: it would hand back the source's words for the edited audio."""
     config = config or Config()
-    if audio_only:
-        v, a = None, audio_stream_facts(render_path)["duration"]
-    else:
-        v, a = av_durations(render_path)
+    audio = audio_stream_facts(render_path)
     wav, sha = prepare_audio(render_path, workdir, force=True)
     if output_asr:
         if transcriber is None:
@@ -1068,15 +1056,12 @@ def collect_facts(
     words = transcript.words
     runs = _dead_air_runs(plan, source_silences, GAP_MIN)
     edges = source_edge_facts(plan, env, floor, config.quiet_above_floor_db) if env is not None else None
-    picture = bool(source_path) and not audio_only
     return {
-        "mode": "audio" if audio_only else "video",
         "output_asr": "independent" if output_asr else "source-projection",
-        "audio_stream": ({**audio_stream_facts(render_path),
-                          "expected_codec": "pcm_s16le" if Path(render_path).suffix.lower() == ".wav" else "aac"}
-                         if audio_only else None),
+        # `expected_codec` is what the renderer promises for the container: PCM in a .wav, AAC in the .m4a master.
+        "audio_stream": {**audio, "expected_codec":
+                         "pcm_s16le" if Path(render_path).suffix.lower() == ".wav" else "aac"},
         "duration": float(json.loads(out)["format"]["duration"]),
-        "video_duration": v, "audio_duration": a,
         "lufs": measure_lufs(render_path), "lufs_target": lufs_target,
         "words": words,
         "join_grades": grades,
@@ -1104,10 +1089,6 @@ def collect_facts(
         "clipped_words": clipped_words(_word_cuts(plan), source_words, removing) if source_words else None,
         "cut_word_fragments": (cut_word_fragments(_word_cuts(plan), source_words, removing)
                                if source_words and removing is not None else None),
-        "color": color_facts(source_path, render_path) if picture else None,
-        # `scale` is the render's deliberate downscale (demo tier); None = native.
-        "frame": {"source": list(display_size(source_path)), "render": list(display_size(render_path)),
-                  "scale": scale} if picture else None,
     }
 
 

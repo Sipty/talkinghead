@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields
@@ -20,6 +21,7 @@ from .config import ISOLATE_KEYS, Config
 from .context import Context, NeedsDecision
 from .edges import WORD_CUT_REASONS, EdgeContext, finalize_cuts, is_intra_restart, refine_joins
 from .judge import Judge
+from .lock import audio_stream_md5
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
 from .report import build_report
@@ -32,10 +34,12 @@ from .types import JUDGED_REASONS
 from .verify import (
     CheckResult,
     collect_facts,
+    collect_picture_facts,
     plan_invariants,
     project_words,
     residual_findings,
     run_checks,
+    run_picture_checks,
     visuals_resolution,
 )
 from .visuals.cards import avatar_fingerprint
@@ -66,6 +70,7 @@ class RunResult:
     facts: dict = field(default_factory=dict)
     notes: dict = field(default_factory=dict)
     final_visuals: Path | None = None
+    audio_master: Path | None = None  # the audio master of a video cook; None for an audio-only cook
 
     @property
     def ok(self) -> bool:
@@ -102,7 +107,16 @@ def _plan_memo_json(plan: Plan) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = False) -> str:
+def _cut_identity(plan: Plan) -> dict:
+    """The cut itself: segments to the millisecond and the sources' bytes."""
+    return {
+        "segments": [(sg.source, round(sg.start, 3), round(sg.end, 3)) for sg in plan.segments],
+        "sources": {sid: si.sha256 for sid, si in sorted(plan.sources.items())},
+    }
+
+
+def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = False,
+                    audio_sha: str | None = None) -> str:
     """The render memo's key: what actually determines the pixels and the audio.
 
     The EDL, the encoder settings, and `RENDERER_VERSION` -- the version of the
@@ -112,17 +126,73 @@ def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = 
     `plan.to_json()` instead put provenance -- and so the whole config -- in the
     key, and changing an unrelated setting like visuals_min_hold re-encoded a
     finished 22-minute render that could have been reused byte for byte.
+    A picture render carries a given master, so `audio_sha` (the master's sha256) keys it too.
     """
     return stable_key({
-        "segments": [(sg.source, round(sg.start, 3), round(sg.end, 3)) for sg in plan.segments],
-        "sources": {sid: si.sha256 for sid, si in sorted(plan.sources.items())},
+        **_cut_identity(plan),
         "settings": asdict(settings),
         "renderer": RENDERER_VERSION,
         # Only an audio-only render adds the key, so existing video memos still replay.
         **({"audio_only": True} if audio_only else {}),
+        **({"audio_sha": audio_sha} if audio_sha is not None else {}),
         # The isolated track's bytes: a render that reads it must re-render when it changes. Absent when isolation is off.
         **({"isolation": plan.isolation["track"]["sha256"]} if plan.isolation else {}),
     }, 2)
+
+
+# The audio master's encoder, named in its memo key because the codec is not a RenderSettings field.
+AUDIO_MASTER_CODEC = "aac-192k"
+
+
+def audio_memo_key(plan: Plan, settings: RenderSettings) -> str:
+    """The audio master's memo key: only what decides its bytes.
+
+    `crf`, `preset` and `scale` shape the picture and not the audio, so changing them replays the master and the
+    judged output rounds built on it.
+    """
+    return stable_key({
+        **_cut_identity(plan),
+        "settings": {name: getattr(settings, name)
+                     for name in ("fps", "crossfade_sec", "audio_filter", "loudness_lufs", "true_peak_dbtp")},
+        "renderer": RENDERER_VERSION,
+        "codec": AUDIO_MASTER_CODEC,
+        **({"isolation": plan.isolation["track"]["sha256"]} if plan.isolation else {}),
+    }, 1)
+
+
+def _overwritten_master_key(run: RunDir, master: Path, memo_path: Path) -> str | None:
+    """The memo key of the master's last stored round when the file on disk no longer has the bytes that round
+    recorded (None when it matches or there is nothing stored). Read once, before any round restores a master."""
+    memo = run.read_json(memo_path, default={})
+    if master.is_file() and memo.get("key") and memo.get("sha256") != sha256_file(master):
+        return memo["key"]
+    return None
+
+
+def _audio_master(run: RunDir, plan: Plan, settings: RenderSettings, master: Path, memo_path: Path, *,
+                  fresh: bool, overwritten_key: str | None = None) -> str:
+    """Render the audio master, or replay it: only when the file is there, its memo key matches, its bytes are the
+    ones the memo recorded and the run is not `--fresh`. An overwritten master is rendered again, never trusted.
+    Every master is also kept under its key in `audio-rounds/`, so a rerun that walks the same output rounds
+    restores each round's master (byte-checked) instead of rendering the plans it already rendered."""
+    key = audio_memo_key(plan, settings)
+    memo = run.read_json(memo_path, default={})
+    if master.is_file() and not fresh and memo.get("key") == key and memo.get("sha256") == sha256_file(master):
+        return memo.get("cmd", "")
+    kept = memo_path.parent / "audio-rounds" / f"{memo_path.stem}-{key}.m4a"
+    kept_memo = kept.with_suffix(".json")
+    stored = run.read_json(kept_memo, default={})
+    # The round whose master was found overwritten at run start is rendered again, never restored.
+    if kept.is_file() and not fresh and key != overwritten_key and stored.get("sha256") == sha256_file(kept):
+        shutil.copyfile(kept, master)
+        cmd = stored.get("cmd", "")
+    else:
+        cmd = render_audio_plan(plan, str(master), settings)
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(master, kept)
+        run.write_json(kept_memo, {"cmd": cmd, "sha256": sha256_file(kept)})
+    run.write_json(memo_path, {"key": key, "cmd": cmd, "sha256": sha256_file(master)})
+    return cmd
 
 
 def make_clip(video: str, seconds: float, out: Path) -> Path:
@@ -452,6 +522,9 @@ def _run_pipeline(
                   audio_only=audio_only)
     plan_path = run.root / f"{prefix}plan.json"
     final = run.root / f"{prefix}final.{'wav' if audio_only else 'mp4'}"
+    master = run.root / f"{prefix}audio-master.m4a"
+    overwritten_key = (None if audio_only
+                       else _overwritten_master_key(run, master, run.root / f"{prefix}audio-render.json"))
     report_path = run.report
     base_inputs = _stage_inputs(ctx, guidelines)
 
@@ -594,7 +667,8 @@ def _run_pipeline(
         plan, cuts, joins = assemble(cur)
         attach_isolation(plan)
         plan_path.write_text(plan.to_json())
-        render_key = render_memo_key(plan, settings, audio_only=audio_only)
+        render_key = (render_memo_key(plan, settings, audio_only=True) if audio_only
+                      else audio_memo_key(plan, settings))
         round_inputs = {**base_inputs, **_stage_config(ctx, "polish_output"),
                         "raw": _digest([(c.start, c.end, c.reason) for c in cur]),
                         "blocks": _digest([(b.first, b.last, b.start, b.end, b.decision) for b in blocks]),
@@ -617,26 +691,32 @@ def _run_pipeline(
             if round_no >= rounds_max:
                 residual_swept = True
         else:
-            memo_path = run.root / f"{prefix}render.json"
-            memo = run.read_json(memo_path, default={})
-            if final.is_file() and memo.get("key") == render_key and not fresh:
-                render_cmd = memo.get("cmd", "")
+            if audio_only:
+                memo_path = run.root / f"{prefix}render.json"
+                memo = run.read_json(memo_path, default={})
+                if final.is_file() and memo.get("key") == render_key and not fresh:
+                    render_cmd = memo.get("cmd", "")
+                else:
+                    render_cmd = render_audio_plan(plan, str(final), settings)
+                    run.write_json(memo_path, {"key": render_key, "cmd": render_cmd})
             else:
-                render_cmd = (render_audio_plan if audio_only else render_plan)(plan, str(final), settings)
-                run.write_json(memo_path, {"key": render_key, "cmd": render_cmd})
+                # A video cook iterates on the audio master alone: the picture is rendered once, after the lock.
+                render_cmd = _audio_master(run, plan, settings, master, run.root / f"{prefix}audio-render.json",
+                                           fresh=fresh, overwritten_key=overwritten_key)
             # With isolation the transcript the output pass judges (and the residual check reads) comes from the
             # original-audio render: the isolated render is what the viewer hears and is measured for its own words.
             judge_audio = None
             if config.isolate_voice and verify_output_asr:
                 judge_audio = str(run.verify_dir / f"{prefix}judge-render.wav")
                 render_audio_plan(plan, judge_audio, settings, original=True)
-            facts = collect_facts(plan, str(final), transcriber=transcriber if verify_output_asr else None,
+            facts = collect_facts(plan, str(final if audio_only else master),
+                                  transcriber=transcriber if verify_output_asr else None,
                                   cache=cache, workdir=run.verify_dir, judge_audio=judge_audio,
                                   source_duration=ctx.duration, source_silences=ctx.silences,
                                   lufs_target=config.loudness_lufs, source_path=plan.sources[plan.main].path,
                                   voices=ctx.voices, speech_probes=ctx.speech_probes,
                                   config=config, env=ctx.env, floor=ctx.floor, source_words=ctx.words,
-                                  scale=settings.scale, audio_only=audio_only, output_asr=verify_output_asr,
+                                  output_asr=verify_output_asr,
                                   judged=judged, removing=removing, given_back=set(edge_ctx.given_back))
             # The round budget is spent once the judged rounds have run. One more round is still due when the final
             # render shows a repeat or restart that no round ever saw (a transcript the judges did not hear): it
@@ -699,9 +779,28 @@ def _run_pipeline(
         notes["isolation"] = isolate.report_facts(plan)
 
     checks = run_checks(plan, facts)
-    run.write_json(run.verify_dir / f"{prefix}facts.json",
-                   {k: v for k, v in facts.items() if k not in ("words",)})
+    facts_path = run.verify_dir / f"{prefix}facts.json"
+    run.write_json(facts_path, {k: v for k, v in facts.items() if k not in ("words",)})
     fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
+
+    # The audio table judged the master; a fatal check stops the cook here, before any picture is rendered. The
+    # picture is then rendered once, carrying the master, and only the picture's own facts are measured on it.
+    if not audio_only and not fatal:
+        picture_key = render_memo_key(plan, settings, audio_sha=sha256_file(master))
+        picture_memo = run.root / f"{prefix}render.json"
+        stored = run.read_json(picture_memo, default={})
+        if final.is_file() and stored.get("key") == picture_key and not fresh:
+            picture_cmd = stored.get("cmd", "")
+        else:
+            picture_cmd = render_plan(plan, str(final), settings, audio_file=str(master))
+            run.write_json(picture_memo, {"key": picture_key, "cmd": picture_cmd})
+        render_cmd = f"{render_cmd} && {picture_cmd}"
+        facts["picture"] = collect_picture_facts(
+            plan, str(final), source_path=plan.sources[plan.main].path, scale=settings.scale,
+            locked_audio_md5=audio_stream_md5(master), rendered_audio_md5=audio_stream_md5(final))
+        checks += run_picture_checks(plan, facts["picture"])
+        run.write_json(facts_path, {k: v for k, v in facts.items() if k not in ("words",)})
+        fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
 
     # Visuals are a SECOND pass over the finished cut, never part of it: the
     # audio stream is copied, so every check above keeps its meaning and a bad
@@ -765,7 +864,8 @@ def _run_pipeline(
     status = "FAILED" if fatal else "OK"
     report_path.write_text(build_report(plan=plan, notes=notes, checks=checks, status=status, render_cmd=render_cmd,
                                         pacing=facts.get("pacing")))
-    result = RunResult(plan_path, final, report_path, checks, facts, notes, final_visuals)
+    result = RunResult(plan_path, final, report_path, checks, facts, notes, final_visuals,
+                       None if audio_only else master)
     if fatal:
         raise PipelineError("verification failed: " + "; ".join(c.line() for c in fatal) + f"\nreport: {report_path}")
     return result

@@ -27,7 +27,9 @@ def _plan() -> Plan:
 
 def _facts(**over) -> dict:
     facts = {
-        "duration": 83.0, "video_duration": 83.0, "audio_duration": 83.0,
+        "duration": 83.0,
+        "audio_stream": {"codec": "aac", "sample_rate": 48000, "channels": 2, "duration": 83.0,
+                         "expected_codec": "aac"},
         "lufs": -16.1,
         # Dense speech: a word every 0.4 s from 0.1 s to the end, no gap >= 0.5 s.
         "words": [Word("Are", 0.10, 0.3, 1.0)] + [Word(f"w{i}", 0.4 * i, 0.4 * i + 0.3, 1.0) for i in range(1, 206)],
@@ -39,12 +41,27 @@ def _facts(**over) -> dict:
     return facts
 
 
+def _picture_facts(**over) -> dict:
+    """Facts as `collect_picture_facts` builds them: a clean native render that carries the locked master."""
+    same = {"primaries": "bt709", "transfer": "bt709", "matrix": "bt709", "range": "tv", "pix_fmt": "yuv420p",
+            "hdr": False}
+    facts = {"video_duration": 83.0, "audio_duration": 83.0, "color": {"source": same, "render": dict(same)},
+             "frame": {"source": [1920, 1080], "render": [1920, 1080], "scale": None},
+             "audio_lock": {"locked": "a" * 32, "rendered": "a" * 32}}
+    facts.update(over)
+    return facts
+
+
+def _picture_results_for(**over) -> dict[str, CheckResult]:
+    return {r.name: r for r in verify.run_picture_checks(_plan(), _picture_facts(**over))}
+
+
 def test_all_checks_pass_on_a_clean_render() -> None:
     results = run_checks(_plan(), _facts())
     assert all(r.ok for r in results)
     assert {r.name for r in results} >= {
-        "residual_gaps", "render_silence", "joins", "join_edges",
-        "source_timing", "source_similarity", "unclassified_voice", "color"}
+        "audio_stream", "residual_gaps", "render_silence", "joins", "join_edges",
+        "source_timing", "source_similarity", "unclassified_voice"}
 
 
 def test_duration_mismatch_is_fatal() -> None:
@@ -53,8 +70,19 @@ def test_duration_mismatch_is_fatal() -> None:
 
 
 def test_av_sync_uses_stream_durations() -> None:
-    results = {r.name: r for r in run_checks(_plan(), _facts(video_duration=83.0, audio_duration=84.2))}
+    results = _picture_results_for(video_duration=83.0, audio_duration=84.2)
     assert not results["av_sync"].ok and results["av_sync"].severity == "fatal"
+
+
+def test_the_audio_table_has_no_picture_check_and_the_picture_table_has_no_audio_check() -> None:
+    import inspect
+
+    params = inspect.signature(collect_facts).parameters
+    assert "audio_only" not in params and "scale" not in params and not hasattr(verify, "AUDIO_CHECKS")
+    assert verify._av_sync in verify.PICTURE_CHECKS and verify._av_sync not in verify.CHECKS
+    assert verify._audio_stream in verify.CHECKS and verify._audio_stream not in verify.PICTURE_CHECKS
+    names = {r.name for r in run_checks(_plan(), _facts())}
+    assert not names & {"av_sync", "color", "resolution", "audio_locked"}
 
 
 def test_loudness_window_and_cold_open_invariant() -> None:
@@ -279,14 +307,12 @@ def test_color_check_requires_depth_and_tag_parity_for_an_hdr_source() -> None:
     hdr = {"primaries": "bt2020", "transfer": "arib-std-b67", "matrix": "bt2020nc", "range": "tv",
            "pix_fmt": "p010le", "hdr": True}
     tagged_8bit = dict(hdr, pix_fmt="yuv420p")     # the right tags on an 8-bit stream
-    results = {r.name: r for r in run_checks(_plan(), _facts(color={"source": hdr, "render": tagged_8bit}))}
+    results = _picture_results_for(color={"source": hdr, "render": tagged_8bit})
     assert not results["color"].ok and results["color"].severity == "fatal"
     assert "8-bit" in results["color"].detail
     drifted = dict(hdr, matrix="bt709")            # one tag lost on a 10-bit stream
-    assert not {r.name: r for r in run_checks(
-        _plan(), _facts(color={"source": hdr, "render": drifted}))}["color"].ok
-    assert {r.name: r for r in run_checks(
-        _plan(), _facts(color={"source": hdr, "render": dict(hdr)}))}["color"].ok
+    assert not _picture_results_for(color={"source": hdr, "render": drifted})["color"].ok
+    assert _picture_results_for(color={"source": hdr, "render": dict(hdr)})["color"].ok
 
 
 def test_render_silences_tier_room_tone_as_dead_air_not_muting(tmp_path) -> None:
@@ -309,9 +335,9 @@ def test_source_timing_and_colour_are_measured_from_the_real_files(tmp_path, mon
                           cache=Cache(tmp_path / "cache"), workdir=tmp_path / "verify",
                           source_duration=8.0, source_silences=[], source_path=clip,
                           voices=[(1.0, 1.2)], speech_probes=[])
-    assert facts["source_timing"] and facts["color"] is not None
+    assert facts["source_timing"] and not {"color", "frame"} & set(facts)
     results = {r.name: r for r in run_checks(plan, facts)}
-    assert results["source_timing"].ok and results["color"].ok and results["unclassified_voice"].ok
+    assert results["source_timing"].ok and results["unclassified_voice"].ok
 
 
 # --- speech-level audio the transcript does not cover ---
@@ -344,16 +370,13 @@ def test_color_check_fails_a_silent_hdr_to_sdr_conversion() -> None:
            "pix_fmt": "p010le", "hdr": True}
     sdr = {"primaries": "bt709", "transfer": "bt709", "matrix": "bt709", "range": "tv",
            "pix_fmt": "yuv420p", "hdr": False}
-    results = {r.name: r for r in run_checks(_plan(), _facts(color={"source": hdr, "render": sdr}))}
+    results = _picture_results_for(color={"source": hdr, "render": sdr})
     assert not results["color"].ok and results["color"].severity == "fatal"
     assert "arib-std-b67" in results["color"].detail
-    kept = {r.name: r for r in run_checks(_plan(), _facts(color={"source": hdr, "render": dict(hdr)}))}
-    assert kept["color"].ok
+    assert _picture_results_for(color={"source": hdr, "render": dict(hdr)})["color"].ok
     # A 10-bit stream with no tags is SDR by construction: no HDR claim is
     # invented for the source, so the untagged pair passes.
-    results = {r.name: r for r in run_checks(
-        _plan(), _facts(color={"source": dict(sdr, pix_fmt="yuv420p10le"), "render": sdr}))}
-    assert results["color"].ok
+    assert _picture_results_for(color={"source": dict(sdr, pix_fmt="yuv420p10le"), "render": sdr})["color"].ok
 
 
 # --- source-side edge check, pacing facts ---
@@ -481,8 +504,7 @@ def test_a_downscaled_full_render_is_fatal_but_the_demo_tier_may_scale() -> None
     native = {"source": [3840, 2160], "render": [3840, 2160], "scale": None}
     shrunk = {"source": [3840, 2160], "render": [1920, 1080], "scale": None}
     demo = {"source": [3840, 2160], "render": [854, 480], "scale": "-2:480"}
-    check = {f["render"][0]: {r.name: r for r in run_checks(_plan(), _facts(frame=f))}["resolution"]
-             for f in (native, shrunk, demo)}
+    check = {f["render"][0]: _picture_results_for(frame=f)["resolution"] for f in (native, shrunk, demo)}
     assert check[3840].ok
     assert not check[1920].ok and check[1920].severity == "fatal"
     assert check[854].ok
@@ -511,7 +533,7 @@ def _wav(path, seconds: float, *, source: str = "anoisesrc=r=48000:c=white:a=0.2
 def _audio_facts(tmp_path, render: str, source: str, *, plan: Plan, **kw) -> dict:
     return collect_facts(plan, render, cache=Cache(tmp_path / "cache"), workdir=tmp_path / "verify",
                          source_duration=6.0, source_silences=[], source_path=source,
-                         audio_only=True, output_asr=False,
+                         output_asr=False,
                          source_words=[Word("hello", 0.2, 0.6, 1.0)], **kw)
 
 
@@ -530,8 +552,8 @@ def test_audio_facts_measure_a_wav_without_inventing_picture_or_asr_facts(tmp_pa
     monkeypatch.setattr(verify, "measure_lufs", lambda path: -16.0)
     plan = Plan.from_cuts(SourceInfo("main", source, "x", 6.0), [Cut(4.0, 6.0, "outro")])
     facts = _audio_facts(tmp_path, render, source, plan=plan)
-    assert facts["mode"] == "audio" and facts["color"] is None and facts["frame"] is None
-    assert facts["video_duration"] is None and facts["audio_stream"]["codec"] == "pcm_s16le"
+    assert not {"mode", "color", "frame", "video_duration"} & set(facts)
+    assert facts["audio_stream"]["codec"] == "pcm_s16le" and facts["audio_stream"]["expected_codec"] == "pcm_s16le"
     assert [w.text for w in facts["words"]] == ["hello"]
     results = {r.name: r for r in run_checks(plan, facts)}
     assert not {"av_sync", "color", "resolution"} & set(results)
@@ -552,7 +574,7 @@ def test_a_transcriber_that_replays_the_source_is_refused_as_output_asr(tmp_path
     plan = Plan.from_cuts(SourceInfo("main", source, "x", 2.0), [])
     with pytest.raises(RuntimeError, match="--no-output-asr"):
         collect_facts(plan, source, transcriber=Replays(), cache=Cache(tmp_path / "cache"),
-                      workdir=tmp_path / "verify", source_duration=2.0, source_silences=[], audio_only=True)
+                      workdir=tmp_path / "verify", source_duration=2.0, source_silences=[])
 
 
 def test_an_audio_render_that_is_not_the_promised_wav_fails_a_fatal_check(tmp_path, monkeypatch) -> None:
