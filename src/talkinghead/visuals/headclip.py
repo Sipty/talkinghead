@@ -1,10 +1,9 @@
 """Head-clip check: refuse overlays that sit over the speaker's head.
 
-Runs BEFORE anything is baked, so the head is fully visible and an
-intersection between the overlay rectangle and the person mask means the
-overlay would cover it. Two entry points share one decision: the bare cut
-(``check_head_clip``) and source frames mapped through the plan
-(``check_head_clip_plan``, no picture needed). Detection is Apple Vision person
+Runs BEFORE any picture is rendered: the check samples the source frames the plan
+maps to each overlay window (``check_head_clip_plan``, no picture needed), so the head is fully
+visible and an intersection between the overlay rectangle and the person mask means the overlay
+would cover it. Detection is Apple Vision person
 segmentation through the compiled ``headcoverage.swift`` helper (first-party
 frameworks only, no new pip dependencies); person segmentation covers hair,
 which face-box detectors miss on profile shots and lean-ins.
@@ -30,7 +29,6 @@ from ..render import RenderSettings, frame_size
 from ..timeline import Plan
 from ..timemap import locate, snapped_segments
 from ..verify import CheckResult
-from .render import probe_duration, probe_width
 from .schedule import Placement
 
 # Fraction of the overlay rect that may hold person pixels before a sample
@@ -147,30 +145,11 @@ def summarize(coverages: list[float], *, threshold: float = COVERAGE_THRESHOLD,
     return clipped >= min_clipped, worst, clipped
 
 
-def check_head_clip(
-    base: str | Path, placements: list[Placement], *, margin: int, corner: str,
-    work_dir: str | Path, threshold: float = COVERAGE_THRESHOLD,
-    min_clipped: int = MIN_CLIPPED, duration: float | None = None,
-) -> tuple[CheckResult, dict]:
-    """Fatal when any overlay would cover the speaker's head in the bake.
-
-    Sampled on ``base`` (the bare cut) so the check gates the bake; clipping
-    frames are kept in ``work_dir`` for eyeballing the failure.
-    """
-    return _decide(
-        placements, margin=margin, corner=corner, work_dir=work_dir, threshold=threshold,
-        min_clipped=min_clipped, frames="render",
-        size=lambda: (probe_width(base), _image_dims(base)[1]),
-        length=lambda: duration if duration is not None else probe_duration(base),
-        grab=lambda t, out: _grab(base, t, out),
-    )
-
-
 def check_head_clip_plan(
     plan: Plan, placements: list[Placement], *, settings: RenderSettings, margin: int, corner: str,
     work_dir: str | Path, threshold: float = COVERAGE_THRESHOLD, min_clipped: int = MIN_CLIPPED,
 ) -> tuple[CheckResult, dict]:
-    """The same gate as ``check_head_clip``, decided before any picture exists.
+    """Fatal when any overlay would cover the speaker's head in the picture, decided before any picture exists.
 
     The picture is a pure cut of the sources (frame-snapped trim/select, optional scale, pixel format),
     so the frame at output time ``t`` is the source frame ``timemap.locate`` names. Samples are grabbed
@@ -194,7 +173,7 @@ def _decide(
     min_clipped: int, frames: str, size: Callable[[], tuple[int, int]], length: Callable[[], float],
     grab: Callable[[float, Path], Path | None],
 ) -> tuple[CheckResult, dict]:
-    """The one decision path both entry points share; they differ only in where a sample frame comes from.
+    """The decision path `check_head_clip_plan` runs; `frames` names where a sample frame comes from.
 
     `size` and `length` are called only once the detector is known to run, so a skipped check touches
     no media.

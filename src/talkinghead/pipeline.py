@@ -21,7 +21,7 @@ from .config import ISOLATE_KEYS, Config
 from .context import Context, NeedsDecision
 from .edges import WORD_CUT_REASONS, EdgeContext, finalize_cuts, is_intra_restart, refine_joins
 from .judge import Judge
-from .lock import LockMismatch, audio_stream_md5, check_lock, read_lock, write_lock
+from .lock import LockMismatch, audio_stream_md5, check_lock, locked_transcript, read_lock, write_lock
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
 from .report import build_report
@@ -43,8 +43,9 @@ from .verify import (
     visuals_resolution,
 )
 from .visuals.cards import avatar_fingerprint
-from .visuals.headclip import check_head_clip
+from .visuals.headclip import check_head_clip_plan
 from .visuals.render import render_visuals
+from .visuals.schedule import Placement
 from .visuals.stage import plan_visuals
 from .visuals.verify import verify_visuals
 
@@ -850,6 +851,35 @@ def _run_pipeline(
             stopped = stop_at_lock
             if stopped:
                 atomic_write_text(_hold_path(lock_path), json.dumps({"plan_sha": lock["plan_sha"]}) + "\n")
+
+    # Overlays are planned on the locked transcript and head-clip is checked on the source frames the plan maps to,
+    # both before any picture exists: a clipped overlay needs a corner or scale change in the cook TOML, which
+    # re-renders the picture anyway, so it stops the cook here. A `--stop-at-lock` run does both before it stops.
+    placements: list[Placement] | None = None
+    if config.visuals_enabled and not audio_only and not fatal:
+        locked_words = locked_transcript(lock, lock_path=lock_path)
+        vdir = run.root / f"{prefix}visuals"
+        assets = Path(assets_dir) if assets_dir else Path(config.assets_dir)
+        avatar = avatar_fingerprint(config.visuals_avatar)
+        payload = run.memo(
+            f"{prefix}visuals", {**base_inputs, **_stage_config(ctx, "visuals"), "plan": _plan_memo_json(plan),
+                                 "render_transcript": locked_words.to_dict(),
+                                 "assets": str(assets), "research": config.visuals_research,
+                                 **({"avatar": avatar} if avatar else {})},
+            VISUALS_STAGE_VERSION,
+            lambda: (lambda pl, nt: {"placements": [asdict(x) for x in pl], "notes": nt})(
+                *plan_visuals(ctx, plan, words=locked_words.words, assets_dir=assets,
+                              work_dir=vdir)),
+            fresh=fresh,
+        )
+        placements = [Placement(**x) for x in payload["placements"]]
+        notes["visuals"] = payload["notes"]
+        hcheck, hfacts = check_head_clip_plan(plan, placements, settings=settings,
+                                              margin=config.visuals_margin, corner=config.visuals_corner,
+                                              work_dir=run.verify_dir / f"{prefix}visuals")
+        checks.append(hcheck)
+        notes["visuals"]["head_clip"] = hfacts
+        fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
     if not audio_only and not fatal and not stopped:
         picture_key = render_memo_key(plan, settings, audio_sha=lock["audio"]["sha256"])
         picture_memo = run.root / f"{prefix}render.json"
@@ -868,56 +898,26 @@ def _run_pipeline(
         run.write_json(facts_path, {k: v for k, v in facts.items() if k not in ("words",)})
         fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
 
-    # Visuals are a SECOND pass over the finished cut, never part of it: the
-    # audio stream is copied, so every check above keeps its meaning and a bad
-    # overlay cannot cost the cut. `final.mp4` stays shippable on its own.
+    # Visuals bake over the finished picture from the placements planned above, never as part of the cut: the audio
+    # stream is copied, so every check above keeps its meaning and a bad overlay cannot cost the cut. `final.mp4`
+    # stays shippable on its own.
     final_visuals: Path | None = None
     if audio_only and config.visuals_enabled:
         notes["visuals"] = {"skipped": "audio-only run: there is no picture to overlay"}
-    if config.visuals_enabled and not fatal and not audio_only and not stopped:
-        vdir = run.root / f"{prefix}visuals"
-        assets = Path(assets_dir) if assets_dir else Path(config.assets_dir)
-        avatar = avatar_fingerprint(config.visuals_avatar)
-        payload = run.memo(
-            f"{prefix}visuals", {**base_inputs, **_stage_config(ctx, "visuals"), "plan": _plan_memo_json(plan),
-                                 "render_transcript": facts["render_transcript"],
-                                 "assets": str(assets), "research": config.visuals_research,
-                                 **({"avatar": avatar} if avatar else {})},
-            VISUALS_STAGE_VERSION,
-            lambda: (lambda pl, nt: {"placements": [asdict(x) for x in pl], "notes": nt})(
-                *plan_visuals(ctx, plan, words=facts["words"], assets_dir=assets,
-                              work_dir=vdir)),
-            fresh=fresh,
-        )
-        from .visuals.schedule import Placement
-
-        placements = [Placement(**x) for x in payload["placements"]]
-        notes["visuals"] = payload["notes"]
+    if placements is not None and not fatal and not stopped:
         final_visuals = run.root / f"{prefix}final-visuals.mp4"
-        # Head-clip gate runs BEFORE the bake, on the bare cut: the bake
-        # would otherwise ship a card over the speaker's head, and the ~3min
-        # re-encode is wasted. final.mp4 stays shippable on its own.
-        hcheck, hfacts = check_head_clip(str(final), placements,
-                                         margin=config.visuals_margin,
-                                         corner=config.visuals_corner,
-                                         work_dir=run.verify_dir / f"{prefix}visuals")
-        checks.append(hcheck)
-        notes["visuals"]["head_clip"] = hfacts
-        if hcheck.ok:
-            # Width is probed from the render inside render_visuals: `facts` has no
-            # width, and a 1920 default put a 0.34 overlay across 76% of a
-            # demo-tier 854 px frame.
-            vcmd = render_visuals(str(final), placements, str(final_visuals),
-                                  margin=config.visuals_margin, fade=config.visuals_fade,
-                                  corner=config.visuals_corner)
-            vchecks, vfacts = verify_visuals(final, final_visuals, placements,
-                                             run.verify_dir / f"{prefix}visuals")
-            checks += vchecks
-            checks.append(visuals_resolution(str(final), str(final_visuals)))
-            notes["visuals"]["render_cmd"] = vcmd
-            notes["visuals"]["verify"] = vfacts
-        else:
-            final_visuals = None
+        # Width is probed from the render inside render_visuals: `facts` has no
+        # width, and a 1920 default put a 0.34 overlay across 76% of a
+        # demo-tier 854 px frame.
+        vcmd = render_visuals(str(final), placements, str(final_visuals),
+                              margin=config.visuals_margin, fade=config.visuals_fade,
+                              corner=config.visuals_corner)
+        vchecks, vfacts = verify_visuals(final, final_visuals, placements,
+                                         run.verify_dir / f"{prefix}visuals")
+        checks += vchecks
+        checks.append(visuals_resolution(str(final), str(final_visuals)))
+        notes["visuals"]["render_cmd"] = vcmd
+        notes["visuals"]["verify"] = vfacts
         fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
 
     if audio_only or not verify_output_asr:

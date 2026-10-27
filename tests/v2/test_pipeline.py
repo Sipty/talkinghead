@@ -337,15 +337,16 @@ def test_an_untrustworthy_alignment_stops_the_run_unless_allowed(
 
 
 
-def test_visuals_pass_writes_a_deliverable_and_leaves_the_cut_alone(clip: Path, tmp_path: Path) -> None:
-    """The whole promise of the second pass: `final.mp4` is untouched and
-    `final-visuals.mp4` has the same duration and the same audio stream."""
-    from talkinghead.judge import AUDIO_READING, validate
-    from talkinghead.visuals.render import probe_duration
-
+def _visuals_assets(tmp_path: Path) -> Path:
     assets = tmp_path / "assets"
     assets.mkdir()
     (assets / "manifest.toml").write_text("")
+    return assets
+
+
+def _visuals_judge():
+    """A judge that answers the editorial pass with one quote card on "Second." and the cut's rounds in order."""
+    from talkinghead.judge import AUDIO_READING, validate
 
     class VisualsJudge:
         name = "vis"
@@ -374,13 +375,26 @@ def test_visuals_pass_writes_a_deliverable_and_leaves_the_cut_alone(clip: Path, 
                 return validate({"verdict": "keep", "why": "n/a"}, schema)
             return validate(self.seq.pop(0), schema)
 
+    return VisualsJudge()
+
+
+def _visuals_cfg() -> Config:
+    return Config(crf=30, preset="ultrafast", votes=5, agree=4,
+                  visuals_enabled=True, visuals_research=False, visuals_min_hold=1.0,
+                  plan_enabled=True, plan_hold=1.0, plan_open_at=0.0, plan_open_hold=1.0,
+                  visuals_min_gap=0.4, polish=False)
+
+
+def test_visuals_pass_writes_a_deliverable_and_leaves_the_cut_alone(clip: Path, tmp_path: Path) -> None:
+    """The whole promise of the second pass: `final.mp4` is untouched and
+    `final-visuals.mp4` has the same duration and the same audio stream."""
+    from talkinghead.visuals.render import probe_duration
+
+    assets = _visuals_assets(tmp_path)
     out = tmp_path / "out"
-    cfg = Config(crf=30, preset="ultrafast", votes=5, agree=4,
-                 visuals_enabled=True, visuals_research=False, visuals_min_hold=1.0,
-                 plan_enabled=True, plan_hold=1.0, plan_open_at=0.0, plan_open_hold=1.0,
-                 visuals_min_gap=0.4, polish=False)
+    cfg = _visuals_cfg()
     result = run_pipeline(str(clip), out, cfg, transcriber=PlanAwareTranscriber(out),
-                          judge=VisualsJudge(), cache=Cache(tmp_path / "cache"),
+                          judge=_visuals_judge(), cache=Cache(tmp_path / "cache"),
                           guidelines="G", topic="t", assets_dir=assets)
     assert result.final_visuals is not None and result.final_visuals.is_file()
     assert result.final.is_file()
@@ -864,3 +878,101 @@ def test_the_hold_released_after_the_full_run_renders_the_held_picture(clip: Pat
     done = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge([]),
                         cache=cache, guidelines="G")
     assert done.final.is_file() and not (out / "edit-lock.hold").exists()
+
+
+def _stub_head_clip(monkeypatch: pytest.MonkeyPatch, order: list[str], *, fatal: bool = False) -> list[dict]:
+    """Replace the pipeline's head-clip gate with a recorded verdict, so the tests need no detector."""
+    import talkinghead.pipeline as pl
+    from talkinghead.verify import CheckResult
+
+    seen: list[dict] = []
+
+    def fake(plan, placements, **kwargs):
+        order.append("head_clip")
+        seen.append({"placements": placements, **kwargs})
+        if fatal:
+            return (CheckResult("visuals_head_clip", "fatal", False, "overlay covers the speaker: stub"),
+                    {"frames": "source", "placements": []})
+        return CheckResult("visuals_head_clip", "fatal", True, "stub: clear"), {"frames": "source", "placements": []}
+
+    monkeypatch.setattr(pl, "check_head_clip_plan", fake)
+    return seen
+
+
+def _record_order(monkeypatch: pytest.MonkeyPatch, order: list[str], words: list | None = None) -> None:
+    """Record when `plan_visuals` (and the words it is handed) and `render_plan` are called."""
+    import talkinghead.pipeline as pl
+
+    real_plan, real_render = pl.plan_visuals, pl.render_plan
+
+    def plan(ctx, plan_, **kwargs):
+        order.append("plan_visuals")
+        if words is not None:
+            words.extend(kwargs["words"])
+        return real_plan(ctx, plan_, **kwargs)
+
+    monkeypatch.setattr(pl, "plan_visuals", plan)
+    monkeypatch.setattr(pl, "render_plan", lambda *a, **k: order.append("render_plan") or real_render(*a, **k))
+
+
+def test_visuals_before_the_picture_are_planned_on_the_locked_words(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    words: list = []
+    _record_order(monkeypatch, order, words)
+    seen = _stub_head_clip(monkeypatch, order)
+    out = tmp_path / "out"
+    result = run_pipeline(str(clip), out, _visuals_cfg(), transcriber=PlanAwareTranscriber(out),
+                          judge=_visuals_judge(), cache=Cache(tmp_path / "cache"), guidelines="G", topic="t",
+                          assets_dir=_visuals_assets(tmp_path))
+    assert order == ["plan_visuals", "head_clip", "render_plan"]  # the bake renders after the picture
+    locked = Transcript.from_dict(json.loads((out / "verify" / "locked-transcript.json").read_text()))
+    assert words and words == locked.words
+    assert seen[0]["placements"] and seen[0]["settings"].fps and seen[0]["work_dir"] == out / "verify" / "visuals"
+    assert result.final_visuals is not None and result.final_visuals.is_file()
+    assert result.notes["visuals"]["head_clip"]["frames"] == "source"
+
+
+def test_stop_at_lock_plans_visuals_and_checks_head_clip_and_the_next_run_replays_them(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    _record_order(monkeypatch, order)
+    _stub_head_clip(monkeypatch, order)
+    out = tmp_path / "out"
+    cache = Cache(tmp_path / "cache")
+    assets = _visuals_assets(tmp_path)
+    stopped = run_pipeline(str(clip), out, _visuals_cfg(), transcriber=PlanAwareTranscriber(out),
+                           judge=_visuals_judge(), cache=cache, guidelines="G", topic="t", assets_dir=assets,
+                           stop_at_lock=True)
+    assert order == ["plan_visuals", "head_clip"]
+    assert (out / "stages" / "visuals.json").is_file() and not (out / "final.mp4").exists()
+    assert stopped.final_visuals is None and "head_clip" in stopped.notes["visuals"]
+    report = stopped.report.read_text()
+    assert "**AUDIO LOCKED**" in report and "visuals_head_clip" in report and "## Asset decisions" in report
+
+    order.clear()
+    replay = _visuals_judge()
+    done = run_pipeline(str(clip), out, _visuals_cfg(), transcriber=PlanAwareTranscriber(out), judge=replay,
+                        cache=cache, guidelines="G", topic="t", assets_dir=assets)
+    # The visuals memo replays (no judge call, no `plan_visuals`); head-clip is re-run, then the picture renders once.
+    assert order == ["head_clip", "render_plan"] and replay.calls == 0
+    assert done.final.is_file() and done.final_visuals is not None and done.ok
+
+
+def test_a_fatal_head_clip_stops_the_cook_before_any_picture(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    _record_order(monkeypatch, order)
+    _stub_head_clip(monkeypatch, order, fatal=True)
+    out = tmp_path / "out"
+    with pytest.raises(PipelineError, match="visuals_head_clip"):
+        run_pipeline(str(clip), out, _visuals_cfg(), transcriber=PlanAwareTranscriber(out),
+                     judge=_visuals_judge(), cache=Cache(tmp_path / "cache"), guidelines="G", topic="t",
+                     assets_dir=_visuals_assets(tmp_path))
+    assert order == ["plan_visuals", "head_clip"]
+    assert not (out / "final.mp4").exists() and not (out / "final-visuals.mp4").exists()
+    report = (out / "report.md").read_text()
+    assert "FAILED" in report and "visuals_head_clip" in report

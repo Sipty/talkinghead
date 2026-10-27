@@ -68,17 +68,6 @@ def test_a_missing_swiftc_is_a_runtime_error(monkeypatch, tmp_path: Path) -> Non
         headclip._helper_path()
 
 
-def test_off_macos_the_head_check_is_skipped_with_a_warning(
-        monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-    # Apple Vision is the only detector: elsewhere the cook must go on, loudly, without touching the video.
-    monkeypatch.setattr("sys.platform", "linux")
-    placements = [Placement("a", "x.png", 1.0, 3.0, 0.3)]
-    result, _facts = headclip.check_head_clip("missing.mp4", placements, margin=40, corner="top-right",
-                                              work_dir=tmp_path)
-    assert result.severity == "warn" and result.ok
-    assert result.detail.startswith("skipped: head-coverage check needs macOS")
-    assert "needs macOS" in capsys.readouterr().err
-
 # --- check_head_clip_plan: the same gate on source frames, no picture needed -------------------------------------
 
 def _moving_plan(tmp_path: Path):
@@ -137,21 +126,16 @@ def test_the_plan_check_hands_the_detector_the_same_frames_as_the_render(monkeyp
         assert same > later, f"t={item['t']}: {same} vs {later}"
 
 
-def test_the_plan_check_gives_the_same_decision_as_the_check_on_the_render(monkeypatch, tmp_path: Path) -> None:
+def test_the_plan_check_is_fatal_when_the_person_mask_persists_in_a_window(monkeypatch, tmp_path: Path) -> None:
     plan, placements = _moving_plan(tmp_path)
     settings = RenderSettings(crf=18, preset="ultrafast", fps=25)
-    render = tmp_path / "picture.mp4"
-    render_picture(plan, str(render), settings)
     _capture(monkeypatch, coverage=lambda t: 0.05 if 1.0 <= t <= 2.2 else 0.0)
-    kwargs = {"margin": 10, "corner": "top-right", "work_dir": tmp_path / "work"}
-    on_plan, plan_facts = headclip.check_head_clip_plan(plan, placements, settings=settings, **kwargs)
-    on_render, render_facts = headclip.check_head_clip(render, placements, **kwargs)
-    assert on_plan.ok == on_render.ok is False
-    assert on_plan.severity == on_render.severity == "fatal"
-    assert on_plan.detail == on_render.detail
-    assert [p["clipped_times"] for p in plan_facts["placements"]] == \
-        [p["clipped_times"] for p in render_facts["placements"]] != [[]]
-    assert (plan_facts["frames"], render_facts["frames"]) == ("source", "render")
+    result, facts = headclip.check_head_clip_plan(plan, placements, settings=settings, margin=10, corner="top-right",
+                                                  work_dir=tmp_path / "work")
+    assert not result.ok and result.severity == "fatal"
+    assert "overlay covers the speaker" in result.detail
+    assert [p["clipped_times"] for p in facts["placements"]] != [[]]
+    assert facts["frames"] == "source"
 
 
 def test_the_plan_check_rectangle_is_scaled_to_the_renders_frame_size(monkeypatch, tmp_path: Path) -> None:
