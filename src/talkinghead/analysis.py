@@ -24,7 +24,7 @@ from .config import Config
 from .context import Context
 from .judge import Judge, LLMCache
 from .noise import VAD_FRAME_SEC, _read_wav, detect_mouth_noises, silero_speech_mask
-from .store import Cache, RunDir, sha256_file
+from .store import Cache, RunDir, atomic_write_text, sha256_file
 from .timeline import MIN_CUT, Cut, SourceInfo
 from .transcribe import (
     AudioEvent,
@@ -214,7 +214,8 @@ def analyze(
         v_dur, a_dur = None, audio_duration(video)
     else:
         v_dur, a_dur = check_av_mismatch(video, tolerance=config.av_mismatch_tolerance, allow=allow_av_mismatch)
-    wav, audio_sha = prepare_audio(video, run.root / "audio")
+    # Always from the current file: a master rebuilt at the same path must not inherit the old WAV, sha or transcript.
+    wav, audio_sha = prepare_audio(video, run.root / "audio", force=True)
     transcript = transcribe_cached(cache, audio_sha, transcriber, wav)
 
     samples, sr = _read_wav(wav)
@@ -314,7 +315,17 @@ def analyze(
             "config": config.to_dict(),
         },
     )
+    _write_source_words(run.root / "audio" / "source-words.json", source, words)
     return ctx
+
+
+def _write_source_words(path: Path, source: SourceInfo, words: list[Word]) -> None:
+    """Publish the source-clock words the edit cuts on; companion animations anchor to them during the audio rounds."""
+    payload = {
+        "source": {"path": source.path, "sha256": source.sha256, "duration": source.duration},
+        "words": [{"text": w.text, "start": w.start, "end": w.end, "speaker": w.speaker} for w in words],
+    }
+    atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
 # v1: first version; bump when the probe window or the engine choice changes.

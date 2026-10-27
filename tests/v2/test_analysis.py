@@ -2,6 +2,7 @@
 cached under its audio hash; word bounds refined; detectors fed the shared
 envelope so they run in seconds."""
 
+import json
 import subprocess
 import wave
 from pathlib import Path
@@ -48,6 +49,48 @@ def test_analyze_builds_a_context_with_refined_words_and_caches_the_transcript(t
     ctx2 = analyze(str(video), tmp_path / "run2", Config(), backend, FakeJudge([]), cache=cache, guidelines="G")
     assert backend.calls == 1
     assert [(w.start, w.end) for w in ctx2.words] == [(w.start, w.end) for w in ctx.words]
+
+
+def _replace_with_other_audio(path: Path) -> None:
+    """Same path, different sound: a 660 Hz tone where the original had 440 Hz."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "lavfi", "-i", "testsrc=size=160x120:rate=15:duration=3",
+         "-f", "lavfi", "-i",
+         r"aevalsrc='0.3*sin(660*2*PI*t)*(between(t\,0.5\,1.0)+between(t\,1.6\,2.2))+0.0005*random(0)':s=16000:d=3",
+         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-b:a", "192k", str(path)],
+        check=True,
+    )
+
+
+def test_a_recording_replaced_at_the_same_path_is_extracted_and_transcribed_again_not_stale(tmp_path: Path) -> None:
+    video = tmp_path / "clip.mp4"
+    _speech_video(video)
+    backend = FakeTranscriber([Word("one.", 0.5, 1.0, 1.0), Word("two.", 1.6, 2.2, 1.0)], duration=3.0)
+    cache = Cache(tmp_path / "cache")
+    first = analyze(str(video), tmp_path / "run", Config(), backend, FakeJudge([]), cache=cache, guidelines="G")
+    _replace_with_other_audio(video)
+    second = analyze(str(video), tmp_path / "run", Config(), backend, FakeJudge([]), cache=cache, guidelines="G")
+    assert second.provenance["audio_sha256"] != first.provenance["audio_sha256"]
+    assert backend.calls == 2
+
+
+def test_source_words_are_published_for_the_recording_just_analysed(tmp_path: Path) -> None:
+    video = tmp_path / "clip.mp4"
+    _speech_video(video)
+    backend = FakeTranscriber([Word("one.", 0.5, 1.0, 1.0), Word("two.", 1.6, 2.2, 1.0)], duration=3.0)
+    cache = Cache(tmp_path / "cache")
+    run = tmp_path / "run"
+    ctx = analyze(str(video), run, Config(), backend, FakeJudge([]), cache=cache, guidelines="G")
+    path = run / "audio" / "source-words.json"
+    data = json.loads(path.read_text())
+    assert data["source"] == {"path": ctx.source.path, "sha256": ctx.source.sha256, "duration": ctx.source.duration}
+    assert [(w["text"], w["start"], w["end"]) for w in data["words"]] == [(w.text, w.start, w.end) for w in ctx.words]
+    assert all(w["speaker"] is None for w in data["words"])
+    _replace_with_other_audio(video)
+    again = analyze(str(video), run, Config(), backend, FakeJudge([]), cache=cache, guidelines="G")
+    assert again.source.sha256 != ctx.source.sha256
+    assert json.loads(path.read_text())["source"]["sha256"] == again.source.sha256
 
 
 def test_detector_caches_are_keyed_by_the_words_they_saw(tmp_path: Path) -> None:
