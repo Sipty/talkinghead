@@ -1,8 +1,10 @@
 """Head-clip check: refuse overlays that sit over the speaker's head.
 
-Runs on the BASE cut (``final.mp4``) BEFORE anything is baked, so the head
-is fully visible and an intersection between the overlay rectangle and the
-person mask means the bake would cover it. Detection is Apple Vision person
+Runs BEFORE anything is baked, so the head is fully visible and an
+intersection between the overlay rectangle and the person mask means the
+overlay would cover it. Two entry points share one decision: the bare cut
+(``check_head_clip``) and source frames mapped through the plan
+(``check_head_clip_plan``, no picture needed). Detection is Apple Vision person
 segmentation through the compiled ``headcoverage.swift`` helper (first-party
 frameworks only, no new pip dependencies); person segmentation covers hair,
 which face-box detectors miss on profile shots and lean-ins.
@@ -20,9 +22,13 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from ..config import OVERLAY_CORNERS
+from ..render import RenderSettings, frame_size
+from ..timeline import Plan
+from ..timemap import locate, snapped_segments
 from ..verify import CheckResult
 from .render import probe_duration, probe_width
 from .schedule import Placement
@@ -119,11 +125,13 @@ def _coverages(items: list[dict]) -> dict[str, float]:
     return {r["path"]: r["coverage"] for r in out}
 
 
-def _grab(video: str | Path, t: float, out: Path) -> Path | None:
+def _grab(video: str | Path, t: float, out: Path, *, render_scale: str | None = None) -> Path | None:
+    """One frame at `t`, `render_scale` (the render's own `scale` filter, if any) applied before the grab-width scale."""
     out.parent.mkdir(parents=True, exist_ok=True)
+    chain = ([f"scale={render_scale}"] if render_scale else []) + [f"scale={GRAB_WIDTH}:-2"]
     proc = subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.3f}", "-i", str(video),
-         "-frames:v", "1", "-vf", f"scale={GRAB_WIDTH}:-2", str(out)],
+         "-frames:v", "1", "-vf", ",".join(chain), str(out)],
         capture_output=True, text=True)
     return out if proc.returncode == 0 and out.is_file() else None
 
@@ -149,8 +157,50 @@ def check_head_clip(
     Sampled on ``base`` (the bare cut) so the check gates the bake; clipping
     frames are kept in ``work_dir`` for eyeballing the failure.
     """
+    return _decide(
+        placements, margin=margin, corner=corner, work_dir=work_dir, threshold=threshold,
+        min_clipped=min_clipped, frames="render",
+        size=lambda: (probe_width(base), _image_dims(base)[1]),
+        length=lambda: duration if duration is not None else probe_duration(base),
+        grab=lambda t, out: _grab(base, t, out),
+    )
+
+
+def check_head_clip_plan(
+    plan: Plan, placements: list[Placement], *, settings: RenderSettings, margin: int, corner: str,
+    work_dir: str | Path, threshold: float = COVERAGE_THRESHOLD, min_clipped: int = MIN_CLIPPED,
+) -> tuple[CheckResult, dict]:
+    """The same gate as ``check_head_clip``, decided before any picture exists.
+
+    The picture is a pure cut of the sources (frame-snapped trim/select, optional scale, pixel format),
+    so the frame at output time ``t`` is the source frame ``timemap.locate`` names. Samples are grabbed
+    from the sources; the overlay rectangle is computed on the render's own frame size.
+    """
+    def grab(t: float, out: Path) -> Path | None:
+        at = locate(plan, t, fps=settings.fps)
+        return None if at is None else _grab(plan.sources[at[0]].path, at[1], out, render_scale=settings.scale)
+
+    return _decide(
+        placements, margin=margin, corner=corner, work_dir=work_dir, threshold=threshold,
+        min_clipped=min_clipped, frames="source",
+        size=lambda: frame_size(plan, settings),
+        length=lambda: sum(s.length for s in snapped_segments(plan, settings.fps)),
+        grab=grab,
+    )
+
+
+def _decide(
+    placements: list[Placement], *, margin: int, corner: str, work_dir: str | Path, threshold: float,
+    min_clipped: int, frames: str, size: Callable[[], tuple[int, int]], length: Callable[[], float],
+    grab: Callable[[float, Path], Path | None],
+) -> tuple[CheckResult, dict]:
+    """The one decision path both entry points share; they differ only in where a sample frame comes from.
+
+    `size` and `length` are called only once the detector is known to run, so a skipped check touches
+    no media.
+    """
     facts: dict = {"threshold": threshold, "min_clipped": min_clipped,
-                   "margin": margin, "corner": corner, "placements": []}
+                   "margin": margin, "corner": corner, "frames": frames, "placements": []}
     if not placements:
         return CheckResult("visuals_head_clip", "fatal", True, "no overlays placed"), facts
     if sys.platform != "darwin":
@@ -166,11 +216,10 @@ def check_head_clip(
         return CheckResult("visuals_head_clip", "warn", True,
                            f"skipped: head detector unavailable ({str(e)[:200]})"), facts
 
-    width = probe_width(base)
-    height = _image_dims(base)[1]
+    width, height = size()
     work = Path(work_dir) / "headclip"
     work.mkdir(parents=True, exist_ok=True)
-    duration = duration if duration is not None else probe_duration(base)
+    duration = length()
 
     items: list[dict] = []
     index: dict[str, tuple[Placement, list[float]]] = {}
@@ -180,12 +229,10 @@ def check_head_clip(
         # Rect in grabbed-frame coordinates.
         s = GRAB_WIDTH / width
         rect = [round(x * s), round(y * s), round(w * s), round(h * s)]
-        frames = []
         for t in times:
             name = f"chip_{p.asset}_{t:.2f}.jpg"
-            got = _grab(base, t, work / name)
+            got = grab(t, work / name)
             if got:
-                frames.append(got)
                 items.append({"frame": str(got), "rect": rect,
                               "placement": p.asset, "t": t})
         index[p.asset] = (p, times)

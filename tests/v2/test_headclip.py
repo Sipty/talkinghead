@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from talkinghead.render import RenderSettings, render_picture
+from talkinghead.timeline import Plan, Segment, SourceInfo
 from talkinghead.visuals import headclip
 from talkinghead.visuals.headclip import overlay_rect, sample_times, summarize
 from talkinghead.visuals.schedule import Placement
@@ -76,3 +78,129 @@ def test_off_macos_the_head_check_is_skipped_with_a_warning(
     assert result.severity == "warn" and result.ok
     assert result.detail.startswith("skipped: head-coverage check needs macOS")
     assert "needs macOS" in capsys.readouterr().err
+
+# --- check_head_clip_plan: the same gate on source frames, no picture needed -------------------------------------
+
+def _moving_plan(tmp_path: Path):
+    """A two-cut plan of a moving source, with a card placed across the second cut."""
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x240:r=25:d=6",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "5", str(src)],
+        check=True,
+    )
+    plan = Plan(sources={"main": SourceInfo("main", str(src), "x", 6.0)}, main="main", cuts=[],
+                segments=[Segment("main", 0.0, 2.0), Segment("main", 3.5, 5.5)])
+    placements = [Placement("a", str(_png(tmp_path / "card.png")), 0.4, 3.6, 0.3)]
+    return plan, placements
+
+
+def _capture(monkeypatch, coverage=lambda t: 0.0) -> list[dict]:
+    """Pretend to be macOS with a detector that records what it is handed and answers per output time."""
+    seen: list[dict] = []
+
+    def fake(items: list[dict]) -> dict[str, float]:
+        seen.extend(items)
+        return {it["frame"]: coverage(it["t"]) for it in items}
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(headclip, "_helper_path", lambda: Path("detector"))
+    monkeypatch.setattr(headclip, "_coverages", fake)
+    return seen
+
+
+def _psnr(a: str, b: str) -> float:
+    proc = subprocess.run(["ffmpeg", "-v", "info", "-i", a, "-i", b, "-lavfi", "psnr", "-f", "null", "-"],
+                          capture_output=True, text=True, check=True)
+    value = proc.stderr.split("average:")[1].split()[0]
+    return float("inf") if value == "inf" else float(value)
+
+
+def _render_frame(video: Path, t: float, out: Path) -> str:
+    assert headclip._grab(video, t, out) is not None
+    return str(out)
+
+
+def test_the_plan_check_hands_the_detector_the_same_frames_as_the_render(monkeypatch, tmp_path: Path) -> None:
+    plan, placements = _moving_plan(tmp_path)
+    settings = RenderSettings(crf=18, preset="ultrafast", fps=25)
+    render = tmp_path / "picture.mp4"
+    render_picture(plan, str(render), settings)
+    seen = _capture(monkeypatch)
+    headclip.check_head_clip_plan(plan, placements, settings=settings, margin=10, corner="top-right",
+                                  work_dir=tmp_path / "work")
+    assert len(seen) == len(sample_times(placements[0]))
+    for item in seen:
+        mine = item["frame"]
+        same = _psnr(mine, _render_frame(render, item["t"], tmp_path / "same.jpg"))
+        later = _psnr(mine, _render_frame(render, item["t"] + 0.5, tmp_path / "later.jpg"))
+        assert same > later, f"t={item['t']}: {same} vs {later}"
+
+
+def test_the_plan_check_gives_the_same_decision_as_the_check_on_the_render(monkeypatch, tmp_path: Path) -> None:
+    plan, placements = _moving_plan(tmp_path)
+    settings = RenderSettings(crf=18, preset="ultrafast", fps=25)
+    render = tmp_path / "picture.mp4"
+    render_picture(plan, str(render), settings)
+    _capture(monkeypatch, coverage=lambda t: 0.05 if 1.0 <= t <= 2.2 else 0.0)
+    kwargs = {"margin": 10, "corner": "top-right", "work_dir": tmp_path / "work"}
+    on_plan, plan_facts = headclip.check_head_clip_plan(plan, placements, settings=settings, **kwargs)
+    on_render, render_facts = headclip.check_head_clip(render, placements, **kwargs)
+    assert on_plan.ok == on_render.ok is False
+    assert on_plan.severity == on_render.severity == "fatal"
+    assert on_plan.detail == on_render.detail
+    assert [p["clipped_times"] for p in plan_facts["placements"]] == \
+        [p["clipped_times"] for p in render_facts["placements"]] != [[]]
+    assert (plan_facts["frames"], render_facts["frames"]) == ("source", "render")
+
+
+def test_the_plan_check_rectangle_is_scaled_to_the_renders_frame_size(monkeypatch, tmp_path: Path) -> None:
+    plan, placements = _moving_plan(tmp_path)
+    settings = RenderSettings(preset="ultrafast", fps=25, scale="-2:120")
+    seen = _capture(monkeypatch)
+    headclip.check_head_clip_plan(plan, placements, settings=settings, margin=10, corner="top-left",
+                                  work_dir=tmp_path / "work")
+    x, y, w, h = overlay_rect(placements[0], 160, 120, 10, "top-left")
+    grow = headclip.GRAB_WIDTH / 160
+    assert seen and all(it["rect"] == [round(x * grow), round(y * grow), round(w * grow), round(h * grow)]
+                        for it in seen)
+
+
+def test_the_plan_check_grabs_through_an_aspect_changing_scale(monkeypatch, tmp_path: Path) -> None:
+    # 320x240 source rendered through scale=160:240 (a 2:3 frame): the grab must have the render's aspect,
+    # or the rectangle (render coordinates) would cover a different region of the picture.
+    plan, placements = _moving_plan(tmp_path)
+    settings = RenderSettings(preset="ultrafast", fps=25, scale="160:240")
+    seen = _capture(monkeypatch)
+    headclip.check_head_clip_plan(plan, placements, settings=settings, margin=10, corner="top-left",
+                                  work_dir=tmp_path / "work")
+    assert seen
+    for it in seen:
+        assert headclip._image_dims(it["frame"]) == (headclip.GRAB_WIDTH, headclip.GRAB_WIDTH * 240 // 160)
+
+
+def test_the_plan_check_skips_samples_past_the_snapped_end(monkeypatch, tmp_path: Path) -> None:
+    plan, _ = _moving_plan(tmp_path)
+    late = [Placement("a", str(_png(tmp_path / "late.png")), 3.0, 6.0, 0.3)]
+    seen = _capture(monkeypatch)
+    headclip.check_head_clip_plan(plan, late, settings=RenderSettings(fps=25), margin=10, corner="top-right",
+                                  work_dir=tmp_path / "work")
+    assert seen and max(it["t"] for it in seen) <= 4.0 - 0.1
+
+
+def test_off_macos_the_plan_check_warns_and_grabs_nothing(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setattr("sys.platform", "linux")
+
+    def refuse(*_a, **_k):
+        raise AssertionError("nothing may be grabbed off macOS")
+
+    monkeypatch.setattr(headclip, "_grab", refuse)
+    monkeypatch.setattr(headclip, "frame_size", refuse)
+    plan = Plan(sources={"main": SourceInfo("main", "missing.mp4", "x", 6.0)}, main="main", cuts=[],
+                segments=[Segment("main", 0.0, 2.0)])
+    result, facts = headclip.check_head_clip_plan(
+        plan, [Placement("a", "x.png", 0.4, 1.6, 0.3)], settings=RenderSettings(fps=25), margin=40,
+        corner="top-right", work_dir=tmp_path)
+    assert result.severity == "warn" and result.ok
+    assert result.detail.startswith("skipped: head-coverage check needs macOS")
+    assert facts["frames"] == "source" and "needs macOS" in capsys.readouterr().err
