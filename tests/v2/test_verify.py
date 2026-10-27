@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from talkinghead import verify
-from talkinghead.audio import envelope, noise_floor
+from talkinghead.audio import Envelope, envelope, noise_floor
 from talkinghead.config import Config
 from talkinghead.joins import check_join, source_edge_facts
 from talkinghead.store import Cache, sha256_file
@@ -734,3 +734,77 @@ def test_stutter_token_still_clipped_when_leading_and_trailing_cuts_add_up() -> 
                           [Cut(0.9, 1.39, "silence"), Cut(1.91, 2.0, "silence")])
     out = verify.clipped_words(plan, [Word("on-only", 1.0, 2.0, 1.0)], removing=[])
     assert [x["text"] for x in out] == ["on-only"]
+
+
+# --- stutter tokens judged by the source audio at the cut end (quiet_at) ---
+
+def _valley(cuts: list[tuple[float, float]], text: str, quiet_at, start: float = 1641.65, end: float = 1642.27):
+    plan = Plan.from_cuts(SourceInfo("main", "/x.wav", "x", 2000.0), [Cut(s, e, "silence") for s, e in cuts])
+    return verify.clipped_words(plan, [Word(text, start, end, 1.0)], removing=[], quiet_at=quiet_at)
+
+
+def test_stutter_valley_cut_passes_when_the_cut_end_is_quiet() -> None:
+    # IMG_8748: `on-only` 1641.65-1642.27, the `on-` restart cut 1641.75-1641.96 ends in a -57 dB valley.
+    assert _valley([(1641.75, 1641.96)], "on-only", lambda t, a, b: abs(t - 1641.96) < 1e-6) == []
+
+
+def test_stutter_valley_still_clipped_when_the_end_is_loud_or_a_second_cut_eats_the_kept_part() -> None:
+    assert [x["text"] for x in _valley([(1641.75, 1641.96)], "on-only", lambda t, a, b: False)] == ["on-only"]
+    assert [x["text"] for x in _valley([(1641.75, 1641.96)], "on-only", None)] == ["on-only"]
+    # 0.15 s of the 0.31 s kept part is far beyond CLIP_KEPT_SHARE, even after the quiet stutter cut.
+    both = _valley([(1641.75, 1641.96), (1642.1, 1642.25)], "on-only", lambda t, a, b: abs(t - 1641.96) < 1e-6)
+    assert [x["text"] for x in both] == ["on-only"]
+
+
+def test_valley_ignored_for_non_stutter_tokens() -> None:
+    for text in ("only", "re-run"):
+        out = _valley([(1641.75, 1641.96)], text, lambda t, a, b: True, 1641.65, 1642.27)
+        assert [x["text"] for x in out] == [text]
+
+
+def _tone_silence_tone(tmp_path) -> str:
+    """6 s at 16 kHz: a 440 Hz tone with a silent valley 1.4-1.6 s."""
+    t = np.arange(6 * SR16) / SR16
+    x = 10000.0 * np.sin(2 * np.pi * 440.0 * t)
+    x[int(1.4 * SR16):int(1.6 * SR16)] = 0.0
+    return _write_wav(tmp_path / "src.wav", x)
+
+
+def test_collect_facts_quiet_at_reads_the_source_envelope_for_stutter_cuts(tmp_path, monkeypatch) -> None:
+    source = _tone_silence_tone(tmp_path)
+    monkeypatch.setattr(verify, "measure_lufs", lambda path: -16.0)
+    monkeypatch.setattr(verify, "measure_source_timing", lambda plan, path: None)
+    with wave.open(source) as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+    env = envelope(x, SR16)
+
+    def clipped(cut_end: float) -> list[str]:
+        plan = Plan.from_cuts(SourceInfo("main", source, "x", 6.0), [Cut(0.9, cut_end, "silence")])
+        facts = collect_facts(plan, source, cache=Cache(tmp_path / "cache"), workdir=tmp_path / "verify",
+                              source_duration=6.0, source_silences=[], source_path=source, output_asr=False,
+                              env=env, floor=noise_floor(env.db), source_words=[Word("on-only", 1.0, 2.0, 1.0)])
+        return [x["text"] for x in facts["clipped_words"]]
+
+    assert clipped(1.5) == []  # ends inside the silent valley
+    assert clipped(1.7) == ["on-only"]  # ends in tone
+
+
+def test_source_quiet_at_ignores_a_loud_neighbour_outside_the_token() -> None:
+    fs = 0.01
+    db = np.full(300, -25.0)  # token 1.0-1.4 s at -25 dB, probe before the 1.2 s cut end at -40 dB
+    db[110:120] = -40.0
+    quiet_at = verify.source_quiet_at(Envelope(db=db, zcr=np.zeros_like(db), frame_sec=fs, sample_rate=SR16))
+    assert quiet_at(1.2, 1.0, 1.4) is False
+    db[160:165] = -5.0  # a loud word after the token must not change the verdict
+    assert quiet_at(1.2, 1.0, 1.4) is False
+
+
+def test_source_quiet_at_ignores_a_spike_in_the_frame_straddling_an_off_grid_token_start() -> None:
+    fs = 0.005
+    db = np.full(400, -25.0)  # token 1.001-1.4 s at -25 dB; probe before the 1.2 s cut end at -45 dB
+    db[230:240] = -45.0
+    quiet_at = verify.source_quiet_at(Envelope(db=db, zcr=np.zeros_like(db), frame_sec=fs, sample_rate=SR16))
+    assert quiet_at(1.2, 1.001, 1.4) is False
+    db[200] = -5.0  # frame 1.000-1.005 straddles the token start, so it is not the token's own audio
+    assert quiet_at(1.2, 1.001, 1.4) is False
+    assert quiet_at(1.2, 1.001, 1.001) is False  # a token spanning no whole frame is never quiet

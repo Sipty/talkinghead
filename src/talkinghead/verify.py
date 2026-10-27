@@ -7,6 +7,7 @@ report says where and the fix lands in code or guidelines, not in a retry.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -219,12 +220,22 @@ def _stutter_kept_start(text: str, a: float, b: float) -> float | None:
     return a + (b - a) * len(parts[0]) / (len(parts[0]) + len(parts[1]))
 
 
-def _clip_share(w, a: float, b: float, hit: Sequence) -> float:
+def _clip_share(w, a: float, b: float, hit: Sequence,
+                quiet_at: Callable[[float, float, float], bool] | None = None) -> float:
     """Share of a word the cuts in `hit` take. For a stutter token, leading cuts (starting at or before the token)
-    are measured against the kept part alone and every other cut against the whole token; the two shares add up."""
+    are measured against the kept part alone and every other cut against the whole token; the two shares add up.
+
+    When `quiet_at` shows that a cut ends inside the stutter token at a quiet point, the source audio itself says
+    where the kept word starts: everything from the token start to that cut end is the removed stutter, and every
+    other cut is summed against the kept part `[cut end, b]` alone."""
     kept_start = _stutter_kept_start(w.text, a, b)
     if kept_start is None:
         return sum(min(b, c.end) - max(a, c.start) for c in hit) / (b - a)
+    if quiet_at is not None:
+        valley = [c for c in hit if a + 1e-9 < c.end < b - 1e-9 and quiet_at(c.end, a, b)]
+        if valley:
+            cut = max(valley, key=lambda c: c.end)
+            return sum(max(0.0, min(b, c.end) - max(cut.end, c.start)) for c in hit if c is not cut) / (b - cut.end)
     lead = [c for c in hit if c.start <= a + 1e-9]
     rest = [c for c in hit if c.start > a + 1e-9]
     lead_share = sum(max(0.0, min(b, c.end) - kept_start) for c in lead) / (b - kept_start)
@@ -232,9 +243,42 @@ def _clip_share(w, a: float, b: float, hit: Sequence) -> float:
     return lead_share + rest_share
 
 
+# A cut end counts as quiet when the source level just before it is this far below the speech level around it.
+QUIET_BELOW_PEAK_DB = 30.0
+# The source window before a cut end whose level decides quiet.
+QUIET_PROBE_SEC = 0.03
+
+
+def source_quiet_at(env: Envelope) -> Callable[[float, float, float], bool]:
+    """A `quiet_at(t, start, end)` callback over the source envelope: true when the level in the short window before
+    `t` is at or below QUIET_DB, or at least QUIET_BELOW_PEAK_DB below the loudest frame of the token
+    `start`-`end` itself (neighbouring words never count).
+    Scribe stamps a stutter and its kept word as one token, so the valley between them is the only reliable
+    boundary."""
+    n = len(env.db)
+
+    def quiet_at(t: float, start: float, end: float) -> bool:
+        i = min(n, max(0, int(round(t / env.frame_sec))))
+        j = max(0, i - max(1, int(round(QUIET_PROBE_SEC / env.frame_sec))))
+        if i <= j:
+            return False
+        level = float(np.max(env.db[j:i]))
+        k = max(0, math.ceil(start / env.frame_sec - 1e-9))  # only frames wholly inside [start, end]
+        m = min(n, math.floor(end / env.frame_sec + 1e-9))
+        if m <= k:
+            return False
+        peak = float(np.max(env.db[k:m]))
+        return level <= QUIET_DB or level <= peak - QUIET_BELOW_PEAK_DB
+
+    return quiet_at
+
+
 def clipped_words(plan: Plan, words: Sequence,
-                   removing: Sequence[tuple[float, float, str]] | None = None) -> list[dict]:
+                   removing: Sequence[tuple[float, float, str]] | None = None, *,
+                   quiet_at: Callable[[float, float, float], bool] | None = None) -> list[dict]:
     """Kept transcript words that cuts take more than CLIP_KEPT_SHARE of.
+
+    `quiet_at(t, start, end)` says whether the source audio is quiet at `t` for the token `start`-`end`; it only refines stutter tokens (_clip_share).
 
     A word is kept when the stages did not remove it: no word-removing decision in `removing` (start, end, reason)
     covers it (judged_removes). Without `removing` the plan's own word-removing cuts stand in, which can read a word
@@ -270,7 +314,7 @@ def clipped_words(plan: Plan, words: Sequence,
             if cuts[i].end > a:
                 hit.append(cuts[i])
             i += 1
-        share = _clip_share(w, a, b, hit)
+        share = _clip_share(w, a, b, hit, quiet_at)
         if share > CLIP_KEPT_SHARE:
             out.append({"text": w.text, "start": round(a, 3), "end": round(b, 3), "cut": round(share, 3),
                         "reasons": sorted({c.reason for c in hit}), "speaker": getattr(w, "speaker", None)})
@@ -1103,7 +1147,9 @@ def collect_facts(
         "source_timing": measure_source_timing(plan, render_path) if source_path else None,
         "unclassified_voice": unclassified_voice_facts(plan, voices, speech_probes),
         "judged_leaks": judged_leaks(plan, source_words, judged, given_back) if judged is not None else None,
-        "clipped_words": clipped_words(_word_cuts(plan), source_words, removing) if source_words else None,
+        "clipped_words": (clipped_words(_word_cuts(plan), source_words, removing,
+                                        quiet_at=source_quiet_at(env) if env is not None else None)
+                          if source_words else None),
         "cut_word_fragments": (cut_word_fragments(_word_cuts(plan), source_words, removing)
                                if source_words and removing is not None else None),
     }
