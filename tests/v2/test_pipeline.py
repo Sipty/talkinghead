@@ -1068,3 +1068,27 @@ def test_a_changed_overlay_setting_re_renders_the_picture_only_and_an_unchanged_
     moved = cook(moved_cfg, judge)
     assert order.count("render_plan") == 1 and audio_renders == [] and judge.calls == 0
     assert moved.final.stat().st_mtime_ns != rendered_at
+
+
+def test_a_visuals_cook_removes_a_stale_sibling_picture_and_keeps_one_of_its_own_lock_stale_sibling(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `final.mp4` whose audio is not the current lock's master goes; the same lock's `final-visuals.mp4` stays
+    when a `--no-visuals` rerun adds `final.mp4` beside it for the board."""
+    _stub_head_clip(monkeypatch, [])
+    out, cache, assets = tmp_path / "out", Cache(tmp_path / "cache"), _visuals_assets(tmp_path)
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                 cache=cache, guidelines="G")
+    stale = out / "final.mp4"
+    other = tmp_path / "other.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(stale), "-f", "lavfi", "-i", "sine=f=880:d=3",
+                    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", str(other)], check=True)
+    other.replace(stale)
+
+    run_pipeline(str(clip), out, _visuals_cfg(), transcriber=PlanAwareTranscriber(out), judge=_visuals_judge(),
+                 cache=cache, guidelines="G", topic="t", assets_dir=assets)
+    assert (out / "final-visuals.mp4").is_file() and not stale.exists()
+
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                 cache=cache, guidelines="G")
+    assert stale.is_file() and (out / "final-visuals.mp4").is_file()

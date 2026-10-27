@@ -15,7 +15,7 @@ Every run writes a run directory next to the source video, named `<video stem>.t
 
 | file | what it is |
 |---|---|
-| `final-visuals.mp4` | the deliverable of a cook with overlays (quote cards, screenshots, chapter roadmap): the cut with the overlays drawn inside its one picture encode. A cook with no overlays writes `final.mp4` instead, and never both |
+| `final-visuals.mp4` | the deliverable of a cook with overlays (quote cards, screenshots, chapter roadmap): the cut with the overlays drawn inside its one picture encode. A cook with no overlays writes `final.mp4` instead. A `--no-visuals` rerun on the same lock adds `final.mp4` beside it for the board; a picture from an earlier lock is removed |
 | `audio-master.m4a` | the mastered audio (AAC 192k, 48 kHz), rendered and checked before any picture exists. The picture muxes it unchanged |
 | `edit-lock.json` | binds `plan.json` to the master's exact audio bytes. A picture renders only from a matching lock |
 | `plan.json` | the edit decision list: every cut with its reason, the kept segments, and the config that produced them |

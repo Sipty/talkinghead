@@ -136,3 +136,35 @@ def test_a_run_dir_without_any_cut_keeps_the_plain_message(tmp_path):
     with pytest.raises(FileNotFoundError, match="verified base cut not found") as info:
         render_board(tmp_path, spec)
     assert "--no-visuals" not in str(info.value)
+
+
+def _board_run_dir(tmp_path, *, lock_plan_sha=None, lock_md5=None, write_lock=True):
+    """A run dir with a one-segment plan, a real `final.mp4` and (optionally) its lock."""
+    import json
+    import subprocess
+
+    from talkinghead.lock import audio_stream_md5, plan_digest
+    from talkinghead.timeline import Plan, SourceInfo
+
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=30:duration=1",
+                    "-f", "lavfi", "-i", "sine=d=1", "-c:v", "libx264", "-c:a", "aac",
+                    str(tmp_path / "final.mp4")], check=True)
+    plan = Plan(sources={"main": SourceInfo("main", "/v/in.mp4", "sha", 1.0)}, main="main", cuts=[],
+                segments=[Segment("main", 0.0, 1.0)])
+    (tmp_path / "plan.json").write_text(plan.to_json())
+    tablet = tmp_path / "tablet.mp4"
+    tablet.write_bytes(b"x")
+    if write_lock:
+        (tmp_path / "edit-lock.json").write_text(json.dumps({
+            "version": 1, "plan_sha": lock_plan_sha or plan_digest(plan),
+            "audio": {"stream_md5": lock_md5 or audio_stream_md5(tmp_path / "final.mp4")}}))
+    return validate(sample_spec() | {"tablet": str(tablet)})
+
+
+@pytest.mark.parametrize("fault", ["audio", "plan", "no_lock"])
+def test_a_board_refuses_a_stale_base_cut_and_names_the_fix_stale_base(tmp_path, fault):
+    spec = _board_run_dir(tmp_path, lock_md5="0" * 32 if fault == "audio" else None,
+                          lock_plan_sha="f" * 64 if fault == "plan" else None, write_lock=fault != "no_lock")
+    error = FileNotFoundError if fault == "no_lock" else ValueError
+    with pytest.raises(error, match="--no-visuals"):
+        render_board(tmp_path, spec)

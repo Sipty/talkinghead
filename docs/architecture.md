@@ -375,7 +375,7 @@ then a `-c copy` mux of the master's first audio stream, packets unchanged. The 
 fan-out, which stalled on a native 4K HLG recording.
 The branch queue was a suspected cause; the observed failure was no output growth for 20 minutes.
 With overlays, `visuals.render.overlay_graph` extends the same graph, so the overlays are part of this one encode and
-the deliverable is `final-visuals.mp4`; with none it is `final.mp4`. A cook never writes both.
+the deliverable is `final-visuals.mp4`; with none it is `final.mp4`. A cook renders one of the two; a `--no-visuals` rerun on the same lock adds `final.mp4` beside `final-visuals.mp4` for the board, and a picture from an earlier lock is removed.
 `docs/render-proof.md` records why closed `between` intervals are unsafe: they remove one extra frame per grid-aligned cut.
 
 Colour is probed from the sources (`color.probe_color`): an HLG/PQ source is re-encoded

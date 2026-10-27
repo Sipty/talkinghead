@@ -910,6 +910,9 @@ def _run_pipeline(
                                       overlays=overlays)
             run.write_json(picture_memo, {"key": picture_key, "cmd": picture_cmd})
         render_cmd = f"{render_cmd} && {picture_cmd}"
+        sibling = final if deliverable != final else run.root / f"{prefix}final-visuals.mp4"
+        if sibling.is_file() and audio_stream_md5(sibling) != lock["audio"]["stream_md5"]:
+            sibling.unlink()  # a picture of an earlier lock must not outlive it: the board would composite onto it
         facts["picture"] = collect_picture_facts(
             plan, str(deliverable), source_path=plan.sources[plan.main].path, scale=settings.scale,
             locked_audio_md5=lock["audio"]["stream_md5"], rendered_audio_md5=audio_stream_md5(deliverable))

@@ -14,7 +14,8 @@ from typing import Iterable
 import numpy as np
 
 from ..color import HDR_BITRATE, encode_args, probe_color, write_sdr_to_hdr_cube
-from ..timeline import Segment, in_source_order
+from ..lock import audio_stream_md5, plan_digest, read_lock
+from ..timeline import Plan, Segment, in_source_order
 from ..verify import display_size
 from .spec import BoardSpec, BoardView
 
@@ -296,6 +297,20 @@ def render_board(run_dir: Path, spec: BoardSpec, out: Path | None = None) -> Pat
         raise ValueError("board overlays need the cut in source order: this plan moves topic blocks "
                          "ahead of earlier material (restructure), so the tablet timeline would run "
                          "backwards. Render the board on a cut without restructure reordering.")
+    lock_path = run_dir / "edit-lock.json"
+    if not lock_path.is_file():
+        raise FileNotFoundError(
+            f"no edit lock at {lock_path}, so final.mp4 cannot be tied to plan.json. Rerun "
+            "`talkinghead run VIDEO --no-visuals` on the same run dir."
+        )
+    lock = read_lock(lock_path)
+    if lock.get("plan_sha") != plan_digest(Plan.from_json(json.dumps(plan))) or (
+        audio_stream_md5(base) != lock["audio"]["stream_md5"]
+    ):
+        raise ValueError(
+            "final.mp4 is from an earlier cut: it does not match edit-lock.json and plan.json. Rerun "
+            "`talkinghead run VIDEO --no-visuals` on the same run dir to render it from the current lock."
+        )
     base_info = _probe(base, "stream=avg_frame_rate,nb_read_frames,duration:format=duration")
     stream = base_info["streams"][0]
     width, height = display_size(str(base))
