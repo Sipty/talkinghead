@@ -15,8 +15,9 @@ Every run writes a run directory next to the source video, named `<video stem>.t
 
 | file | what it is |
 |---|---|
-| `final.mp4` | the cut. Shippable on its own |
-| `final-visuals.mp4` | the same cut with the overlay pass applied (quote cards, screenshots, chapter roadmap) |
+| `final-visuals.mp4` | the deliverable of a cook with overlays (quote cards, screenshots, chapter roadmap): the cut with the overlays drawn inside its one picture encode. A cook with no overlays writes `final.mp4` instead, and never both |
+| `audio-master.m4a` | the mastered audio (AAC 192k, 48 kHz), rendered and checked before any picture exists. The picture muxes it unchanged |
+| `edit-lock.json` | binds `plan.json` to the master's exact audio bytes. A picture renders only from a matching lock |
 | `plan.json` | the edit decision list: every cut with its reason, the kept segments, and the config that produced them |
 | `report.md` | the decisions with their vote counts, every cut, the verification table, and the render command |
 
@@ -174,7 +175,7 @@ The run directory is `talk.talkinghead/`, next to `talk.mov`.
 `--plan-only` stops after `plan.json`: no render, verification or visuals. It rebuilds the plan from the run
 directory's stage memos and cached transcript, so every memo must hit (a miss fails, rather than calling a
 judge). Point `--out-dir` at a scratch copy to experiment without touching a finished cook.
-Open `talk.talkinghead/final.mp4` and `talk.talkinghead/report.md`.
+Open `talk.talkinghead/final-visuals.mp4` (or `final.mp4` when the cook placed no overlays) and `talk.talkinghead/report.md`.
 
 To preview a long recording first, add `--demo 6`.
 That renders only the first 6 minutes at draft quality, and its files are prefixed `demo-`.
@@ -335,7 +336,7 @@ No judge call runs again, and the replaced memo is kept as `stages/pauses.supers
 ### Overlay assets
 
 `editorial/assets/` is a small library of diagrams made for this project (MIT, see `editorial/assets/CREDITS.md`).
-The overlay pass places an asset where the judge's anchors match it.
+The overlay planner places an asset where the judge's anchors match it.
 To use your own library, set `assets_dir` in the config file or pass `--assets-dir DIR`.
 Describe your images in a `manifest.toml` next to them, the same way `editorial/assets/manifest.toml` does.
 `visuals_avatar` names an optional square PNG or JPEG that is drawn as a mascot on quote cards.
@@ -359,8 +360,8 @@ Set up and run talkinghead from the README in this repository.
 1. **Align (only with `--audio`).** The external recording is measured against the video, and a master file is written with that recording as its audio.
 2. **Transcribe and analyse.** The audio is transcribed once and cached. Silences, voiced spans and mouth noises are measured from the waveform.
 3. **Decide.** Three judged stages choose the cuts: the cold open and outro, the retakes, and the content. The judge votes on candidates that the code generated. Code turns each pick into a cut, so the judge never writes a timestamp. A mechanical stage then handles pauses, fillers and mouth noises.
-4. **Render and check.** Each cut's edges are placed against the waveform: the level step across each join and voiced audio beside each edge are scored, then every join gets one refinement pass within 40 ms (`refine_joins`, before anything downstream reads the plan's output times). One ffmpeg render produces the cut and the mastered audio. The output is then measured against the plan: duration, loudness, the first word, join quality, dead air and colour.
-5. **Overlay and report.** An optional second pass adds the overlays with the audio copied, so the checks still hold. `report.md` records every decision.
+4. **Render the audio and check it.** Each cut's edges are placed against the waveform: the level step across each join and voiced audio beside each edge are scored, then every join gets one refinement pass within 40 ms (`refine_joins`, before anything downstream reads the plan's output times). The mastered audio renders alone as `audio-master.m4a`, is transcribed afresh, and is measured against the plan: duration, loudness, the first word, join quality and dead air. The audio assessment runs alongside the editorial stages when the judge allows concurrent calls.
+5. **Lock, overlay, picture and report.** Only a master that passes the audio checks is locked. Overlays are planned on the locked transcript, and the head-coverage check reads the source frames the plan maps to, both before any picture exists. The picture then renders once with the overlays inside that encode, and the locked master is muxed in unchanged. `report.md` records every decision.
 
 The stage-by-stage map is in [`docs/architecture.md`](docs/architecture.md).
 
@@ -383,13 +384,38 @@ The measurement is written to `align.json` in the run directory:
 | command | what it does |
 |---|---|
 | `talkinghead align VIDEO AUDIO [-o OUT] [--json] [--fix-drift] [--yes]` | measure the offset and drift, then remux the microphone audio onto the video. It asks before remuxing, unless `--yes` is given. The output defaults to `VIDEO.aligned.mov` next to the video. `--json` prints the result as JSON on stdout after the remux, and sends the report to stderr. This command never refuses on low confidence; it only reports |
-| `talkinghead render PLAN.json --out OUT.mp4` | re-render a finished plan exactly, with no judgment. `--audio-only --out OUT.wav` renders an audio-only plan. `--refine-joins` first refines the joins against the recording's cached analysis (no new ASR call) and writes `OUT.plan.json` and `OUT.joins.json` (the moves) beside the output; without it the plan is rendered as written. Joins already refined are recorded in the plan's `provenance.refined_joins` and skipped on a rerun, so re-running on the refined plan moves nothing; only a join whose edge pair was edited since is refined again |
+| `talkinghead render PLAN.json --out OUT.mp4 --lock LOCK` | re-render a finished plan's picture exactly, with no judgment. A video render requires `--lock`, a lock that matches the plan and the master (see [Audio first, then the picture](#audio-first-then-the-picture)). `--audio-only --out OUT.m4a` renders the AAC audio master on the picture's frame grid, and `--audio-only --out OUT.wav` renders an audio-only plan. `--window START:END` (with `--lock`) renders only that stretch of the picture. `--refine-joins` works only on the audio preview (`--audio-only`), never with `--lock`: refine there, then lock and render the refined plan. It first refines the joins against the recording's cached analysis (no new ASR call) and writes `OUT.plan.json` and `OUT.joins.json` (the moves) beside the output; without it the plan is rendered as written. Joins already refined are recorded in the plan's `provenance.refined_joins` and skipped on a rerun, so re-running on the refined plan moves nothing; only a join whose edge pair was edited since is refined again |
+| `talkinghead lock PLAN.json --audio MASTER.m4a [--out LOCK]` | approve an audio master: writes the lock that binds the plan to the master's audio bytes. The lock defaults to `edit-lock.json` beside the plan |
+| `talkinghead timings PLAN.json --lock LOCK --anchors ANCHORS.json [--out TIMINGS]` | map source-time anchors to output time on a locked plan, for companion animations. It writes `timings.json` beside the lock unless `--out` says otherwise |
 | `talkinghead inspect RUN_DIR` | print a run's `report.md` |
 | `talkinghead feedback RUN_DIR "note" [--at TIME] [--kind video\|preference\|defect] [--lesson TEXT]` | record feedback on a cut; see [Editing profile](#editing-profile). `--kind defect --at TIME` also turns what you heard into a fixture and a test stub under the clone's `tests/` |
 | `talkinghead lessons [list\|accept ID [--text TEXT]\|reject ID]` | review proposed lessons and promote approved ones to `preferences.md` |
 | `talkinghead board` and `talkinghead board-page` | experimental; see [Experimental: board videos](#experimental-board-videos) |
 
 Every subcommand accepts `--help`.
+
+### Audio first, then the picture
+
+A run renders `audio-master.m4a` first, transcribes it, and runs the audio checks on it.
+Only a master that passes is locked: `edit-lock.json` records the plan's digest, the frame rate and the master's audio bytes, and `verify/locked-transcript.json` holds what the master says.
+Visuals are planned on that locked transcript, and the head-coverage check reads the source frames the plan maps to.
+The picture then renders once, with the overlays inside that encode, and muxes the master unchanged. The `audio_locked` check proves the bytes match.
+
+`talkinghead run VIDEO --stop-at-lock` stops after the head-coverage check and before any picture (report status `AUDIO LOCKED`).
+Listen to `audio-master.m4a`, read the overlay plan in `report.md`, then rerun the same command without the flag to render the picture. The master is not rendered again.
+After the stop the lock is held: if you edit the plan in the meantime, a run without `--stop-at-lock` refuses and names the lock, and a run with it re-locks the new plan.
+
+Hand workflow, for a plan you edited yourself:
+
+```bash
+talkinghead render plan.json --audio-only --out audio-master.m4a   # snapped to the picture's frame grid
+talkinghead lock plan.json --audio audio-master.m4a                # writes edit-lock.json beside the plan
+talkinghead render plan.json --out final.mp4 --lock edit-lock.json
+```
+
+Companion animations (made outside talkinghead) anchor on `audio/source-words.json`, which every run rewrites with the words of the recording it just analysed.
+`talkinghead timings plan.json --lock edit-lock.json --anchors anchors.json` maps each anchor, a list of `{"id", "start", "end"}` spans in source seconds, to output time and writes `timings.json` beside the lock. Anchors that were trimmed, split or cut say so.
+`talkinghead render plan.json --lock edit-lock.json --window START:END --out passage.mp4` renders only the picture of output seconds `[START, END)`, the speaker footage to composite an animation over.
 
 ## Time and cost
 
@@ -475,8 +501,9 @@ A run directory belongs to one recording.
 Pass `--out-dir` with a new directory for the other recording.
 
 **`verification failed: ...` (exit 1).**
-A fatal check failed. The run writes `report.md` with status `FAILED` and exits 1, and the overlay pass does not run.
-`final.mp4` is still written, but it failed a check, so do not publish it.
+A fatal check failed. The run writes `report.md` with status `FAILED` and exits 1.
+An audio check that fails stops the cook before any lock or picture, so no `final.mp4` or `final-visuals.mp4` is written. A head-coverage failure stops it after the lock and before the picture; the master and the lock stay.
+A picture check that fails (`audio_locked`, `av_sync`, `color`, `resolution`) leaves the picture on disk, but it failed a check, so do not publish it.
 Read the failing line in the verification table of `report.md` and fix its cause, which is usually the source or the alignment.
 
 **`silero-vad unavailable; ...`.**
@@ -586,6 +613,17 @@ git pull
 uv sync
 ```
 
+### Upgrading to 2.0
+
+2.0 renders the audio first and the picture once, so a few 1.x habits break:
+
+1. Video `talkinghead render` needs `--lock LOCK`. Make the lock with `talkinghead lock PLAN.json --audio MASTER.m4a` after `render PLAN.json --audio-only --out MASTER.m4a`, or reuse the `edit-lock.json` a cook wrote.
+2. A cook with overlays ships `final-visuals.mp4` and no `final.mp4`. A cook with no overlays still writes `final.mp4`. Point scripts and uploads at the right file.
+3. A head-coverage failure stops the cook before any picture renders. Change `visuals_corner`, `visuals_scale_card`, `visuals_scale_shot` or `visuals_margin` in the cook's config and rerun.
+4. The checks `visuals_duration`, `visuals_audio_copied` and `visuals_resolution` are gone. The fatal check `audio_locked` is new: it fails when the picture's audio bytes differ from the locked master.
+5. A cook in flight re-judges its output rounds once and re-renders its picture once, because their memo keys moved.
+6. A `--stop-at-lock` run holds its lock (`edit-lock.hold`). While the hold exists, a later run whose plan changed fails instead of silently re-locking, unless it is also `--stop-at-lock`.
+
 ## Glossary
 
 - **Cook**: one run of talkinghead on one recording, and its run directory.
@@ -595,7 +633,9 @@ uv sync
 - **Memo**: a stage's saved result, keyed on the hash of its inputs, so a rerun replays it.
 - **HLG**: hybrid log-gamma, an HDR transfer format that many phone cameras record in. talkinghead keeps 10-bit HLG as 10-bit HLG.
 - **LUFS**: loudness units relative to full scale. The final audio aims at -16 LUFS with one fixed gain that never takes the true peak past -1.5 dBTP; a source whose peaks block the gain masters quieter, and the report says so rather than compressing it.
-- **Overlay**: a picture drawn over the finished cut: a quote card, a screenshot or the chapter roadmap.
+- **Overlay**: a quote card, a screenshot or the chapter roadmap, drawn over the cut inside the one picture encode.
+- **Audio master**: `audio-master.m4a`, the mastered audio of a cut, rendered and checked before any picture.
+- **Edit lock**: `edit-lock.json`, which ties `plan.json` to the master's exact audio bytes. The picture renders only from a matching lock.
 - **Board**: an experimental panel that shows a tablet canvas beside the speaker.
 
 ## License

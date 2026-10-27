@@ -1,7 +1,8 @@
 # Architecture
 
 One run is a single pass: input guard -> align -> analyse -> four stages -> edge
-finalization -> one render -> machine verification -> visuals overlays -> report.
+finalization -> audio master -> machine verification of the audio -> lock -> visuals planning and head-clip on
+source frames -> one picture render with the overlays inside it -> picture verification -> report.
 `run_pipeline` in `src/talkinghead/pipeline.py` is the whole orchestration; every
 stage below is a function it calls in order.
 
@@ -11,15 +12,17 @@ Two things make the run reproducible rather than merely repeatable:
   render) live in content-addressed caches; judged results are memoised per stage and
   every individual LLM sample is stored.
 - **The plan is the deliverable.** `plan.json` holds the edit decision list, so a run
-  can be re-rendered exactly without re-deciding anything
-  (`talkinghead render plan.json --out out.mp4`, `src/talkinghead/render.py`).
+  can be re-rendered exactly without re-deciding anything: render the audio master
+  (`talkinghead render plan.json --audio-only --out audio-master.m4a`), lock it
+  (`talkinghead lock`), then render the picture (`talkinghead render plan.json --out out.mp4 --lock edit-lock.json`,
+  `src/talkinghead/render.py`). A video render needs the lock.
 
 ## Where state lives
 
 | store | path | keyed on | holds |
 |---|---|---|---|
 | cache (global) | `~/.cache/talkinghead` (`TALKINGHEAD_CACHE`), `src/talkinghead/store.py` | `<sha256 of the content>/<kind>-<stable_key>`, 24-hex key from the sorted JSON of the params + a version | `transcript`, `silences`, `moans`, `mouth_noises`, `unclassified_voice` (voiced speech-level audio no word covers), `speech_mask`, `speech_probe` |
-| run dir | `<video stem>.talkinghead/` next to the video, or `--out-dir` (`store.RunDir`) | one per recording: `run.json` records the source sha256 and `bind` refuses a different picture, so two cooks never share a directory | `plan.json`, `render.json`, `decisions.json`, `run.json`, `preferences.md`, `audio/`, `llm/`, `stages/`, `verify/`, plus `master.mov` and `align.json` when `--audio` was given |
+| run dir | `<video stem>.talkinghead/` next to the video, or `--out-dir` (`store.RunDir`) | one per recording: `run.json` records the source sha256 and `bind` refuses a different picture, so two cooks never share a directory | `plan.json`, `render.json`, `audio-master.m4a`, `audio-render.json`, `edit-lock.json` (and `edit-lock.hold` between a `--stop-at-lock` run and the run that renders its picture), `final-visuals.mp4` or `final.mp4`, `decisions.json`, `run.json`, `preferences.md`, `audio/`, `llm/`, `stages/`, `verify/` (with `locked-transcript.json`), plus `master.mov` and `align.json` when `--audio` was given |
 | stage memos | `<run>/stages/<stage>.json` | `stable_key(inputs, STAGE_VERSION)`: transcription + **the config fields that stage reads** (`pipeline.STAGE_CONFIG_KEYS`) + guidelines + judge name + topic + decisions + preferences (only when non-empty) | the stage's cuts and notes, plus `stages/<stage>.superseded.json` when a re-key replaced one |
 | LLM samples | `<run>/llm/<prompt sha>.prompt.txt` and `<prompt sha>-<i>.json` (`judge.LLMCache`) | the prompt **and the judge name**, so switching models never replays another model's answers | every prompt and every sampled answer |
 
@@ -44,7 +47,7 @@ the memos are hand-editable, so a re-key must not discard manual cuts without a 
 |---|---|---|---|---|
 | 0 | input guard | video/audio duration agreement, or the actual audio duration in audio-only mode | deterministic | - |
 | 1 | align (only with `--audio`) | where the external recording sits on the video timeline, plus its clock drift | deterministic | `master.mov`, `align.json` |
-| 2 | analyse | words, native sound events, protected laughter, silences, boundaries and acoustic noise candidates | deterministic | `audio/audio-16k.wav` + cache entries |
+| 2 | analyse | words, native sound events, protected laughter, silences, boundaries and acoustic noise candidates | deterministic | `audio/audio-16k.wav` (re-extracted on every run), `audio/source-words.json` + cache entries |
 | 3 | structure | the true start (cold open) and the outro sentence | judge, supermajority | stage memo |
 | 4 | retakes | which abandoned attempts and marked restarts are removed | judge, two passes | stage memo |
 | 5 | content | which whole sentences do not earn their runtime (and a coherence veto) | judge + coherence pass | stage memo |
@@ -52,9 +55,9 @@ the memos are hand-editable, so a re-key must not discard manual cuts without a 
 | 6b | restructure (opt-in: `restructure = true`) | topic blocks: which have no payoff (dropped), which open the cut (moved first) | judge: one sample per window, then one vote | stage memo, `plan.json` layout |
 | 6c | polish (on by default; `polish = false` opts out) | gap tightening between kept words (deterministic); word spans a judge names as disfluent; output pass: fillers, repeats and fragment restarts the render still has | judge per window, k-vote agreement (gaps need no judge); output pass judges one batch per round | stage memo, one per output round |
 | 7 | edges | final span of every cut | deterministic | `plan.json` |
-| 8 | render | picture and mastered audio, or mastered audio alone | deterministic | `final.mp4` or `final.wav`, `render.json` |
-| 9 | verify | did the render keep the plan's promises | deterministic, declarative checks | `verify/facts.json` |
-| 10 | visuals | what to overlay, where, from which asset | judge | `final-visuals.mp4`, `verify/visuals/` |
+| 8 | render | the mastered audio alone (`audio-master.m4a`), then the picture once, with the overlays inside it and the master muxed unchanged | deterministic | `audio-master.m4a`, `audio-render.json`, `final-visuals.mp4` or `final.mp4`, `render.json`, or `final.wav` for an audio-only cook |
+| 9 | verify | did the render keep the plan's promises: the audio table on the master, then the picture table on the picture | deterministic, declarative checks | `verify/facts.json`, `edit-lock.json`, `verify/locked-transcript.json` |
+| 10 | visuals | what to overlay, where, from which asset; planned on the locked transcript, head-clip checked on source frames, drawn in stage 8's encode | judge | `visuals/` plan memo, `verify/visuals/` |
 | 11 | report | - | deterministic | `report.md` |
 
 ### 0. Input guard
@@ -245,7 +248,7 @@ A fragment restarted inside one token ("impl-implement") is placed on the source
 
 These thresholds were set on one recording: four of its five stutters pass with their numbers steady across stamp offsets, the fifth is not placed, and about one ordinary word in ten also passes the onset test. A placement therefore needs Scribe's X-Xy token and the judge's confirmation first. Nothing guarantees that every stutter is removed or that no word is clipped: read the residual list and the placed cuts in the report.
 
-The rounds run up to `polish_output_rounds` (default 2, 0 disables). Each round re-renders the plan, transcribes the
+The rounds run up to `polish_output_rounds` (default 2, 0 disables). Each round re-renders the audio master, transcribes the
 render again and stops early when a round confirms nothing. The round's memo is keyed on the cuts it builds on, so a
 plan-only rebuild replays it without transcribing. The final check `residual_disfluencies` (warn, never fatal) lists
 findings the last render still shows that the judge did not keep, with output times. The report's Polish section
@@ -317,7 +320,7 @@ cuts never loses a judged reason to a mechanical cut that comes first.
 structural decisions, the anchors, and the provenance block (hashes, backend, floor,
 effective config) that stage memos are keyed on.
 
-### 7b. Audio assessment (advisory, memoised, before render)
+### 7b. Audio assessment (advisory, memoised, alongside the editorial stages)
 
 `audio_assess.measure` reads the recorded source audio as it is (before isolation): integrated loudness, true peak and
 LRA from loudnorm's analysis of the original channels, and a 10 ms level envelope (floor, quiet-frame share, speech p90)
@@ -325,22 +328,23 @@ and the average spectrum of windows where every frame is quiet (band shares, 50/
 spectrum and `mono_sample_peak_dbfs` are computed on a mono downmix, which can sum channels above the original peak, so
 only the original-channel true peak is clipping evidence. `audio_assess.assess` hands those numbers to the configured
 judge once (no fallback), with the owner's preferences in the prompt and a guidelines fingerprint, and returns its
-reading. The stage memo (`stages/audio-assessment.json`) keys on the source file's sha, the judge name, the two level
+reading. It reads only the source, so `run_pipeline` runs it on a worker thread beside the editorial stages when
+`stages.restructure.concurrent_safe(judge)` is true, and inline otherwise. The stage memo (`stages/audio-assessment.json`) keys on the source file's sha, the judge name, the two level
 targets, a guidelines digest and a preferences digest, plus `ASSESS_VERSION`; no editorial memo re-keys. Plan-only
 rebuilds replay a stored reading whose key matches and never call the judge. The reading is written to the report's
 Audio section; no stage reads it, so it cannot enable isolation, denoise or compression.
 
-### 8. Render (deterministic, once)
+### 8. Render (deterministic: the audio master, then the picture once)
 
-`render.render_plan` builds three ffmpeg runs: a picture pass (one CFR decode per source
-run, `fps` then chained half-open `select` filters that drop the removed spans, frame-snapped),
-an audio pass (segments decoded and joined in numpy, with fades only at program edges and joins), then one fixed gain
+The audio and the picture are separate renders, so the audio can be judged, listened to and locked before any picture
+exists.
+
+**Audio master.** `render.render_audio_plan` writes `audio-master.m4a` (AAC 192k, 48 kHz): segments snapped to the
+picture's frame grid (`timemap.snapped_segments`, the same cut the picture uses), decoded and joined in numpy, then one fixed gain
 measured on the joined audio by `render._loudness_gain_db`: the gain aims at `Config.loudness_lufs` and never takes the
 true peak past -1.5 dBTP, so a peak-limited source lands quieter. The default master has no compressor, EQ, highpass or
-dynamic normalisation (`loudnorm` only measures). Then a stream-copy mux. Verification fails a master that is louder
+dynamic normalisation (`loudnorm` only measures). Verification fails a master that is louder
 than target and reports a quieter one as a warning.
-The picture pass avoids per-segment trim fan-out, which stalled on a native 4K HLG recording.
-The branch queue was a suspected cause; the observed failure was no output growth for 20 minutes.
 `render.join_audio` overlap-adds the segments with equal-power (sine/cosine) crossfades of
 `splice_crossfade_sec` (0.020 s) at every join, instead of fading each segment to zero,
 which dipped ~23 dB where both sides were voiced.
@@ -351,10 +355,27 @@ neighbour's own audio.
 Output boundaries are rounded from the running total, so rounding never accumulates, and
 the program start and end get a 10 ms fade so the first and last sample cannot click.
 The join is numpy rather than an `atrim`/`concat` graph because a graph of ~200 links is
-known to hang. The split exists
-because ffmpeg 9.0.1 emits digitally silent audio from a combined `concat=v=1:a=1` graph
-for some source regions.
-Both passes use the same frame-snapped segment boundaries; audio is processed and encoded once.
+known to hang. The audio and the picture are separate runs because ffmpeg 9.0.1 emits digitally silent audio from a
+combined `concat=v=1:a=1` graph for some source regions.
+`audio-render.json` is the master's memo, `{key, cmd, sha256}`: `pipeline.audio_memo_key` covers the snapped segments,
+the source and isolation-track hashes, the audio-relevant settings and `render.RENDERER_VERSION`. The master replays
+only when the file exists, its sha256 equals the stored one and the key matches, so an overwritten master is rendered
+again, never trusted. Picture-only settings (`crf`, `preset`, `scale`) do not enter it.
+
+**The lock.** After the audio checks pass, `lock.write_lock` writes `edit-lock.json`: `lock.plan_digest` (the segments,
+the sources' sha256 and the isolation track's), the frame rate, and the master's sha256 and audio-packet MD5.
+`lock.check_lock` refuses a plan, fps or master that moved. A cook keeps a matching lock byte for byte and re-locks a
+changed plan on its own, unless the lock is held: `--stop-at-lock` writes `edit-lock.hold` beside it, and while the hold
+exists only a `--stop-at-lock` run may re-lock, so the plan the owner listened to cannot change under them. The full run
+that renders the held lock's picture deletes the hold. Hand workflows make the same file with `talkinghead lock`.
+
+**Picture.** `render.render_plan(..., audio_file=<locked master>, overlays=...)` runs one picture pass (one CFR decode
+per source run, `fps` then chained half-open `select` filters that drop the removed spans, frame-snapped, no audio) and
+then a `-c copy` mux of the master's first audio stream, packets unchanged. The picture pass avoids per-segment trim
+fan-out, which stalled on a native 4K HLG recording.
+The branch queue was a suspected cause; the observed failure was no output growth for 20 minutes.
+With overlays, `visuals.render.overlay_graph` extends the same graph, so the overlays are part of this one encode and
+the deliverable is `final-visuals.mp4`; with none it is `final.mp4`. A cook never writes both.
 `docs/render-proof.md` records why closed `between` intervals are unsafe: they remove one extra frame per grid-aligned cut.
 
 Colour is probed from the sources (`color.probe_color`): an HLG/PQ source is re-encoded
@@ -362,54 +383,74 @@ as 10-bit with its own primaries/matrix/transfer and `-map_metadata -1`, so a Do
 Vision record on the source cannot ride into an edited picture; an SDR source keeps the
 libx264/yuv420p encode. No tone-map LUT is ever applied implicitly.
 
-The `render.json` memo is keyed on the segment list, the encoder settings and
-`render.RENDERER_VERSION` (the version of the render chain itself, which the plan and
-settings cannot express): changing an unrelated config value must not re-encode a
-finished render, but changing the chain must.
+The picture's `render.json` memo is keyed on the segment list, the picture settings, the locked master's sha256, the
+overlays' identity (each asset's sha256) and the deliverable's name, plus `render.RENDERER_VERSION` (the version of the
+render chain itself, which the plan and settings cannot express): changing an unrelated config value must not
+re-encode a finished render, but changing the chain must.
 
-### 9. Verify (deterministic)
+**Companions.** Animations made outside the pipeline anchor on `audio/source-words.json` (the recording's words, in
+source seconds). `talkinghead timings` maps an anchor to output time with `timemap.map_span` (`kept`, `trimmed`,
+`split` or `cut`, from the same snapped cut), and `talkinghead render --lock L --window S:E` renders the picture of
+`timemap.window_segments(plan, S, E)`, the speaker footage under the animation. Both refuse a plan the lock does not
+match.
 
-`verify.collect_facts` measures the finished file - container/video/audio duration, LUFS,
-a fresh transcript of the render, join grades (`joins.check_join`), a two-sided source edge check (`join_edges`:
+### 9. Verify (deterministic, two tables)
+
+The audio table runs on `audio-master.m4a`, before any picture. `verify.collect_facts` measures it: audio stream
+(AAC, 48 kHz), duration, LUFS, a fresh transcript of the master (`prepare_audio(force=True)`, so a rewritten master is
+never judged on a stale WAV), join grades (`joins.check_join`), a two-sided source edge check (`join_edges`:
 a chopped voiced word on either side of a cut, judged on the source), residual dead air
 (`verify.residual_dead_air`: the source VAD silences that survive the plan; the gap budget
 counts only the excess over the pause caps, so pauses the policy keeps on purpose never
-count), pacing facts (`verify.pacing_facts`: kept pause lengths against the source's), source-to-output audio timing (`verify.measure_source_timing`), and color preservation (`verify.color_facts`).
+count), pacing facts (`verify.pacing_facts`: kept pause lengths against the source's), and source-to-output audio timing (`verify.measure_source_timing`).
 It writes the measurements to `verify/facts.json`.
 The report's `## Pacing` section prints the pacing facts (kept pause lengths by boundary type, and the quiet each cut reason leaves at its seam) as facts for the editor's ear, never a verdict.
 
-`verify.run_checks` evaluates twelve declarative checks (`CHECKS` in `verify.py`). Fatal:
-`duration`, `av_sync`, `loudness`, `cold_open` (first word within 0.5 s), `residual_gaps`,
-`render_silence` (measured on the render; the mute threshold is below one 16-bit PCM quantization step), `source_timing` (a
-sampled keep's audio more than 60 ms from where the plan put it) and `color` (a source's
-HDR colour silently converted, including right tags on an 8-bit stream). Warnings: `joins`, `join_edges`,
+`verify.run_checks` evaluates the declarative audio checks (`CHECKS` in `verify.py`). Fatal:
+`audio_stream`, `duration`, `loudness`, `cold_open` (first word within 0.5 s), `residual_gaps`,
+`render_silence` (measured on the master; the mute threshold is below one 16-bit PCM quantization step) and `source_timing` (a
+sampled keep's audio more than 60 ms from where the plan put it). Warnings: `joins`, `join_edges`,
 `source_similarity` (a sample that no longer correlates with the source, which the
 broadcast chain can legitimately cause) and `unclassified_voice` (voiced audio no word
 covers that the plan removes, with the re-transcription's text when one ran).
+
+The picture table (`verify.run_picture_checks`, `PICTURE_CHECKS`) runs on the finished picture and measures only what
+the picture can change, from `verify.collect_picture_facts`: `av_sync`, `color` (a source's HDR colour silently
+converted, including right tags on an 8-bit stream), `resolution` (the render's displayed size against the source
+through the configured scale) and `audio_locked`. `audio_locked` is fatal unless the MD5 of the picture's audio
+packets (`lock.audio_stream_md5`, `ffmpeg -map 0:a:0 -c copy -f md5 -`) equals the locked master's; packets survive the
+`-c copy` mux, so a changed byte anywhere in the audio fails it. These facts land under `"picture"` in
+`verify/facts.json`.
 
 A measurement that could not be taken is never reported as a pass: `source_timing` says
 `not measured` (and warns) when no keep is long enough, no window carries alignable audio,
 or nothing decodes, and distinguishes that from a run that never had a source path to
 measure. Any failing fatal check writes `report.md` with status FAILED and raises
-`PipelineError`, which the CLI turns into exit 1. The visuals pass never runs after a fatal
-check.
+`PipelineError`, which the CLI turns into exit 1. A fatal audio check stops the cook before the lock; neither the
+visuals planning nor the picture runs after it.
 
-### 10. Visuals (judge, second pass)
+### 10. Visuals (judge, planned before the picture)
 
-`visuals/stage.plan_visuals` chooses anchors, cards and the chapter plan card, memoised
-under `VISUALS_STAGE_VERSION` because it is judged and therefore must not be re-decided;
-screenshot research (`--no-research`) and chapter selection are single-sample judge calls.
-`visuals/render.render_visuals` composites the overlays in a second ffmpeg run over
-`final.mp4` with **the audio stream copied**, which is why every check above keeps its
-meaning and why `final.mp4` stays shippable without the overlays. The base's colour is
-probed: an SDR cut keeps the libx264/yuv420p encode, an HLG/PQ cut keeps its 10 bits and
-its tags, and the SDR overlay assets are converted into that system with the cube from
-`color.write_sdr_to_hdr_cube` (SDR white to BT.2408 graphics white) rather than tagged as
-if they were already HDR. With no overlays the pass is a stream copy, so there is nothing
-to convert.
-`visuals/verify.verify_visuals` proves that promise: the audio is untouched and the
-duration did not move, plus a contact sheet of frames at overlay midpoints and in clean
-control gaps, all under `verify/visuals/`. `--no-visuals` skips the stage.
+`visuals/stage.plan_visuals` chooses anchors, cards and the chapter plan card on the locked transcript
+(`verify/locked-transcript.json`, the words the approved master says), memoised under `VISUALS_STAGE_VERSION` because
+it is judged and therefore must not be re-decided; screenshot research (`--no-research`) and chapter selection are
+single-sample judge calls. It runs after the lock and before any picture exists.
+
+`visuals/headclip.check_head_clip_plan` then checks the overlay rectangle against the speaker on SOURCE frames: each
+sample's output time is located through `timemap.locate` (the snapped cut, the same one the picture renders) and the
+frame is read from the recording. A fatal `visuals_head_clip` stops the cook before any picture, because the fix is a
+corner, scale or margin change in the cook's config, which re-renders the picture anyway. A `--stop-at-lock` run does
+both steps before it stops, so the owner sees the overlay plan and the head-clip result next to the master.
+
+The overlays are drawn by the picture encode itself (stage 8): `visuals/render.overlay_inputs` adds one looped input per
+still and `overlay_graph` composites them with `enable=between(t,..)` windows over the cut's own `[vout]`. The base's
+colour is probed: an SDR cut keeps the libx264/yuv420p encode, an HLG/PQ cut keeps its 10 bits and its tags, and the
+SDR overlay assets are converted into that system with the cube from `color.write_sdr_to_hdr_cube` (SDR white to
+BT.2408 graphics white) rather than tagged as if they were already HDR. There is no second encode and no stream-copy
+pass over a finished file.
+`visuals/verify.verify_visuals` writes a contact sheet of frames at overlay midpoints and in clean control gaps under
+`verify/visuals/` (`visuals_frames`); the audio and duration promises it used to check are now `audio_locked` and the
+picture table. `--no-visuals` skips the stage, and the deliverable is then `final.mp4`.
 
 ### 11. Report
 
