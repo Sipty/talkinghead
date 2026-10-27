@@ -908,3 +908,69 @@ def test_overlays_on_an_hdr_plan_without_a_cube_are_refused(tmp_path: Path) -> N
     card = _white_card(tmp_path / "card.png")
     with pytest.raises(ValueError, match="cube"):
         build_commands(plan, str(tmp_path / "o.mp4"), RenderSettings(), "m.m4a", overlays=_card_overlays(card))
+
+
+def _solid_card(path: Path, color: str) -> Path:
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c={color}:s=100x60",
+                    "-vf", "format=rgb24", "-frames:v", "1", str(path)], check=True)
+    return path
+
+
+def _luma10_row(path: Path, t: float, y: int, width: int, height: int) -> tuple[int, ...]:
+    """The 10-bit luma of one whole row of the frame at `t`."""
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", str(path), "-frames:v", "1",
+                                   "-pix_fmt", "yuv420p10le", "-f", "rawvideo", "-"])
+    return tuple(int.from_bytes(raw[(y * width + x) * 2:(y * width + x) * 2 + 2], "little") for x in range(width))
+
+
+def test_a_ten_bit_ramp_keeps_its_precision_outside_the_card_on_the_overlaid_render(tmp_path: Path) -> None:
+    """An 8-bit overlay intermediate would band the picture outside the card, and the 10-bit encoder cannot
+    restore what that filter lost: outside the card the overlaid render must equal the bare one to one 10-bit level
+    (an 8-bit intermediate drifts by up to 4)."""
+    try:
+        hdr_codec()
+    except RuntimeError:
+        pytest.skip("this ffmpeg has no 10-bit HEVC encoder")
+    width, height = 1024, 180
+    src = tmp_path / "ramp.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+         f"nullsrc=s={width}x{height}:r=30:d=1,format=yuv420p10le,geq=lum='64+876*X/(W-1)':cb=512:cr=512,"
+         "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+         "-c:v", hdr_codec(), "-profile:v", "main10", "-pix_fmt", hdr_pix_fmt(hdr_codec()), "-b:v", "60M",
+         "-tag:v", "hvc1", *HLG.tags, "-c:a", "aac", "-b:a", "128k", str(src)], check=True)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 1.0), [Cut(0.9, 1.0, "silence")])
+    settings = RenderSettings(fps=30, preset="ultrafast")
+    card = _white_card(tmp_path / "card.png")
+    bare, drawn = tmp_path / "bare.mp4", tmp_path / "drawn.mp4"
+    render_plan(plan, str(bare), settings)
+    # 0.1 * 1024 = 102 wide, 61 tall, top-right with margin 40: the bottom row is nowhere near the card.
+    render_plan(plan, str(drawn), settings, overlays=_card_overlays(card, 0.0, 0.8, 0.1))
+
+    row = height - 1
+    got = _luma10_row(drawn, 0.4, row, width, height)
+    expected = _luma10_row(bare, 0.4, row, width, height)
+    assert max(abs(g - e) for g, e in zip(got, expected)) <= 1
+    assert len(set(got)) > 256                     # the ramp really is finer than 8 bits
+
+
+def test_a_pure_red_card_on_an_hlg_cut_reads_at_bt2020_luma_not_boosted_by_a_second_gamut_conversion(
+        tmp_path: Path) -> None:
+    """White only shows the transfer: red shows the gamut. Converting primaries on top of the cube puts pure red
+    about 60 levels high, which the white card cannot see."""
+    try:
+        hdr_codec()
+    except RuntimeError:
+        pytest.skip("this ffmpeg has no 10-bit HEVC encoder")
+    src = tmp_path / "src.mp4"
+    _hlg_clip(src, 4.0)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 4.0), [Cut(3.5, 4.0, "silence")])
+    white, red = _white_card(tmp_path / "white.png"), _solid_card(tmp_path / "red.png", "red")
+    out = tmp_path / "out.mp4"
+    overlays = Overlays((Placement("white", str(white), 0.2, 1.6, 0.3), Placement("red", str(red), 1.8, 3.2, 0.3)))
+    render_plan(plan, str(out), RenderSettings(fps=30, preset="ultrafast"), overlays=overlays)
+
+    # 0.3 * 320 = 96 wide, top-right with margin 40: x 184..280, y 40..98. Fades are 0.4 s per edge.
+    assert abs(_luma10(out, 0.9, 230, 70) - 721) <= 25        # HLG 0.75, not peak
+    assert abs(_luma10(out, 2.5, 230, 70) - 392) <= 25        # BT.2020 luma of that red
