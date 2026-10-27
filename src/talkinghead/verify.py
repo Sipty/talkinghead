@@ -206,6 +206,30 @@ def cut_word_fragments(plan: Plan, words: Sequence, removing: Sequence[tuple[flo
     return {"partial": partial, "audible": audible}
 
 
+def _stutter_kept_start(text: str, a: float, b: float) -> float | None:
+    """Estimated start of the kept word inside an ASR-merged stutter token such as `on-only`, else None.
+
+    The token is a stutter token only when, lowercased and stripped of punctuation, it reads `A-B` with `A` a
+    non-empty prefix of `B`. The stutter's share of the token is proportional to its letters, so a leading cut that
+    removes only the stutter is not a clip of the kept word.
+    """
+    parts = [re.sub(r"[^\w]", "", p, flags=re.UNICODE) for p in text.lower().split("-")]
+    if len(parts) != 2 or not parts[0] or not parts[1] or not parts[1].startswith(parts[0]):
+        return None
+    return a + (b - a) * len(parts[0]) / (len(parts[0]) + len(parts[1]))
+
+
+def _clip_share(w, a: float, b: float, hit: Sequence) -> float:
+    """Share of a word the cuts in `hit` take. For a stutter token, leading cuts (starting at or before the token)
+    are measured against the kept part alone and every other cut against the whole token; the two shares add up."""
+    kept_start = _stutter_kept_start(w.text, a, b)
+    if kept_start is None:
+        return sum(min(b, c.end) - max(a, c.start) for c in hit) / (b - a)
+    lead = [c for c in hit if c.start <= a + 1e-9]
+    rest = [c for c in hit if c.start > a + 1e-9]
+    lead_share = sum(max(0.0, min(b, c.end) - kept_start) for c in lead) / (b - kept_start)
+    rest_share = sum(min(b, c.end) - max(a, c.start) for c in rest) / (b - a)
+    return lead_share + rest_share
 
 
 def clipped_words(plan: Plan, words: Sequence,
@@ -246,7 +270,7 @@ def clipped_words(plan: Plan, words: Sequence,
             if cuts[i].end > a:
                 hit.append(cuts[i])
             i += 1
-        share = sum(min(b, c.end) - max(a, c.start) for c in hit) / (b - a)
+        share = _clip_share(w, a, b, hit)
         if share > CLIP_KEPT_SHARE:
             out.append({"text": w.text, "start": round(a, 3), "end": round(b, 3), "cut": round(share, 3),
                         "reasons": sorted({c.reason for c in hit}), "speaker": getattr(w, "speaker", None)})

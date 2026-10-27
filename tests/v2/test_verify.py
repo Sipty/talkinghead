@@ -705,3 +705,32 @@ def test_judged_removals_passes_when_every_judged_word_stays_removed() -> None:
 def test_judged_removals_is_not_measured_without_judged_decisions() -> None:
     res = verify._judged_removals(_judged_plan([]), {})
     assert res.ok and res.severity == "info"
+
+
+def _clipped(text: str, cut: tuple[float, float]) -> list[dict]:
+    plan = Plan.from_cuts(SourceInfo("main", "/x.wav", "x", 10.0), [Cut(cut[0], cut[1], "silence")])
+    return verify.clipped_words(plan, [Word(text, 1.0, 2.0, 1.0)], removing=[])
+
+
+def test_stutter_token_prefix_cut_is_not_a_clipped_word() -> None:
+    # "on- only" stamped as one token: cutting its left 32% removes the stutter, the kept "only" is whole.
+    assert _clipped("on-only", (0.9, 1.32)) == []
+    assert _clipped("Adver-advertising,", (0.9, 1.3)) == []
+
+
+def test_stutter_token_still_clipped_when_cut_on_the_right_or_eating_the_kept_part() -> None:
+    assert [x["text"] for x in _clipped("on-only", (1.68, 2.0))] == ["on-only"]
+    assert [x["text"] for x in _clipped("on-only", (0.9, 1.5))] == ["on-only"]
+
+
+def test_non_stutter_token_clipped_as_before_when_cut_32_percent_from_the_left() -> None:
+    assert [x["text"] for x in _clipped("re-run", (0.9, 1.32))] == ["re-run"]
+    assert [x["text"] for x in _clipped("only", (0.9, 1.32))] == ["only"]
+
+
+def test_stutter_token_still_clipped_when_leading_and_trailing_cuts_add_up() -> None:
+    # Each cut alone is within tolerance (0.085 of the kept part, 0.09 of the token); together they are 0.175.
+    plan = Plan.from_cuts(SourceInfo("main", "/x.wav", "x", 10.0),
+                          [Cut(0.9, 1.39, "silence"), Cut(1.91, 2.0, "silence")])
+    out = verify.clipped_words(plan, [Word("on-only", 1.0, 2.0, 1.0)], removing=[])
+    assert [x["text"] for x in out] == ["on-only"]
