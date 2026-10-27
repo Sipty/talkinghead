@@ -819,3 +819,42 @@ def test_source_quiet_at_accepts_a_valley_30_db_below_the_token_peak_even_above_
     assert quiet_at(1.2, 1.0, 1.4) is True
     db[110:120] = -15.0 - verify.QUIET_BELOW_PEAK_DB + 0.5  # just under 30 dB below the peak is speech, not a valley
     assert quiet_at(1.2, 1.0, 1.4) is False
+
+
+def _con_confident_env(tail_db: float) -> Envelope:
+    """5 ms source envelope around `con-confident` (token 1569.852-1570.512, peak -20 dB): a -34 dB breath at
+    1570.03-1570.04, then 10 ms steps -41.7, -45.6, -53.8, -58.9 from 1570.05, then `confident` at -20 dB.
+    `tail_db` fills the 15 ms right before the 1570.083 cut end (the last three frames)."""
+    fs = 0.005
+    db = np.full(int(1571.0 / fs), -60.0)
+
+    def put(a: float, b: float, v: float) -> None:
+        db[int(round(a / fs)):int(round(b / fs))] = v
+
+    put(1569.852, 1570.03, -22.0)
+    put(1570.03, 1570.04, -34.0)
+    put(1570.04, 1570.05, -45.0)
+    put(1570.05, 1570.06, -41.7)
+    put(1570.06, 1570.07, -45.6)
+    put(1570.07, 1570.08, -53.8)
+    put(1570.08, 1570.09, -58.9)
+    put(1570.09, 1570.512, -20.0)
+    put(1570.065, 1570.08, tail_db)
+    return Envelope(db=db, zcr=np.zeros_like(db), frame_sec=fs, sample_rate=SR16)
+
+
+def _con_confident_clipped(tail_db: float) -> list[dict]:
+    quiet_at = verify.source_quiet_at(_con_confident_env(tail_db))
+    plan = Plan.from_cuts(SourceInfo("main", "/x.wav", "x", 2000.0), [Cut(1569.867, 1570.083, "silence")])
+    return verify.clipped_words(plan, [Word("con-confident", 1569.852, 1570.512, 1.0)], removing=[], quiet_at=quiet_at)
+
+
+def test_con_confident_short_valley_passes_clipped_words_with_quiet_at(monkeypatch) -> None:
+    assert _con_confident_clipped(-58.0) == []
+    # the former 30 ms probe reached the -45.6 dB step before the valley and failed this very cook
+    monkeypatch.setattr(verify, "QUIET_PROBE_SEC", 0.03)
+    assert [x["text"] for x in _con_confident_clipped(-58.0)] == ["con-confident"]
+
+
+def test_short_probe_still_rejects_voicing_right_before_the_cut_end() -> None:
+    assert [x["text"] for x in _con_confident_clipped(-30.0)] == ["con-confident"]

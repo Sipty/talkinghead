@@ -245,8 +245,9 @@ def _clip_share(w, a: float, b: float, hit: Sequence,
 
 # A cut end counts as quiet when the source level just before it is this far below the speech level around it.
 QUIET_BELOW_PEAK_DB = 30.0
-# The source window before a cut end whose level decides quiet.
-QUIET_PROBE_SEC = 0.03
+# The source window before a cut end whose level decides quiet. It stays under one 60 fps frame (16.7 ms) so the probe
+# judges the audio at the cut end, not the breath a few frames before a short valley.
+QUIET_PROBE_SEC = 0.015
 
 
 def source_quiet_at(env: Envelope) -> Callable[[float, float, float], bool]:
