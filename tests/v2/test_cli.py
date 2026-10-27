@@ -414,3 +414,115 @@ def test_render_refines_joins_only_when_asked() -> None:
     parser = build_parser()
     assert parser.parse_args(["render", "plan.json", "--out", "out.mp4"]).refine_joins is False
     assert parser.parse_args(["render", "plan.json", "--out", "out.mp4", "--refine-joins"]).refine_joins is True
+
+
+def _video_plan(tmp_path: Path, cuts: list[Cut], name: str = "plan.json") -> tuple[Plan, Path]:
+    """A 6 s noise-and-testsrc recording and a hand-edited plan over it."""
+    src = tmp_path / "in.mp4"
+    if not src.exists():
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=6",
+             "-f", "lavfi", "-i", "anoisesrc=d=6:r=48000:seed=3", "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 6.0), cuts)
+    path = tmp_path / name
+    path.write_text(plan.to_json())
+    return plan, path
+
+
+def _config(tmp_path: Path) -> Path:
+    path = tmp_path / "talkinghead.toml"
+    path.write_text("fps = 30\n")
+    return path
+
+
+def _master(plan_path: Path, out: Path, cfg: Path) -> None:
+    assert main(["render", str(plan_path), "--audio-only", "--out", str(out), "--config", str(cfg)]) == 0
+
+
+def test_a_video_plan_audio_only_render_is_the_pictures_audio_master(tmp_path: Path) -> None:
+    from talkinghead.cli import render_settings_for
+    from talkinghead.lock import audio_stream_md5
+    from talkinghead.render import RenderSettings, render_audio_plan
+
+    plan, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    cfg = _config(tmp_path)
+    out = tmp_path / "audio-master.m4a"
+    _master(plan_path, out, cfg)
+    settings = render_settings_for(plan, load_config(cfg))
+    assert settings.fps == 30
+    expected = tmp_path / "expected.m4a"
+    render_audio_plan(plan, str(expected), RenderSettings(
+        fps=30, crossfade_sec=settings.crossfade_sec, loudness_lufs=settings.loudness_lufs))
+    assert audio_stream_md5(out) == audio_stream_md5(expected)
+    audio_plan = Plan.from_cuts(plan.sources["main"], [])
+    audio_plan.provenance = {"audio_only": True}
+    assert render_settings_for(audio_plan, load_config(cfg)).fps == 0
+
+
+def test_a_picture_render_requires_a_lock_and_names_the_way_to_make_one(
+        tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    _, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    out = tmp_path / "final.mp4"
+    assert main(["render", str(plan_path), "--out", str(out), "--config", str(_config(tmp_path))]) == 1
+    err = capsys.readouterr().err
+    assert "--lock" in err and "talkinghead lock" in err and "--audio-only" in err
+    assert not out.exists()
+
+
+def test_lock_then_render_muxes_the_locked_master_unchanged(tmp_path: Path) -> None:
+    from talkinghead.lock import audio_stream_md5
+
+    _, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    cfg = _config(tmp_path)
+    master = tmp_path / "audio-master.m4a"
+    _master(plan_path, master, cfg)
+    assert main(["lock", str(plan_path), "--audio", str(master), "--config", str(cfg)]) == 0
+    lock = tmp_path / "edit-lock.json"
+    assert lock.is_file() and not Path(f"{master}.check.m4a").exists()
+    out = tmp_path / "final.mp4"
+    assert main(["render", str(plan_path), "--out", str(out), "--lock", str(lock), "--config", str(cfg)]) == 0
+    assert audio_stream_md5(out) == audio_stream_md5(master)
+
+
+def test_lock_refuses_a_master_from_another_plan_and_an_audio_only_plan(
+        tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    _, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    _, other_path = _video_plan(tmp_path, [Cut(2.0, 3.0, "silence")], name="other.json")
+    cfg = _config(tmp_path)
+    master = tmp_path / "other-master.m4a"
+    _master(other_path, master, cfg)
+    assert main(["lock", str(plan_path), "--audio", str(master), "--config", str(cfg)]) == 1
+    assert "not this plan's audio master" in capsys.readouterr().err
+    assert not (tmp_path / "edit-lock.json").exists() and not Path(f"{master}.check.m4a").exists()
+
+    wav = tmp_path / "in.wav"
+    _tone_wav(wav)
+    audio_plan = Plan.from_cuts(SourceInfo("main", str(wav), "x", 3.0), [Cut(1.0, 1.5, "silence")])
+    audio_plan.provenance = {"audio_only": True}
+    audio_plan_path = tmp_path / "audio-plan.json"
+    audio_plan_path.write_text(audio_plan.to_json())
+    assert main(["lock", str(audio_plan_path), "--audio", str(master), "--config", str(cfg)]) == 1
+    assert "audio-only" in capsys.readouterr().err and not (tmp_path / "edit-lock.json").exists()
+
+
+def test_a_render_after_the_plan_was_edited_after_the_lock_is_refused(
+        tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    _, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    cfg = _config(tmp_path)
+    master = tmp_path / "audio-master.m4a"
+    _master(plan_path, master, cfg)
+    assert main(["lock", str(plan_path), "--audio", str(master), "--config", str(cfg)]) == 0
+    _video_plan(tmp_path, [Cut(2.0, 3.0, "silence")])
+    out = tmp_path / "final.mp4"
+    assert main(["render", str(plan_path), "--out", str(out), "--lock", str(tmp_path / "edit-lock.json"),
+                 "--config", str(cfg)]) == 1
+    assert "plan" in capsys.readouterr().err and not out.exists()
+
+
+def test_a_locked_render_refuses_refine_joins(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    _, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    out = tmp_path / "final.mp4"
+    assert main(["render", str(plan_path), "--out", str(out), "--lock", str(tmp_path / "edit-lock.json"),
+                 "--refine-joins", "--config", str(_config(tmp_path))]) == 1
+    assert "--refine-joins" in capsys.readouterr().err and not out.exists()

@@ -5,7 +5,8 @@
                     [--scribe-response JSON --scribe-audio WAV] [--no-output-asr]
                     [--profile DIR] [--refresh-preferences]
     talkinghead align VIDEO AUDIO [-o OUT] [--json] [--fix-drift] [--yes]
-    talkinghead render PLAN.json --out OUT.mp4 | OUT.wav --audio-only
+    talkinghead render PLAN.json --out OUT.mp4 --lock LOCK | OUT.m4a | OUT.wav --audio-only
+    talkinghead lock PLAN.json --audio MASTER.m4a [--out LOCK]
     talkinghead inspect OUT_DIR
     talkinghead board RUN_DIR [--spec JSON] [--out MP4]                 (experimental)
     talkinghead board-page RUN_DIR [--spec JSON] [--port N] [--no-open] (experimental)
@@ -51,6 +52,7 @@ from .judge import (
     judge_model,
     preflight,
 )
+from .lock import audio_stream_md5, check_lock, read_lock, write_lock
 from .pipeline import PipelineError, edge_context, run_pipeline, settings_fps
 from .profile import profile_dir, read_preferences
 from .prompts import system_prompt
@@ -253,6 +255,17 @@ def build_parser() -> argparse.ArgumentParser:
     rend.add_argument("--refine-joins", action="store_true",
                       help="refine the join placement against the recording's cached analysis first; "
                            "writes <out>.plan.json and <out>.joins.json beside the output")
+    rend.add_argument("--lock", default=None, metavar="LOCK",
+                      help="the edit lock that approves the audio (a picture render requires it; "
+                           "make one with `talkinghead lock`)")
+
+    lk = sub.add_parser("lock", help="approve a plan's audio master so the picture can be rendered from it")
+    lk.add_argument("plan")
+    lk.add_argument("--audio", required=True, metavar="MASTER.m4a",
+                    help="the audio master from `render PLAN --audio-only --out MASTER.m4a`")
+    lk.add_argument("--out", default=None, metavar="LOCK", help="lock file (default: edit-lock.json beside the plan)")
+    lk.add_argument("--config", default=None,
+                    help="TOML file with overrides (default: $TALKINGHEAD_CONFIG)")
 
     insp = sub.add_parser("inspect", help="print a run's report")
     insp.add_argument("out_dir")
@@ -506,6 +519,48 @@ def _refine_for_render(plan: Plan, cfg: Config, out: Path, *, audio_only: bool) 
     return refined
 
 
+def render_settings_for(plan: Plan, cfg: Config) -> RenderSettings:
+    """The one settings recipe the audio preview, the lock and the picture render share, so their audio is the same bytes.
+
+    A video plan snaps its edges to the picture's frame grid; an audio-only plan has no grid (fps=0)."""
+    return RenderSettings(fps=0 if plan.provenance.get("audio_only") else settings_fps(cfg),
+                          crossfade_sec=cfg.splice_crossfade_sec, loudness_lufs=cfg.loudness_lufs,
+                          crf=cfg.crf, preset=cfg.preset)
+
+
+def _checked_lock(plan: Plan, lock_arg: str, cfg: Config) -> Path:
+    """The locked audio's path, after proving the lock still describes this plan and frame rate."""
+    lock_path = Path(lock_arg)
+    lock = read_lock(lock_path)
+    return check_lock(lock, plan, fps=render_settings_for(plan, cfg).fps, lock_path=lock_path)
+
+
+def _lock_cmd(args: argparse.Namespace) -> int:
+    """Approve an audio master: prove it is this plan's own render, then write the lock the picture render needs."""
+    _check_tools()
+    cfg = load_config(_config_file(args.config))
+    plan = Plan.from_json(Path(args.plan).read_text())
+    if plan.provenance.get("audio_only"):
+        raise ValueError(f"{args.plan} is an audio-only plan: it has no picture to lock the audio for")
+    master = Path(args.audio)
+    if not master.is_file():
+        raise FileNotFoundError(f"audio master not found: {master}")
+    settings = render_settings_for(plan, cfg)
+    check = Path(f"{master}.check.m4a")
+    try:
+        render_audio_plan(plan, str(check), settings)
+        expected = audio_stream_md5(check)
+    finally:
+        check.unlink(missing_ok=True)
+    if audio_stream_md5(master) != expected:
+        raise RuntimeError(f"{master} is not this plan's audio master (its audio differs from a fresh render of "
+                           f"{args.plan}); render it again with "
+                           f"`talkinghead render {args.plan} --audio-only --out {master}`")
+    out = Path(args.out) if args.out else Path(args.plan).resolve().parent / "edit-lock.json"
+    write_lock(out, plan, master, fps=settings.fps)
+    print(f"locked {out}")
+    return 0
+
 
 def _command(args: argparse.Namespace) -> int:
     if args.cmd == "align":
@@ -534,21 +589,30 @@ def _command(args: argparse.Namespace) -> int:
         spec_path = Path(args.spec) if args.spec else run_dir / "board" / "board.json"
         serve_page(run_dir, spec_path, port=args.port, open_browser=not args.no_open)
         return 0
+    if args.cmd == "lock":
+        return _lock_cmd(args)
     if args.cmd == "render":
         _check_tools()
         cfg = load_config(_config_file(args.config))
         plan = Plan.from_json(Path(args.plan).read_text())
+        if args.lock and args.refine_joins:
+            raise ValueError("--lock cannot be combined with --refine-joins: refine the joins on the audio preview "
+                             "(`render PLAN --audio-only --refine-joins`), then lock the refined plan")
         if args.refine_joins:
             plan = _refine_for_render(plan, cfg, Path(args.out), audio_only=args.audio_only)
+        settings = render_settings_for(plan, cfg)
         if args.audio_only:
-            cmd = render_audio_plan(plan, args.out, RenderSettings(
-                fps=0, crossfade_sec=cfg.splice_crossfade_sec, loudness_lufs=cfg.loudness_lufs))
+            cmd = render_audio_plan(plan, args.out, settings)
         elif plan.provenance.get("audio_only"):
             raise ValueError(f"{args.plan} is an audio-only plan: pass --audio-only to render its WAV")
+        elif not args.lock:
+            raise ValueError("a picture render needs a lock, so the audio is approved before the picture is encoded: "
+                             f"`talkinghead render {args.plan} --audio-only --out audio-master.m4a`, then "
+                             f"`talkinghead lock {args.plan} --audio audio-master.m4a`, then "
+                             f"`talkinghead render {args.plan} --out {args.out} --lock edit-lock.json`")
         else:
-            settings = RenderSettings(fps=settings_fps(cfg), crf=cfg.crf, preset=cfg.preset,
-                                      crossfade_sec=cfg.splice_crossfade_sec, loudness_lufs=cfg.loudness_lufs)
-            cmd = render_plan(plan, args.out, settings)
+            audio = _checked_lock(plan, args.lock, cfg)
+            cmd = render_plan(plan, args.out, settings, audio_file=str(audio))
         print(f"rendered {args.out}")
         print(cmd, file=sys.stderr)
         return 0
