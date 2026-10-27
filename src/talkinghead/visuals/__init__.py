@@ -1,9 +1,9 @@
 """Visuals: corner overlays placed over the finished cut.
 
-The cut pipeline is untouched. Visuals run as a SECOND ffmpeg pass over
-`final.mp4` with the audio stream copied, so duration, av_sync, loudness,
-cold_open and residual_gaps keep their exact meaning and a bad overlay can
-never cost the cut. `final-visuals.mp4` is the deliverable.
+The cut pipeline is untouched. The overlays are composited inside the cut's one
+picture encode (`render.render_plan(..., overlays=...)`), muxed with the locked
+audio master, so the audio checks keep their exact meaning and no second lossy
+generation exists. `final-visuals.mp4` is the deliverable.
 """
 
 from __future__ import annotations

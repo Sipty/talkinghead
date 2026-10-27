@@ -63,7 +63,7 @@ def is_gif(data: bytes) -> bool:
 def rasterize_gif(data: bytes, out: Path) -> bool:
     """Rasterize a GIF's first frame to a real static PNG with ffmpeg.
 
-    render_visuals feeds each overlay through image2 with -loop/-framerate; a
+    The picture pass feeds each overlay through image2 with -loop/-framerate; a
     GIF demuxer can abort there, so a downloaded GIF is normalized to PNG. The
     temp source is always cleaned up.
     """

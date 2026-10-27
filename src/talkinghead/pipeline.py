@@ -40,11 +40,10 @@ from .verify import (
     residual_findings,
     run_checks,
     run_picture_checks,
-    visuals_resolution,
 )
 from .visuals.cards import avatar_fingerprint
 from .visuals.headclip import check_head_clip_plan
-from .visuals.render import render_visuals
+from .visuals.render import Overlays
 from .visuals.schedule import Placement
 from .visuals.stage import plan_visuals
 from .visuals.verify import verify_visuals
@@ -118,7 +117,8 @@ def _cut_identity(plan: Plan) -> dict:
 
 
 def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = False,
-                    audio_sha: str | None = None) -> str:
+                    audio_sha: str | None = None, overlays: Overlays | None = None,
+                    deliverable: str | None = None) -> str:
     """The render memo's key: what actually determines the pixels and the audio.
 
     The EDL, the encoder settings, and `RENDERER_VERSION` -- the version of the
@@ -128,7 +128,9 @@ def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = 
     `plan.to_json()` instead put provenance -- and so the whole config -- in the
     key, and changing an unrelated setting like visuals_min_hold re-encoded a
     finished 22-minute render that could have been reused byte for byte.
-    A picture render carries a given master, so `audio_sha` (the master's sha256) keys it too.
+    A picture render carries a given master, so `audio_sha` (the master's sha256) keys it too. Overlays (the placements,
+    their asset bytes, margin, fade and corner) and the deliverable's file name key it only when given, so a bare cut
+    keeps its key and a changed overlay setting re-renders the picture alone.
     """
     return stable_key({
         **_cut_identity(plan),
@@ -137,6 +139,8 @@ def render_memo_key(plan: Plan, settings: RenderSettings, *, audio_only: bool = 
         # Only an audio-only render adds the key, so existing video memos still replay.
         **({"audio_only": True} if audio_only else {}),
         **({"audio_sha": audio_sha} if audio_sha is not None else {}),
+        **({"overlays": overlays.identity()} if overlays is not None else {}),
+        **({"deliverable": deliverable} if deliverable is not None else {}),
         # The isolated track's bytes: a render that reads it must re-render when it changes. Absent when isolation is off.
         **({"isolation": plan.isolation["track"]["sha256"]} if plan.isolation else {}),
     }, 2)
@@ -880,44 +884,39 @@ def _run_pipeline(
         checks.append(hcheck)
         notes["visuals"]["head_clip"] = hfacts
         fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
+
+    final_visuals: Path | None = None
+    deliverable = final
+    if audio_only and config.visuals_enabled:
+        notes["visuals"] = {"skipped": "audio-only run: there is no picture to overlay"}
     if not audio_only and not fatal and not stopped:
-        picture_key = render_memo_key(plan, settings, audio_sha=lock["audio"]["sha256"])
+        # One picture encode is the deliverable: the cut with the planned overlays drawn inside it, carrying the
+        # locked master. Without placements it is the bare cut, `final.mp4`.
+        overlays = (Overlays(tuple(placements), margin=config.visuals_margin, fade=config.visuals_fade,
+                             corner=config.visuals_corner) if placements else None)
+        if overlays is not None:
+            final_visuals = deliverable = run.root / f"{prefix}final-visuals.mp4"
+        picture_key = render_memo_key(plan, settings, audio_sha=lock["audio"]["sha256"], overlays=overlays,
+                                      deliverable=deliverable.name if overlays is not None else None)
         picture_memo = run.root / f"{prefix}render.json"
         stored = run.read_json(picture_memo, default={})
-        if final.is_file() and stored.get("key") == picture_key and not fresh:
+        if deliverable.is_file() and stored.get("key") == picture_key and not fresh:
             picture_cmd = stored.get("cmd", "")
         else:
-            picture_cmd = render_plan(plan, str(final), settings, audio_file=str(locked_audio))
+            picture_cmd = render_plan(plan, str(deliverable), settings, audio_file=str(locked_audio),
+                                      overlays=overlays)
             run.write_json(picture_memo, {"key": picture_key, "cmd": picture_cmd})
         render_cmd = f"{render_cmd} && {picture_cmd}"
         facts["picture"] = collect_picture_facts(
-            plan, str(final), source_path=plan.sources[plan.main].path, scale=settings.scale,
-            locked_audio_md5=lock["audio"]["stream_md5"], rendered_audio_md5=audio_stream_md5(final))
+            plan, str(deliverable), source_path=plan.sources[plan.main].path, scale=settings.scale,
+            locked_audio_md5=lock["audio"]["stream_md5"], rendered_audio_md5=audio_stream_md5(deliverable))
         checks += run_picture_checks(plan, facts["picture"])
+        if overlays is not None:
+            vchecks, vfacts = verify_visuals(deliverable, placements, run.verify_dir / f"{prefix}visuals")
+            checks += vchecks
+            notes["visuals"]["verify"] = vfacts
         _hold_path(lock_path).unlink(missing_ok=True)  # the held lock's picture is rendered: the hold is released
         run.write_json(facts_path, {k: v for k, v in facts.items() if k not in ("words",)})
-        fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
-
-    # Visuals bake over the finished picture from the placements planned above, never as part of the cut: the audio
-    # stream is copied, so every check above keeps its meaning and a bad overlay cannot cost the cut. `final.mp4`
-    # stays shippable on its own.
-    final_visuals: Path | None = None
-    if audio_only and config.visuals_enabled:
-        notes["visuals"] = {"skipped": "audio-only run: there is no picture to overlay"}
-    if placements is not None and not fatal and not stopped:
-        final_visuals = run.root / f"{prefix}final-visuals.mp4"
-        # Width is probed from the render inside render_visuals: `facts` has no
-        # width, and a 1920 default put a 0.34 overlay across 76% of a
-        # demo-tier 854 px frame.
-        vcmd = render_visuals(str(final), placements, str(final_visuals),
-                              margin=config.visuals_margin, fade=config.visuals_fade,
-                              corner=config.visuals_corner)
-        vchecks, vfacts = verify_visuals(final, final_visuals, placements,
-                                         run.verify_dir / f"{prefix}visuals")
-        checks += vchecks
-        checks.append(visuals_resolution(str(final), str(final_visuals)))
-        notes["visuals"]["render_cmd"] = vcmd
-        notes["visuals"]["verify"] = vfacts
         fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
 
     if audio_only or not verify_output_asr:
@@ -930,7 +929,7 @@ def _run_pipeline(
     status = "FAILED" if fatal else "AUDIO LOCKED" if stopped else "OK"
     report_path.write_text(build_report(plan=plan, notes=notes, checks=checks, status=status, render_cmd=render_cmd,
                                         pacing=facts.get("pacing")))
-    result = RunResult(plan_path, final, report_path, checks, facts, notes, final_visuals,
+    result = RunResult(plan_path, deliverable, report_path, checks, facts, notes, final_visuals,
                        None if audio_only else master, lock_path if lock is not None and not fatal else None)
     if fatal:
         raise PipelineError("verification failed: " + "; ".join(c.line() for c in fatal) + f"\nreport: {report_path}")

@@ -66,7 +66,7 @@ def _image_dims(path: str | Path) -> tuple[int, int]:
 def overlay_rect(p: Placement, width: int, height: int, margin: int, corner: str) -> tuple[int, int, int, int]:
     """The on-screen rectangle the renderer will paint for this placement.
 
-    Mirrors build_overlay_command exactly: even width, height from the
+    Mirrors `overlay_graph` exactly: even width, height from the
     asset's own aspect, anchored per corner with the margin. Coordinates are
     (x, y, w, h) in base pixels.
     """

@@ -1,18 +1,12 @@
-"""The visuals pass: one ffmpeg run over the finished cut.
+"""The overlay graph: how placed stills are composited over a picture.
 
-One picture pass over the cut, leaving the cut pipeline unchanged. The base
-video's audio stream is COPIED, so loudness is untouched and the cut checks
-keep their meaning. Overlays are gated by `enable=between(t,...)` and
-faded on alpha, anchored to the top-right corner, the one region of this
-framing the speaker does not occupy.
+`render.render_plan` splices these builders into the cut's one picture pass, so overlays are drawn inside the same
+encode as the cut and cost no second generation. Overlays are gated by `enable=between(t,...)`, faded on alpha and
+anchored to a configurable corner of the frame.
 
-Colour: the bake must not cost the cut its colour. An SDR base keeps the
-libx264/yuv420p encode it always had; an HLG/PQ base is re-encoded as 10-bit
-with its own tags, and the SDR overlay assets are converted into that system
-with the cube from `color.py` -- a relabel would put an sRGB card into an HLG
-frame as if it were already HLG, and a straight SDR encode would drop the
-whole picture to 8-bit. With no overlays the pass is a stream copy, so there
-is nothing to convert.
+Colour: an SDR picture keeps the libx264/yuv420p encode it always had; an HLG/PQ picture stays 10-bit with its own
+tags, and the SDR overlay assets are converted into that system with the cube from `color.py` -- a relabel would put
+an sRGB card into an HLG frame as if it were already HLG.
 
 Duration and memory both took several attempts:
 
@@ -34,20 +28,10 @@ video through before a still's stream begins.
 from __future__ import annotations
 
 import subprocess
-import sys
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ..color import (
-    HDR_BITRATE,
-    ColorProfile,
-    decode_args,
-    encode_args,
-    probe_color,
-    without_hwaccel,
-    write_sdr_to_hdr_cube,
-)
+from ..color import ColorProfile
 from ..config import OVERLAY_CORNERS
 from ..store import sha256_file
 from .schedule import Placement
@@ -58,20 +42,6 @@ def probe_duration(path: str | Path) -> float:
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
         capture_output=True, text=True, check=True).stdout.strip()
     return float(out)
-
-
-def probe_width(path: str | Path) -> int:
-    """The base's real width.
-
-    Never assume 1920. The demo tier renders at -2:480, so a 0.34 overlay
-    scaled against a 1920 default came out 652 px wide on an 854 px frame --
-    76%% of the picture, covering the speaker instead of sitting in the corner.
-    """
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-         "stream=width", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True, check=True).stdout.strip().rstrip(",")
-    return int(out)
 
 
 def _even(x: float) -> int:
@@ -109,7 +79,7 @@ def _overlay_chain(i: int, input_index: int, p: Placement, width: int, fade: flo
 class Overlays:
     """Everything that decides what the overlays look like, apart from the picture they land on.
 
-    One value so a picture pass, a bake and a render memo all read the same
+    One value so a picture pass and a render memo both read the same
     placements, margin, fade and corner instead of passing four loose arguments.
     """
 
@@ -189,67 +159,3 @@ def overlay_graph(overlays: Overlays, *, base: str, first_input: int, width: int
         last = nxt
     return parts
 
-
-def build_overlay_command(
-    base: str, placements: list[Placement], out: str, *,
-    margin: int = 40, fade: float = 0.4, width: int = 1920,
-    base_duration: float | None = None, fps: int = 30, corner: str = "top-right",
-    color: ColorProfile | None = None, cube: str | None = None,
-    hdr_codec: str | None = None, hdr_bitrate: str = HDR_BITRATE,
-) -> list[str]:
-    """`color` is the base's profile; None means SDR (`probe_color` in the caller).
-
-    An HDR base without `cube` raises: composing SDR assets into HDR frames
-    without the conversion would be the relabel this pass exists to avoid.
-    """
-    overlays = Overlays(tuple(placements), margin=margin, fade=fade, corner=corner)
-    profile = color or ColorProfile()
-    if not placements:
-        # Nothing to draw: a stream copy, so the deliverable still exists and
-        # is byte-identical to the cut (and so is its colour).
-        return ["ffmpeg", "-y", "-v", "error", "-nostdin", "-i", base, "-c", "copy",
-                "-movflags", "+faststart", out]
-    graph = overlay_graph(overlays, base="[0:v]", first_input=1, width=width, color=profile, cube=cube)
-    # Only the base is decoded on the hardware; the stills are PNGs.
-    return [
-        "ffmpeg", "-y", "-v", "error", "-nostdin", *decode_args(profile.pix_fmt), "-i", base,
-        *overlay_inputs(overlays, fps=fps, duration=base_duration),
-        "-filter_complex", ";".join(graph),
-        "-map", "[vout]", "-map", "0:a",
-        *encode_args(profile, crf=18, preset="medium", codec=hdr_codec, bitrate=hdr_bitrate),
-        "-c:a", "copy", "-movflags", "+faststart", out,
-    ]
-
-
-def render_visuals(base: str, placements: list[Placement], out: str, *,
-                   margin: int = 40, fade: float = 0.4, width: int | None = None,
-                   corner: str = "top-right",
-                   hdr_codec: str | None = None, hdr_bitrate: str = HDR_BITRATE) -> str:
-    """Overlay `placements` onto `base`. Width, duration and colour are PROBED."""
-    color = probe_color(base)
-    work: tempfile.TemporaryDirectory | None = None
-    if color.hdr and placements:
-        # The cube is derived from the base's profile alone, and lives only as
-        # long as this bake: nothing on disk to go stale between cooks.
-        work = tempfile.TemporaryDirectory(prefix="talkinghead-visuals-")
-    try:
-        cube = str(write_sdr_to_hdr_cube(Path(work.name) / "sdr_to_hdr.cube", color)) if work else None
-        cmd = build_overlay_command(base, placements, out, margin=margin, fade=fade,
-                                    width=width or probe_width(base),
-                                    base_duration=probe_duration(base), corner=corner,
-                                    color=color, cube=cube,
-                                    hdr_codec=hdr_codec, hdr_bitrate=hdr_bitrate)
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0 and (soft := without_hwaccel(cmd)) != cmd:
-            print("talkinghead: hardware decode failed; rerunning the visuals pass with software decode",
-                  file=sys.stderr)
-            cmd, proc = soft, subprocess.run(soft, capture_output=True, text=True)
-        if proc.returncode != 0:
-            tail = "\n".join((proc.stderr or "").strip().splitlines()[-15:])
-            raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}):\n{tail}")
-        if not Path(out).is_file():
-            raise RuntimeError(f"visuals pass produced no file: {out}")
-        return " ".join(str(c) for c in cmd)
-    finally:
-        if work:
-            work.cleanup()

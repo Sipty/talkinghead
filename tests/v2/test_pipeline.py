@@ -385,26 +385,45 @@ def _visuals_cfg() -> Config:
                   visuals_min_gap=0.4, polish=False)
 
 
-def test_visuals_pass_writes_a_deliverable_and_leaves_the_cut_alone(clip: Path, tmp_path: Path) -> None:
-    """The whole promise of the second pass: `final.mp4` is untouched and
-    `final-visuals.mp4` has the same duration and the same audio stream."""
-    from talkinghead.visuals.render import probe_duration
+def test_visuals_pass_ships_one_picture_encode_with_the_overlays_inside_it(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`final-visuals.mp4` is the only picture written: one video encode, no `final.mp4`, and the picture table
+    (audio lock, sync, resolution) plus the contact sheet pass on it."""
+    import talkinghead.pipeline as pl
 
+    order: list[str] = []
+    _stub_head_clip(monkeypatch, order)
+    calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd and cmd[0] == "ffmpeg":
+            calls.append([str(c) for c in cmd])
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    rendered: list[dict] = []
+    real_render = pl.render_plan
+    monkeypatch.setattr(pl, "render_plan", lambda *a, **k: rendered.append(k) or real_render(*a, **k))
     assets = _visuals_assets(tmp_path)
     out = tmp_path / "out"
-    cfg = _visuals_cfg()
-    result = run_pipeline(str(clip), out, cfg, transcriber=PlanAwareTranscriber(out),
+    result = run_pipeline(str(clip), out, _visuals_cfg(), transcriber=PlanAwareTranscriber(out),
                           judge=_visuals_judge(), cache=Cache(tmp_path / "cache"),
                           guidelines="G", topic="t", assets_dir=assets)
-    assert result.final_visuals is not None and result.final_visuals.is_file()
-    assert result.final.is_file()
-    base_d, vis_d = probe_duration(result.final), probe_duration(result.final_visuals)
-    assert abs(vis_d - base_d) <= 0.05, f"visuals moved the duration: {vis_d} vs {base_d}"
+    assert result.final == out / "final-visuals.mp4" and result.final_visuals == result.final
+    assert result.final.is_file() and not (out / "final.mp4").exists()
+    assert len(rendered) == 1 and rendered[0]["overlays"] is not None and rendered[0]["overlays"].placements
+    # One-frame size probes carry -c:v too; a picture encode is the ffmpeg call that writes more than one frame.
+    encodes = [c for c in calls if "-c:v" in c and "-frames:v" not in c]
+    assert len(encodes) == 1 and "overlay=" in encodes[0][encodes[0].index("-filter_complex") + 1]
     report = result.report.read_text()
     assert "## Asset decisions" in report
     assert "quote_card" in report
     assert "## Plan card" in report
-    assert "visuals_duration" in report and "visuals_audio_copied" in report
+    names = {c.name for c in result.checks}
+    assert {"audio_locked", "av_sync", "resolution", "visuals_frames"} <= names
+    assert {n for n in names if n.startswith("visuals_")} == {"visuals_frames", "visuals_head_clip"}
     assert result.ok, [c.line() for c in result.checks if not c.ok]
 
 
@@ -926,7 +945,7 @@ def test_visuals_before_the_picture_are_planned_on_the_locked_words(
     result = run_pipeline(str(clip), out, _visuals_cfg(), transcriber=PlanAwareTranscriber(out),
                           judge=_visuals_judge(), cache=Cache(tmp_path / "cache"), guidelines="G", topic="t",
                           assets_dir=_visuals_assets(tmp_path))
-    assert order == ["plan_visuals", "head_clip", "render_plan"]  # the bake renders after the picture
+    assert order == ["plan_visuals", "head_clip", "render_plan"]  # one picture encode, after the gate
     locked = Transcript.from_dict(json.loads((out / "verify" / "locked-transcript.json").read_text()))
     assert words and words == locked.words
     assert seen[0]["placements"] and seen[0]["settings"].fps and seen[0]["work_dir"] == out / "verify" / "visuals"
@@ -976,3 +995,42 @@ def test_a_fatal_head_clip_stops_the_cook_before_any_picture(
     assert not (out / "final.mp4").exists() and not (out / "final-visuals.mp4").exists()
     report = (out / "report.md").read_text()
     assert "FAILED" in report and "visuals_head_clip" in report
+
+
+def test_a_changed_overlay_setting_re_renders_the_picture_only_and_an_unchanged_one_replays_it_overlay_settings_memo(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import talkinghead.pipeline as pl
+
+    order: list[str] = []
+    _record_order(monkeypatch, order)
+    _stub_head_clip(monkeypatch, order)
+    audio_renders: list[str] = []
+    real_audio = pl.render_audio_plan
+    monkeypatch.setattr(pl, "render_audio_plan", lambda *a, **k: audio_renders.append("audio") or real_audio(*a, **k))
+    out = tmp_path / "out"
+    cache = Cache(tmp_path / "cache")
+    assets = _visuals_assets(tmp_path)
+
+    def cook(cfg: Config, judge):
+        return run_pipeline(str(clip), out, cfg, transcriber=PlanAwareTranscriber(out), judge=judge, cache=cache,
+                            guidelines="G", topic="t", assets_dir=assets)
+
+    first = cook(_visuals_cfg(), _visuals_judge())
+    assert first.final == out / "final-visuals.mp4" and first.final_visuals == first.final
+    assert order.count("render_plan") == 1
+    rendered_at = first.final.stat().st_mtime_ns
+
+    order.clear()
+    audio_renders.clear()
+    same = cook(_visuals_cfg(), _visuals_judge())
+    assert "render_plan" not in order and same.final.stat().st_mtime_ns == rendered_at
+
+    order.clear()
+    audio_renders.clear()
+    moved_cfg = _visuals_cfg()
+    moved_cfg.visuals_corner = "top-left"
+    judge = _visuals_judge()
+    moved = cook(moved_cfg, judge)
+    assert order.count("render_plan") == 1 and audio_renders == [] and judge.calls == 0
+    assert moved.final.stat().st_mtime_ns != rendered_at

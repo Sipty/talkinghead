@@ -1,7 +1,7 @@
 """Head-clip check: overlay rect math, sampling, and the clip decision.
 
-The rect math must mirror build_overlay_command exactly -- a drift there
-checks a different rectangle than the bake paints. The detector itself is
+The rect math must mirror `overlay_graph` exactly -- a drift there
+checks a different rectangle than the picture pass paints. The detector itself is
 Apple Vision and only proven on real footage (see the run reports).
 """
 

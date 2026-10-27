@@ -583,13 +583,6 @@ def _resolution(plan: Plan, f: dict) -> CheckResult:
                        f"render {rw}x{rh} vs source {sw}x{sh} as displayed")
 
 
-def visuals_resolution(base: str, out: str) -> CheckResult:
-    """The overlay pass is what ships: it must keep the cut's frame size."""
-    (bw, bh), (ow, oh) = display_size(base), display_size(out)
-    return CheckResult("visuals_resolution", "fatal", (bw, bh) == (ow, oh),
-                       f"overlay render {ow}x{oh} vs cut {bw}x{bh}")
-
-
 def _word_cuts(plan: Plan) -> Plan:
     """The plan without intra-token restarts: they cut inside a word on purpose, so they are not clipped words."""
     return replace(plan, cuts=[c for c in plan.cuts if not is_intra_restart(c)])
