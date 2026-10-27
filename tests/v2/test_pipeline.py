@@ -537,3 +537,145 @@ def test_a_failed_demo_clip_cut_raises_a_runtime_error_and_leaves_no_file(tmp_pa
     with pytest.raises(RuntimeError, match="ffmpeg failed cutting the demo clip"):
         make_clip(str(tmp_path / "missing.mov"), 1.0, out)
     assert not out.exists()
+
+
+# ------------------------------------------------- audio assessment overlap
+
+def _stub_assessment(monkeypatch: pytest.MonkeyPatch, fn) -> None:
+    monkeypatch.setattr("talkinghead.pipeline.audio_assess.assess", fn)
+
+
+def _live_extra_threads() -> list:
+    import threading
+
+    return [t for t in threading.enumerate() if t is not threading.main_thread() and not t.daemon]
+
+
+def test_a_stateless_judges_assessment_alongside_the_editorial_stages_overlaps_them(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import talkinghead.pipeline as pl
+
+    structure_started = threading.Event()
+    seen: dict = {}
+
+    def assess(*a, **k):
+        seen["thread"] = threading.current_thread()
+        # Inline this would wait for a stage that cannot start until it returns.
+        seen["overlapped"] = structure_started.wait(10)
+        return {"skipped": "stub reading"}
+
+    real = pl.structure.run
+
+    def structure_run(ctx):
+        structure_started.set()
+        return real(ctx)
+
+    _stub_assessment(monkeypatch, assess)
+    monkeypatch.setattr(pl.structure, "run", structure_run)
+    monkeypatch.setattr(pl.restructure, "concurrent_safe", lambda judge: True)
+    out = tmp_path / "out"
+    result = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                          cache=Cache(tmp_path / "cache"), guidelines="G", topic="t")
+    assert seen["overlapped"] is True and seen["thread"] is not threading.main_thread()
+    assert result.ok and result.notes["audio_assessment"] == {"skipped": "stub reading"}
+    assert _live_extra_threads() == []
+
+
+def test_a_stateful_judges_assessment_inline_runs_before_the_first_render(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import talkinghead.pipeline as pl
+
+    order: list = []
+
+    def assess(*a, **k):
+        order.append(("assess", threading.current_thread() is threading.main_thread()))
+        return {"skipped": "stub reading"}
+
+    real_render = pl.render_plan
+    _stub_assessment(monkeypatch, assess)
+    monkeypatch.setattr(pl, "render_plan", lambda *a, **k: order.append(("render", True)) or real_render(*a, **k))
+    out = tmp_path / "out"
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                 cache=Cache(tmp_path / "cache"), guidelines="G", topic="t")
+    assert order[0] == ("assess", True) and ("render", True) in order[1:]
+
+
+def test_the_assessment_joined_before_run_pipeline_raises_when_the_editorial_stages_fail(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import talkinghead.pipeline as pl
+
+    release, finished = threading.Event(), threading.Event()
+
+    def assess(*a, **k):
+        release.wait(10)
+        finished.set()
+        return {"skipped": "stub reading"}
+
+    def boom(ctx):
+        # The assessment is still blocked when the stage fails; it is released a moment later.
+        threading.Timer(0.3, release.set).start()
+        raise RuntimeError("stage died")
+
+    _stub_assessment(monkeypatch, assess)
+    monkeypatch.setattr(pl.structure, "run", boom)
+    monkeypatch.setattr(pl.restructure, "concurrent_safe", lambda judge: True)
+    out = tmp_path / "out"
+    with pytest.raises(RuntimeError, match="stage died"):
+        run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                     cache=Cache(tmp_path / "cache"), guidelines="G", topic="t")
+    assert finished.is_set()
+    assert _live_extra_threads() == []
+
+
+def test_an_exception_raised_inside_the_assessment_surfaces_from_run_pipeline_before_rendering(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import talkinghead.pipeline as pl
+
+    class AssessmentDied(Exception):
+        pass
+
+    def assess(*a, **k):
+        raise AssessmentDied("assessment died")
+
+    rendered: list[bool] = []
+    real_render = pl.render_plan
+    _stub_assessment(monkeypatch, assess)
+    monkeypatch.setattr(pl, "render_plan", lambda *a, **k: rendered.append(True) or real_render(*a, **k))
+    monkeypatch.setattr(pl.restructure, "concurrent_safe", lambda judge: True)
+    out = tmp_path / "out"
+    with pytest.raises(AssessmentDied, match="assessment died"):
+        run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                     cache=Cache(tmp_path / "cache"), guidelines="G", topic="t")
+    assert rendered == []
+    assert _live_extra_threads() == []
+
+
+def test_a_plan_only_rebuild_replays_the_stored_assessment_without_calling_assess(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import talkinghead.pipeline as pl
+
+    out, cache = tmp_path / "out", Cache(tmp_path / "cache")
+    _stub_assessment(monkeypatch, lambda *a, **k: {"skipped": "stub reading"})
+    monkeypatch.setattr(pl.restructure, "concurrent_safe", lambda judge: True)
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                 cache=cache, guidelines="G", topic="t")
+
+    def refuse(*a, **k):
+        raise AssertionError("plan-only must not assess")
+
+    _stub_assessment(monkeypatch, refuse)
+    again = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge([]),
+                         cache=cache, guidelines="G", topic="t", plan_only=True)
+    assert again.notes["audio_assessment"] == {"skipped": "stub reading"}
+    assert _live_extra_threads() == []

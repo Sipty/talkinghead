@@ -9,6 +9,7 @@ import hashlib
 import inspect
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -375,6 +376,43 @@ def run_pipeline(
     refresh_preferences: bool = False,
     plan_only: bool = False,
 ) -> RunResult:
+    # The pool's exit joins its worker on every path (return, DECISION NEEDED, PipelineError, any exception), so the
+    # audio assessment never outlives the cook. No thread starts unless the cook submits the assessment.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-assessment") as pool:
+        return _run_pipeline(
+            video, out_dir, config, pool=pool, transcriber=transcriber, judge=judge, cache=cache,
+            guidelines=guidelines, topic=topic, demo_minutes=demo_minutes, decisions=decisions, audio=audio,
+            fix_drift=fix_drift, allow_bad_align=allow_bad_align, allow_av_mismatch=allow_av_mismatch, fresh=fresh,
+            assets_dir=assets_dir, audio_only=audio_only, verify_output_asr=verify_output_asr,
+            preferences=preferences, refresh_preferences=refresh_preferences, plan_only=plan_only)
+
+
+def _run_pipeline(
+    video: str,
+    out_dir: str | Path,
+    config: Config,
+    *,
+    pool: ThreadPoolExecutor,
+    transcriber: Transcriber,
+    judge: Judge,
+    cache: Cache,
+    guidelines: str,
+    topic: str | None,
+    demo_minutes: float | None,
+    decisions: dict | None,
+    audio: str | None,
+    fix_drift: bool,
+    allow_bad_align: bool,
+    allow_av_mismatch: bool,
+    fresh: bool,
+    assets_dir: str | Path | None,
+    audio_only: bool,
+    verify_output_asr: bool,
+    preferences: str,
+    refresh_preferences: bool,
+    plan_only: bool,
+) -> RunResult:
+    """The cook itself; `run_pipeline` owns the worker pool this runs the audio assessment on."""
     if audio_only and (audio is not None or demo_minutes is not None):
         raise PipelineError("an audio-only run has no picture to align an external recording onto or to clip "
                             "for a demo: drop --audio/--demo")
@@ -416,6 +454,30 @@ def run_pipeline(
     final = run.root / f"{prefix}final.{'wav' if audio_only else 'mp4'}"
     report_path = run.report
     base_inputs = _stage_inputs(ctx, guidelines)
+
+    if audio_only:
+        # No picture: no frame grid, no encoder settings; only the join and mastering inputs apply.
+        settings = RenderSettings(fps=0, crossfade_sec=config.splice_crossfade_sec, loudness_lufs=config.loudness_lufs)
+    else:
+        settings = RenderSettings(crf=config.crf, preset=config.preset, fps=config.fps,
+                                  crossfade_sec=config.splice_crossfade_sec, loudness_lufs=config.loudness_lufs)
+    if demo_minutes is not None:
+        settings = RenderSettings(crf=config.demo_crf, preset=config.demo_preset, scale=config.demo_scale,
+                                  fps=config.fps, crossfade_sec=config.splice_crossfade_sec,
+                                  loudness_lufs=config.loudness_lufs)
+
+    # The judge reads the recording's measured sound. Advisory; nothing downstream reads it, and it reads only the
+    # source, so with a stateless judge it runs on the pool while the editorial stages run. `assessment()` is the
+    # join: it returns the reading, or raises what the assessment raised, exactly as the inline call would.
+    def read_audio() -> dict:
+        return _audio_assessment(
+            run, ctx, source_sha=sha256_file(ctx.source.path), target_lufs=config.loudness_lufs,
+            true_peak_dbtp=settings.true_peak_dbtp,
+            judge=judge, guidelines=guidelines, fresh=fresh, plan_only=plan_only)
+
+    assessment = read_audio
+    if not plan_only and restructure.concurrent_safe(judge):
+        assessment = pool.submit(read_audio).result
 
     def memo_cuts(name: str, fn, extra: dict | None = None) -> tuple[list[Cut], dict]:
         payload = run.memo(
@@ -497,22 +559,8 @@ def run_pipeline(
             plan.anchors["hook_start"] = float(decided["cold_open"]["start"])
         return plan, cuts, joins
 
-    if audio_only:
-        # No picture: no frame grid, no encoder settings; only the join and mastering inputs apply.
-        settings = RenderSettings(fps=0, crossfade_sec=config.splice_crossfade_sec, loudness_lufs=config.loudness_lufs)
-    else:
-        settings = RenderSettings(crf=config.crf, preset=config.preset, fps=config.fps,
-                                  crossfade_sec=config.splice_crossfade_sec, loudness_lufs=config.loudness_lufs)
-    if demo_minutes is not None:
-        settings = RenderSettings(crf=config.demo_crf, preset=config.demo_preset, scale=config.demo_scale,
-                                  fps=config.fps, crossfade_sec=config.splice_crossfade_sec,
-                                  loudness_lufs=config.loudness_lufs)
-
-    # Before any render: the judge reads the recording's measured sound. Advisory; nothing downstream reads it.
-    notes["audio_assessment"] = _audio_assessment(
-        run, ctx, source_sha=sha256_file(ctx.source.path), target_lufs=config.loudness_lufs,
-        true_peak_dbtp=settings.true_peak_dbtp,
-        judge=judge, guidelines=guidelines, fresh=fresh, plan_only=plan_only)
+    # The assessment was submitted before the stages so it overlaps them (see `read_audio`); this is the join.
+    notes["audio_assessment"] = assessment()
 
     output: dict = {}
     if config.polish:
