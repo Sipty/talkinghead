@@ -539,3 +539,131 @@ def test_run_stop_at_lock_parses_and_is_refused_with_audio_only_or_plan_only(
     for flag in ("--audio-only", "--plan-only"):
         assert main(["run", str(wav), flag, "--stop-at-lock", "--judge", "shell:true"]) == 1
         assert "--stop-at-lock" in capsys.readouterr().err
+
+
+def _lock_for(tmp_path: Path, cuts: list[Cut]) -> tuple[Path, Path, Path]:
+    """A video plan, its approved audio master and the lock over both: (plan path, config, lock path)."""
+    _, plan_path = _video_plan(tmp_path, cuts)
+    cfg = _config(tmp_path)
+    master = tmp_path / "audio-master.m4a"
+    _master(plan_path, master, cfg)
+    assert main(["lock", str(plan_path), "--audio", str(master), "--config", str(cfg)]) == 0
+    return plan_path, cfg, tmp_path / "edit-lock.json"
+
+
+def test_timings_maps_every_anchor_status_onto_the_locked_plan(
+        tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    from talkinghead.lock import read_lock
+    from talkinghead.timemap import map_span
+
+    plan_path, cfg, lock = _lock_for(tmp_path, [Cut(1.0, 1.4, "silence")])
+    anchors = tmp_path / "anchors.json"
+    spans = {"kept": (0.2, 0.6), "trimmed": (0.8, 1.2), "split": (0.5, 2.0), "cut": (1.1, 1.3)}
+    anchors.write_text(json.dumps([{"id": k, "start": a, "end": b} for k, (a, b) in spans.items()]))
+    capsys.readouterr()
+    assert main(["timings", str(plan_path), "--lock", str(lock), "--anchors", str(anchors),
+                 "--config", str(cfg)]) == 0
+    out = tmp_path / "timings.json"
+    assert capsys.readouterr().out.splitlines()[0] == str(out)
+    data = json.loads(out.read_text())
+    plan = Plan.from_json(plan_path.read_text())
+    locked = read_lock(lock)
+    assert (data["plan_sha"], data["fps"], data["output_duration"]) == (
+        locked["plan_sha"], locked["fps"], locked["output_duration"])
+    rows = {r["id"]: r for r in data["anchors"]}
+    assert {k: r["status"] for k, r in rows.items()} == {k: k for k in spans}
+    for k, (a, b) in spans.items():
+        expected = map_span(plan, a, b, fps=30)
+        assert (rows[k]["pieces"], rows[k]["out_start"], rows[k]["out_end"]) == (
+            expected["pieces"], expected["out_start"], expected["out_end"])
+        assert (rows[k]["source"], rows[k]["start"], rows[k]["end"]) == ("main", a, b)
+    assert len(rows["split"]["pieces"]) == 2 and rows["cut"]["pieces"] == []
+
+
+def test_timings_prints_only_the_anchors_that_are_not_kept(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    plan_path, cfg, lock = _lock_for(tmp_path, [Cut(1.0, 1.4, "silence")])
+    anchors = tmp_path / "anchors.json"
+    anchors.write_text(json.dumps([{"id": "a", "start": 0.2, "end": 0.6}, {"id": "b", "start": 1.1, "end": 1.3}]))
+    out = tmp_path / "sub" / "t.json"
+    capsys.readouterr()
+    assert main(["timings", str(plan_path), "--lock", str(lock), "--anchors", str(anchors), "--out", str(out),
+                 "--config", str(cfg)]) == 0
+    assert capsys.readouterr().out.splitlines() == [str(out), "b: cut"]
+
+
+def test_timings_refuses_an_edited_plan_and_a_malformed_anchor_and_writes_nothing(
+        tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    plan_path, cfg, lock = _lock_for(tmp_path, [Cut(1.0, 1.4, "silence")])
+    anchors = tmp_path / "anchors.json"
+    good = [{"id": "a", "start": 0.2, "end": 0.6}]
+    anchors.write_text(json.dumps(good))
+    argv = ["timings", str(plan_path), "--lock", str(lock), "--anchors", str(anchors), "--config", str(cfg)]
+    bad_anchors = [
+        ([{"id": "a", "start": 0.2, "end": 0.6}, {"id": "flat", "start": 2.0, "end": 2.0}], "anchor 1"),
+        ([{"id": "back", "start": 3.0, "end": 2.0}], "back"),
+        ([{"id": "x", "start": "1", "end": 2}], "anchor 0"),
+        ([{"id": "nan", "start": float("nan"), "end": 1.0}], "nan"),
+        ([{"id": "inf", "start": 0, "end": float("inf")}], "inf"),
+        ([{"id": "z", "start": 0.0, "end": 1.0, "source": "nope"}], "z"),
+    ]
+    for entries, needle in bad_anchors:
+        anchors.write_text(json.dumps(entries))
+        assert main(argv) == 1
+        assert needle in capsys.readouterr().err
+        assert not (tmp_path / "timings.json").exists()
+    anchors.write_text(json.dumps(good))
+    _video_plan(tmp_path, [Cut(2.0, 3.0, "silence")])
+    assert main(argv) == 1
+    assert "plan" in capsys.readouterr().err and not (tmp_path / "timings.json").exists()
+
+
+def _frame(path: Path, index: int) -> np.ndarray:
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"select=eq(n\\,{index})", "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype=np.uint8).astype(np.float64)
+
+
+def _psnr(a: np.ndarray, b: np.ndarray) -> float:
+    mse = float(np.mean((a - b) ** 2))
+    return float("inf") if mse == 0 else 10 * np.log10(255.0 ** 2 / mse)
+
+
+def _probe(path: Path, entries: str, select: str) -> list[str]:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-count_frames", "-select_streams", select, "-show_entries", entries,
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True).stdout
+    return out.split()
+
+
+def test_a_window_matches_the_render_it_was_cut_from(tmp_path: Path) -> None:
+    plan_path, cfg, lock = _lock_for(tmp_path, [Cut(1.0, 1.4, "silence")])
+    final = tmp_path / "final.mp4"
+    assert main(["render", str(plan_path), "--out", str(final), "--lock", str(lock), "--config", str(cfg)]) == 0
+    passage = tmp_path / "passage.mp4"
+    start, end = 0.5, 1.5
+    assert main(["render", str(plan_path), "--lock", str(lock), "--window", f"{start}:{end}",
+                 "--out", str(passage), "--config", str(cfg)]) == 0
+    assert _probe(passage, "stream=index", "a") == []
+    assert _probe(passage, "stream=nb_read_frames", "v") == [str(round((end - start) * 30))]
+    first = round(start * 30)
+    for k in (3, 15, 27):
+        got = _frame(passage, k)
+        match = _psnr(got, _frame(final, first + k))
+        assert match > _psnr(got, _frame(final, first + k - 1))
+        assert match > _psnr(got, _frame(final, first + k + 1))
+
+
+def test_window_refuses_a_missing_lock_audio_only_and_refine_joins_and_writes_nothing(
+        tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    plan_path, cfg, lock = _lock_for(tmp_path, [Cut(1.0, 1.4, "silence")])
+    out = tmp_path / "passage.mp4"
+    base = ["render", str(plan_path), "--window", "0.5:1.5", "--out", str(out), "--config", str(cfg)]
+    for extra, needle in (([], "--lock"), (["--lock", str(lock), "--audio-only"], "--audio-only"),
+                          (["--lock", str(lock), "--refine-joins"], "--refine-joins")):
+        assert main(base + extra) == 1
+        assert needle in capsys.readouterr().err
+        assert not out.exists() and not Path(f"{out}.staged.mp4").exists()
+    assert main(["render", str(plan_path), "--window", "9:10", "--lock", str(lock), "--out", str(out),
+                 "--config", str(cfg)]) == 1
+    assert not out.exists()

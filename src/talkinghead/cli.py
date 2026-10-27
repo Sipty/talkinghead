@@ -7,6 +7,8 @@
     talkinghead align VIDEO AUDIO [-o OUT] [--json] [--fix-drift] [--yes]
     talkinghead render PLAN.json --out OUT.mp4 --lock LOCK | OUT.m4a | OUT.wav --audio-only
     talkinghead lock PLAN.json --audio MASTER.m4a [--out LOCK]
+    talkinghead render PLAN.json --lock LOCK --window START:END --out PASSAGE.mp4   (picture only, for companions)
+    talkinghead timings PLAN.json --lock LOCK --anchors ANCHORS.json [--out TIMINGS.json]
     talkinghead inspect OUT_DIR
     talkinghead board RUN_DIR [--spec JSON] [--out MP4]                 (experimental)
     talkinghead board-page RUN_DIR [--spec JSON] [--port N] [--no-open] (experimental)
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -56,10 +59,11 @@ from .lock import audio_stream_md5, check_lock, read_lock, write_lock
 from .pipeline import PipelineError, edge_context, run_pipeline, settings_fps
 from .profile import profile_dir, read_preferences
 from .prompts import system_prompt
-from .render import RenderSettings, render_audio_plan, render_plan
+from .render import RenderSettings, render_audio_plan, render_picture, render_plan
 from .stages.polish import POLISH_SCHEMA
-from .store import DEFAULT_CACHE_DIR, Cache
+from .store import DEFAULT_CACHE_DIR, Cache, atomic_write_text
 from .timeline import Plan
+from .timemap import map_span, window_segments
 from .transcribe import (
     ParakeetTranscriber,
     SavedScribeTranscriber,
@@ -261,6 +265,19 @@ def build_parser() -> argparse.ArgumentParser:
     rend.add_argument("--lock", default=None, metavar="LOCK",
                       help="the edit lock that approves the audio (a picture render requires it; "
                            "make one with `talkinghead lock`)")
+    rend.add_argument("--window", default=None, metavar="START:END",
+                      help="with --lock: render only the picture of output seconds [START, END), no audio "
+                           "(the speaker footage a companion animation composites)")
+
+    tm = sub.add_parser("timings", help="map source-time anchors to output time on a locked plan")
+    tm.add_argument("plan")
+    tm.add_argument("--lock", required=True, metavar="LOCK", help="the edit lock that approves the plan")
+    tm.add_argument("--anchors", required=True, metavar="ANCHORS.json",
+                    help='a list of {"id", "start", "end", "source"?} spans in source seconds')
+    tm.add_argument("--out", default=None, metavar="TIMINGS",
+                    help="timings file (default: timings.json beside the lock)")
+    tm.add_argument("--config", default=None,
+                    help="TOML file with overrides (default: $TALKINGHEAD_CONFIG)")
 
     lk = sub.add_parser("lock", help="approve a plan's audio master so the picture can be rendered from it")
     lk.add_argument("plan")
@@ -538,6 +555,72 @@ def _checked_lock(plan: Plan, lock_arg: str, cfg: Config) -> Path:
     return check_lock(lock, plan, fps=render_settings_for(plan, cfg).fps, lock_path=lock_path)
 
 
+def _parse_window(text: str) -> tuple[float, float]:
+    """START:END in output seconds. Plain seconds only: `MM:SS` would be ambiguous beside the separator."""
+    parts = text.split(":")
+    try:
+        if len(parts) != 2:
+            raise ValueError
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        raise ValueError(f"--window {text!r} is not START:END in seconds; pass for example --window 12.5:20") from None
+
+
+def _read_anchors(path: Path) -> list[dict]:
+    """The anchors file, every entry proved well formed before any is mapped, so a typo never half-writes timings."""
+    try:
+        raw = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise FileNotFoundError(f"anchors file not found: {path}") from None
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path} is not valid JSON ({e}); pass a list of {{\"id\", \"start\", \"end\"}} objects") from e
+    if not isinstance(raw, list):
+        raise ValueError(f"{path} must hold a JSON list of anchors, got {type(raw).__name__}")
+    seen: set[str] = set()
+    for i, a in enumerate(raw):
+        if not isinstance(a, dict) or not isinstance(a.get("id"), str) or not a["id"]:
+            raise ValueError(f"anchor {i} in {path} needs a non-empty string \"id\"")
+        name = f"anchor {i} ({a['id']!r})"
+        if a["id"] in seen:
+            raise ValueError(f"{name} repeats an id; give every anchor its own id")
+        seen.add(a["id"])
+        for key in ("start", "end"):
+            v = a.get(key)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f"{name} needs a finite numeric \"{key}\" in source seconds")
+        if a["end"] <= a["start"]:
+            raise ValueError(f"{name} ends at {a['end']} which is not after its start {a['start']}; fix the span")
+        if "source" in a and not isinstance(a["source"], str):
+            raise ValueError(f"{name} has a non-string \"source\"")
+    return raw
+
+
+def _timings_cmd(args: argparse.Namespace) -> int:
+    """Map source-time anchors to output time on the locked plan, so companions are timed before the picture exists."""
+    cfg = load_config(_config_file(args.config))
+    plan = Plan.from_json(Path(args.plan).read_text())
+    anchors = _read_anchors(Path(args.anchors))
+    _checked_lock(plan, args.lock, cfg)
+    lock = read_lock(Path(args.lock))
+    fps = render_settings_for(plan, cfg).fps
+    rows = []
+    for i, a in enumerate(anchors):
+        source = a.get("source") or plan.main
+        try:
+            mapped = map_span(plan, a["start"], a["end"], fps=fps, source=source)
+        except ValueError as e:
+            raise ValueError(f"anchor {i} ({a['id']!r}): {e}") from e
+        rows.append({"id": a["id"], "source": source, "start": a["start"], "end": a["end"], **mapped})
+    out = Path(args.out) if args.out else Path(args.lock).resolve().parent / "timings.json"
+    atomic_write_text(out, json.dumps({"plan_sha": lock["plan_sha"], "fps": lock["fps"],
+                                       "output_duration": lock["output_duration"], "anchors": rows}, indent=1) + "\n")
+    print(out)
+    for r in rows:
+        if r["status"] != "kept":
+            print(f"{r['id']}: {r['status']}")
+    return 0
+
+
 def _lock_cmd(args: argparse.Namespace) -> int:
     """Approve an audio master: prove it is this plan's own render, then write the lock the picture render needs."""
     _check_tools()
@@ -594,6 +677,8 @@ def _command(args: argparse.Namespace) -> int:
         return 0
     if args.cmd == "lock":
         return _lock_cmd(args)
+    if args.cmd == "timings":
+        return _timings_cmd(args)
     if args.cmd == "render":
         _check_tools()
         cfg = load_config(_config_file(args.config))
@@ -601,6 +686,21 @@ def _command(args: argparse.Namespace) -> int:
         if args.lock and args.refine_joins:
             raise ValueError("--lock cannot be combined with --refine-joins: refine the joins on the audio preview "
                              "(`render PLAN --audio-only --refine-joins`), then lock the refined plan")
+        if args.window is not None:
+            if not args.lock:
+                raise ValueError("--window renders a slice of the locked cut: pass --lock LOCK "
+                                 f"(`talkinghead lock {args.plan} --audio MASTER.m4a` makes one)")
+            if args.audio_only or args.refine_joins:
+                raise ValueError("--window renders the picture of a locked plan: it cannot be combined with "
+                                 "--audio-only or --refine-joins")
+            start, end = _parse_window(args.window)
+            _checked_lock(plan, args.lock, cfg)
+            settings = render_settings_for(plan, cfg)
+            excerpt = replace(plan, segments=window_segments(plan, start, end, fps=settings.fps))
+            cmd = render_picture(excerpt, args.out, settings)
+            print(f"rendered {args.out}")
+            print(cmd, file=sys.stderr)
+            return 0
         if args.refine_joins:
             plan = _refine_for_render(plan, cfg, Path(args.out), audio_only=args.audio_only)
         settings = render_settings_for(plan, cfg)
