@@ -105,6 +105,12 @@ def is_intra_restart(c: Cut) -> bool:
     return c.provenance.get("intra") is True
 
 
+def is_hand_cut(c: Cut) -> bool:
+    """A cut the owner wrote into a stage memo by hand (provenance `hand`). It is an exact decision: the edge chain
+    never moves, shrinks, splits or drops it, and an automatic cut on the same words gives way to it."""
+    return "hand" in c.provenance
+
+
 def _is_placed(c: Cut) -> bool:
     return c.reason in PLACED_REASONS or is_intra_restart(c)
 # A cut this close to a placed gap takes the ASR-stamped word extent (see asr_guarded), so the pair cannot clip a word.
@@ -1010,13 +1016,67 @@ def spare_other_speaker(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
 
 
 def _fit_placed(placed: list[Cut], others: list[Cut], ctx: EdgeContext) -> list[Cut]:
-    """Placed cuts trimmed around the other cuts, then snapped inward to whole frames."""
+    """Placed cuts trimmed around the other cuts, then snapped inward to whole frames.
+
+    A stutter-prefix cut then ends in the quiet valley before the kept word, not a frame into its onset
+    (see _settle_stutter_end)."""
     holes = [(c.start, c.end) for c in others]
     out = [Cut(a, b, c.reason, c.text, c.provenance) for c in placed for a, b in _subtract(c.start, c.end, holes)]
     out = [c for c in out if c.length >= ctx.min_cut]
     if ctx.fps:
         out = snap_to_frames(out, ctx.fps)
-    return [c for c in out if c.length >= ctx.min_cut]
+    out = [c for c in out if c.length >= ctx.min_cut]
+    return [_settle_stutter_end(c, ctx) for c in out]
+
+
+def _grid_hand(c: Cut, ctx: EdgeContext) -> Cut:
+    """A hand cut on the frame grid: each edge goes to the nearest grid point. A span that collapses or ends up no
+    longer than MIN_CUT (the plan drops those) becomes the smallest grid span enclosing it that is longer than
+    MIN_CUT. Provenance is kept; nothing later moves these bounds."""
+    if not ctx.fps:
+        return Cut(c.start, c.end, c.reason, c.text, dict(c.provenance))
+    fps = ctx.fps
+    lo, hi = round(c.start * fps), round(c.end * fps)
+    if (hi - lo) / fps - MIN_CUT <= 1e-9:
+        lo = math.floor(c.start * fps + 1e-6)
+        hi = max(math.ceil(c.end * fps - 1e-6), lo + 1)
+        while (hi - lo) / fps - MIN_CUT <= 1e-9:
+            if lo > 0 and (c.start * fps - lo <= hi - c.end * fps):
+                lo -= 1
+            else:
+                hi += 1
+    return Cut(lo / fps, hi / fps, c.reason, c.text, dict(c.provenance))
+
+
+def _yield_to_hand(cuts: list[Cut], hand: list[Cut], duration: float) -> list[Cut]:
+    """The hand spans plus the automatic cuts with the hand spans taken out.
+
+    Automatic remainders outside the hand spans keep their own edges. Records that touch or overlap fuse, as the plan
+    would fuse them anyway (the removed audio is the same); a fused record that holds hand audio keeps `hand`
+    provenance so refine_joins still leaves its edges alone."""
+    holes: list[tuple[float, float]] = []
+    for c in sorted(hand, key=lambda c: (c.start, c.end)):
+        if holes and c.start <= holes[-1][1]:
+            holes[-1] = (holes[-1][0], max(holes[-1][1], c.end))
+        else:
+            holes.append((c.start, c.end))
+    out = list(hand)
+    for c in cuts:
+        out += [Cut(a, b, c.reason, c.text, dict(c.provenance)) for a, b in _subtract(c.start, c.end, holes)
+                if b - a > MIN_CUT]
+    fused = merge_cuts(out, duration)
+    for c in fused:
+        if any(s < c.end and e > c.start for s, e in holes):
+            c.provenance.setdefault("hand", True)
+    return fused
+
+
+def _restart_token(c: Cut, words: list[RefinedWord]) -> RefinedWord | None:
+    """The restart-shaped source token ("on-only") whose broken-off start the output-pass cut `c` removes, else None."""
+    if c.provenance.get("pass") != "output" or c.provenance.get("kind") != "restart":
+        return None
+    return next((w for w in words if w.start - 1e-6 <= c.start and c.end <= w.end + 1e-6
+                 and _split_restart(w.text) is not None), None)
 
 
 def _is_token_fragment(c: Cut, words: list[RefinedWord]) -> bool:
@@ -1025,10 +1085,35 @@ def _is_token_fragment(c: Cut, words: list[RefinedWord]) -> bool:
     The render shows the fragment ("impl-") but the source has the whole token ("imple-implement"), so the cut
     covers only part of that token's audio. Like a placed restart it keeps its span: the token's other half is speech.
     """
-    if c.provenance.get("pass") != "output" or c.provenance.get("kind") != "restart":
-        return False
-    return any(w.start - 1e-6 <= c.start and c.end <= w.end + 1e-6 and _split_restart(w.text) is not None
-               for w in words)
+    return _restart_token(c, words) is not None
+
+
+def _settle_stutter_end(c: Cut, ctx: EdgeContext) -> Cut:
+    """A token-fragment cut whose frame-grid end sits inside the kept word's voicing ends in the quiet valley before it.
+
+    Flooring the raw end onto the grid can land one frame into the kept word. When the source envelope is not quiet
+    at the settled end (verify.source_quiet_at, the definition the clipped_words gate uses) but is quiet at an earlier
+    grid point within `splice_valley_window`, the end moves to the last such point, never inside the kept word's
+    voicing. With no valley the end stays where it was.
+    """
+    from .verify import source_quiet_at  # verify imports this module, so the dependency can only be taken lazily
+    w = _restart_token(c, ctx.words)
+    if w is None or not ctx.fps or not len(ctx.env.db):
+        return c
+    a, b = word_extent(w)
+    if not a < c.end < b:
+        return c
+    quiet = source_quiet_at(ctx.env)
+    if quiet(c.end, a, b):
+        return c
+    floor_t = max(c.start + ctx.min_cut, c.end - ctx.splice_valley_window)
+    for n in range(round(c.end * ctx.fps) - 1, 0, -1):
+        t = n / ctx.fps
+        if t < floor_t - 1e-9:
+            break
+        if quiet(t, a, b):
+            return Cut(c.start, t, c.reason, c.text, dict(c.provenance))
+    return c
 
 
 def _window(spans: list[tuple[float, float]], starts: list[float], longest: float, lo: float,
@@ -1557,13 +1642,15 @@ def _clip_conflicts(decided: set[int], ctx: EdgeContext) -> list[RefinedWord]:
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.given_back = []
     ctx.decisions = []
+    hand = [_grid_hand(c, ctx) for c in cuts if is_hand_cut(c)]
+    cuts = [c for c in cuts if not is_hand_cut(c)]   # the owner's cuts bypass the chain; automatic cuts yield to them
     decided = _decided_removed(cuts, ctx.words)
     judged_in = [c for c in cuts if c.reason in JUDGED_REASONS and not is_intra_restart(c)]
     conflicts = _clip_conflicts(decided, ctx)
     ctx.decided_words = decided
     ctx.dropped_fillers = 0
     ctx.spared_other_speaker = 0
-    placed = [c for c in cuts if _is_placed(c) or _is_token_fragment(c, ctx.words)]
+    placed = [c for c in cuts if (_is_placed(c) or _is_token_fragment(c, ctx.words))]
     cuts = [c for c in cuts if not _is_placed(c)]
     cuts = mark_asr_guard(cuts, [c for c in placed if c.reason in PLACED_REASONS])
     held = held_words(cuts, ctx.words)
@@ -1597,7 +1684,7 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
         # Last edge step: the render snaps every edge to the frame grid, so the cut edges must already be on it.
         out, given_grid = settle_grid(out, ctx, decided, judged_in)
     ctx.given_back = [(round(w.start, 6), round(w.end, 6)) for w in conflicts + given_grid] + ctx.given_back
-    return merge_cuts(out, ctx.duration)
+    return _yield_to_hand(merge_cuts(out, ctx.duration), hand, ctx.duration)
 
 
 REFINED_JOINS = "refined_joins"
@@ -1657,6 +1744,10 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
                   if abs(c.start - prev.end) <= EDGE_CUT_MATCH_SEC and abs(c.end - seg.start) <= EDGE_CUT_MATCH_SEC),
                  None)
         source_cut = cuts[k] if k is not None else Cut(prev.end, seg.start, "content")
+        if any(is_hand_cut(h) and h.end > prev.end - EDGE_CUT_MATCH_SEC and h.start < seg.start + EDGE_CUT_MATCH_SEC
+               for h in cuts):
+            rec["skipped"] = "owner's hand cut"
+            continue
         if k is not None and source_cut.provenance.get(SETTLED_KEY):
             rec["skipped"] = "settled by the fragment step"
             continue

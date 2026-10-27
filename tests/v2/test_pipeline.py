@@ -16,6 +16,10 @@ from talkinghead.store import Cache, RunDirConflict
 from talkinghead.timeline import Plan
 from talkinghead.transcribe import Transcript, Word
 
+from .test_polish import OrderedTranscriber, _keep, _window
+from .test_polish import _answers as _polish_answers
+from .test_polish import _cfg as _polish_cfg
+
 # Four tone "words" over near-silence; sentence-final punctuation on each.
 TONES = [(0.5, 1.0), (1.6, 2.2), (3.0, 3.5), (4.0, 4.6)]
 SRC_WORDS = [Word("Hello.", 0.5, 1.0, 1.0), Word("Second.", 1.6, 2.2, 1.0),
@@ -1092,3 +1096,32 @@ def test_a_visuals_cook_removes_a_stale_sibling_picture_and_keeps_one_of_its_own
     run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
                  cache=cache, guidelines="G")
     assert stale.is_file() and (out / "final-visuals.mp4").is_file()
+
+
+def test_hand_cut_survives_settling_when_it_overlaps_an_automatic_cut_on_the_same_words(
+        clip: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    cache = Cache(tmp_path / "cache")
+    span = {"cuts": [{"from_word": "w0002", "to_word": "w0002", "kind": "false-start", "why": "test"}]}
+    judge = FakeJudge(_polish_answers() + [_window()] + [_keep()] * 3 + [span] * 3)
+    first = run_pipeline(str(clip), out, _polish_cfg(), transcriber=OrderedTranscriber(out), judge=judge,
+                         cache=cache, guidelines="G", topic="t")
+    auto = [c for c in Plan.from_json(first.plan_path.read_text()).cuts if c.start <= 3.25 < c.end]
+    assert auto and "hand" not in auto[0].provenance
+
+    # The owner tightens the cut of "Third." (3.0-3.5 s) by hand, inside the automatic cut's span. The memo keeps both.
+    memo_path = out / "stages" / "polish.json"
+    memo = json.loads(memo_path.read_text())
+    memo["value"]["cuts"].append({"start": 3.06, "end": 3.44, "reason": "polish", "text": "Third.",
+                                  "provenance": {"hand": "owner tightened the cut"}})
+    memo_path.write_text(json.dumps(memo, indent=2))
+    second = run_pipeline(str(clip), out, _polish_cfg(), transcriber=OrderedTranscriber(out), judge=FakeJudge([]),
+                          cache=cache, guidelines="G", topic="t")
+    plan = Plan.from_json(second.plan_path.read_text())
+    cuts = [c for c in plan.cuts if c.start <= 3.25 < c.end]
+    # The hand span (3.06-3.44 rounded to the 30 fps grid) stays removed inside one fused record with the automatic
+    # cut's parts outside it (finalize_cuts' edges, 2.433-3.8; the first run's refine_joins nudged them to 2.467-3.767,
+    # but a join touching a hand cut is never refined).
+    assert [(c.start, c.end) for c in cuts] == [pytest.approx((2.433, 3.8), abs=1e-3)]
+    assert cuts[0].start <= 92 / 30 and cuts[0].end >= 103 / 30
+    assert cuts[0].provenance["hand"]

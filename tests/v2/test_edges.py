@@ -19,7 +19,7 @@ from talkinghead.edges import (
     steer_out_of_moans,
     sweep_to_quiet,
 )
-from talkinghead.timeline import Cut, Plan, Segment, SourceInfo
+from talkinghead.timeline import MIN_CUT, Cut, Plan, Segment, SourceInfo
 
 FLOOR = -50.0
 
@@ -646,3 +646,164 @@ def test_a_tangent_fused_with_a_restart_inside_it_leaves_no_kept_word_of_the_oth
     for w in words[1:]:
         mid = (w.start + w.end) / 2
         assert any(c.start <= mid < c.end for c in out), w.text
+
+
+# --- stutter-prefix cuts end in the quiet valley before the kept word; hand cuts are exact ---
+
+def _stutter_env(spans: list[tuple[float, float, float]]) -> Envelope:
+    """Quiet envelope (-60 dB) with the given (start, end, dBFS) spans painted over it."""
+    db = np.full(int(10.0 / FRAME_SEC), -60.0)
+    for s, e, level in spans:
+        db[round(s / FRAME_SEC): round(e / FRAME_SEC)] = level
+    return Envelope(db, np.zeros_like(db), FRAME_SEC, 16000)
+
+
+def _restart_cut(start: float, end: float) -> Cut:
+    """The output pass's cut of a broken-off start inside an ASR-merged stutter token."""
+    return Cut(start, end, "polish", "on-", {"pass": "output", "kind": "restart", "votes": 3, "span": [start, end]})
+
+
+def _stutter_ctx(words, env: Envelope, fps: float) -> EdgeContext:
+    ctx = _ctx(words, env=env)
+    ctx.fps = fps
+    return ctx
+
+
+def test_stutter_prefix_valley_30fps_settles_a_cut_one_frame_into_the_kept_word_to_the_valley() -> None:
+    # IMG_8748 shape: the stutter is voiced to 4.20, the valley is 4.20-4.30, "only" begins at 4.31 and the raw end
+    # 4.345 floors to the grid point 4.3333, one frame into the word.
+    env = _stutter_env([(3.0, 3.6, -25.0), (4.0, 4.20, -25.0), (4.31, 4.92, -25.0), (5.5, 6.0, -25.0)])
+    words = [_w("so", 3.0, 3.6), _w("on-only", 4.0, 4.92), _w("x", 5.5, 6.0)]
+    out = finalize_cuts([_restart_cut(4.0, 4.345)], _stutter_ctx(words, env, 30.0))
+    assert [(c.start, c.end) for c in out] == [pytest.approx((4.0, 129 / 30))]
+
+
+def test_stutter_prefix_valley_60fps_settles_a_cut_ending_in_voicing_to_the_last_valley_point() -> None:
+    # 2026-10-27 shape: stutter voiced to 3.14, valley 3.14-3.24, a voiced tail 3.24-3.30 where the raw end 3.283
+    # floors on the 60 fps grid (3.2667), then the kept word.
+    env = _stutter_env([(2.0, 2.6, -25.0), (3.0, 3.14, -25.0), (3.24, 3.30, -32.0), (3.30, 3.66, -22.0),
+                        (4.5, 5.0, -25.0)])
+    words = [_w("so", 2.0, 2.6), _w("con-confident", 3.0, 3.66), _w("x", 4.5, 5.0)]
+    out = finalize_cuts([_restart_cut(3.0, 3.283)], _stutter_ctx(words, env, 60.0))
+    assert [(c.start, c.end) for c in out] == [pytest.approx((3.0, 194 / 60))]
+
+
+def test_stutter_prefix_no_valley_unchanged() -> None:
+    env = _stutter_env([(3.0, 3.6, -25.0), (4.0, 4.92, -25.0), (5.5, 6.0, -25.0)])
+    words = [_w("so", 3.0, 3.6), _w("on-only", 4.0, 4.92), _w("x", 5.5, 6.0)]
+    out = finalize_cuts([_restart_cut(4.0, 4.345)], _stutter_ctx(words, env, 30.0))
+    assert [(c.start, c.end) for c in out] == [pytest.approx((4.0, 130 / 30))]
+
+
+def test_a_hand_cut_wins_over_an_automatic_cut_on_the_same_words_and_is_not_dropped() -> None:
+    env = _stutter_env([(2.0, 2.6, -25.0), (3.0, 3.14, -25.0), (3.24, 3.30, -32.0), (3.30, 3.66, -22.0),
+                        (4.5, 5.0, -25.0)])
+    words = [_w("so", 2.0, 2.6), _w("con-confident", 3.0, 3.66), _w("x", 4.5, 5.0)]
+    hand = Cut(2.99, 3.2400, "restart", "con-", {"hand": True, "kind": "restart"})
+    out = finalize_cuts([_restart_cut(3.0, 3.283), hand], _stutter_ctx(words, env, 60.0))
+    # Each hand edge goes to its nearest grid point (2.99 -> 179/60, 3.24 -> 194/60); the plan's removed audio keeps
+    # the whole hand span, in a record that carries the owner's provenance.
+    hands = [c for c in out if "hand" in c.provenance]
+    assert hands and hands[0].start <= 179 / 60 + 1e-9 and hands[0].end >= 194 / 60 - 1e-9
+
+
+def _hand(start: float, end: float, reason: str, **prov) -> Cut:
+    return Cut(start, end, reason, "", {"hand": True, **prov})
+
+
+def _hand_ctx(words, fps: float = 30.0) -> EdgeContext:
+    ctx = _ctx(words, env=_levels([(w.start, w.end, LOUD) for w in words]))
+    ctx.fps = fps
+    return ctx
+
+
+def test_hand_gap_and_intra_cuts_are_kept_with_their_bounds() -> None:
+    words = [_w("a", 0.2, 0.6), _w("b", 1.3, 1.7)]
+    ctx = _hand_ctx(words)
+    gap = finalize_cuts([_hand(0.66, 0.96, "gap")], ctx)
+    assert [(round(c.start * 30), round(c.end * 30)) for c in gap] == [(20, 29)]
+    assert gap[0].provenance["hand"] is True
+    intra = finalize_cuts([_hand(1.0, 1.16, "polish", intra=True)], ctx)
+    assert [(round(c.start * 30), round(c.end * 30)) for c in intra] == [(30, 35)]
+    assert intra[0].provenance["hand"] is True
+
+
+def test_a_hand_cut_of_a_whole_word_is_not_remerged_with_overlapping_automatic_cuts() -> None:
+    words = [_w("left", 2.0, 2.5), _w("Third", 3.0, 3.5), _w("right", 4.0, 4.5)]
+    ctx = _hand_ctx(words)
+    auto_alone = finalize_cuts([Cut(2.8, 3.7, "polish", "")], ctx)
+    out = finalize_cuts([Cut(2.8, 3.7, "polish", ""), _hand(3.0, 3.5, "polish")], ctx)
+    hands = [c for c in out if "hand" in c.provenance]
+    # The automatic cut keeps its edges outside the hand span; fused with the hand cut they remove the same audio.
+    assert [(c.start, c.end) for c in hands] == [(pytest.approx(auto_alone[0].start), pytest.approx(auto_alone[0].end))]
+
+
+def test_a_28ms_hand_cut_becomes_its_enclosing_frame() -> None:
+    ctx = _hand_ctx([_w("a", 0.2, 0.6), _w("b", 1.3, 1.7)])
+    out = finalize_cuts([_hand(0.701, 0.729, "polish")], ctx)
+    assert [(c.start, c.end) for c in out] == [pytest.approx((21 / 30, 22 / 30))]
+    assert out[0].provenance["hand"] is True
+
+
+def test_refine_joins_leaves_a_hand_cut_edge_alone() -> None:
+    # Quiet pockets either side of the hand cut would pull an automatic join outward onto them.
+    words = [_w("so", 0.2, 0.9), _w("next", 2.1, 2.9)]
+    env = _levels([(0.2, 0.9, LOUD), (0.94, 0.99, FLOOR), (0.99, 2.01, LOUD), (2.01, 2.06, FLOOR), (2.1, 2.9, LOUD)])
+    ctx = _ctx(words, env=env)
+    ctx.fps = 30.0
+    plan = _two_segment_plan(_hand(1.0, 2.0, "polish"))
+    refined, (record,) = refine_joins(plan, ctx)
+    assert record["moved"] is False and "hand" in record["skipped"]
+    assert [(s.start, s.end) for s in refined.segments] == [(s.start, s.end) for s in plan.segments]
+
+
+def _removed(cuts: list[Cut], duration: float) -> list[tuple[float, float]]:
+    """The removed audio of a plan built from `cuts`, as disjoint sorted spans."""
+    plan = Plan.from_cuts(SourceInfo("main", "rec.mov", "sha", duration), cuts)
+    kept = [(s.start, s.end) for s in plan.segments]
+    out, cursor = [], 0.0
+    for s, e in kept:
+        if s - cursor > 1e-9:
+            out.append((cursor, s))
+        cursor = e
+    if duration - cursor > 1e-9:
+        out.append((cursor, duration))
+    return out
+
+
+def _covers(spans: list[tuple[float, float]], a: float, b: float) -> bool:
+    return any(s <= a + 1e-9 and b <= e + 1e-9 for s, e in spans)
+
+
+@pytest.mark.parametrize("fps, autos, hands, must_remove, must_keep", [
+    # automatic [1,5] around hand [2,3]: both outside remainders survive.
+    (30.0, [(1.0, 5.0, "gap")], [(2.0, 3.0)], [(1.0, 5.0)], []),
+    # touching automatic and hand cuts fuse in the plan without changing the removed set.
+    (30.0, [(1.0, 2.0, "gap")], [(2.0, 3.0)], [(1.0, 3.0)], [(0.0, 1.0), (3.0, 10.0)]),
+    # overlapping hand cuts: the union is removed, nothing more.
+    (30.0, [], [(1.0, 3.0), (2.0, 4.0)], [(1.0, 4.0)], [(0.0, 1.0), (4.0, 10.0)]),
+    # a sub-frame hand cut at 60 fps survives as a span longer than MIN_CUT that encloses it.
+    (60.0, [], [(0.701, 0.707)], [(0.701, 0.707)], [(0.0, 0.68), (0.72, 10.0)]),
+    # a 28 ms hand cut at 30 fps becomes its enclosing frame.
+    (30.0, [], [(0.701, 0.729)], [(0.701, 0.729)], [(0.0, 0.69), (0.74, 10.0)]),
+    # hand edges round to the nearest grid point, the automatic cut outside is untouched.
+    (30.0, [(4.0, 6.0, "gap")], [(5.01, 5.99)], [(4.0, 6.0)], [(0.0, 4.0), (6.0, 10.0)]),
+])
+def test_the_removed_audio_is_the_hand_spans_plus_the_automatic_cuts_outside_them(
+        fps, autos, hands, must_remove, must_keep) -> None:
+    ctx = _hand_ctx([_w("a", 0.2, 0.6), _w("b", 8.0, 8.5)], fps)
+    cuts = [Cut(s, e, reason, "") for s, e, reason in autos] + [_hand(s, e, "polish") for s, e in hands]
+    final = finalize_cuts(cuts, ctx)
+    removed = _removed(final, ctx.duration)
+    for a, b in must_remove:
+        assert _covers(removed, a, b), (removed, a, b)
+    # Removed audio is exactly the hand spans on the grid plus the automatic parts: nothing beyond them.
+    for a, b in must_keep:
+        assert not any(s < b - 1e-9 and e > a + 1e-9 for s, e in removed), (removed, a, b)
+    # Every hand span, grid-rounded, is on the grid and longer than the plan's noise floor.
+    for s, e in removed:
+        assert e - s > MIN_CUT
+    # Neither refine_joins nor the plan moves the removed set where it meets a hand span.
+    plan = Plan.from_cuts(SourceInfo("main", "rec.mov", "sha", ctx.duration), final)
+    refined, _ = refine_joins(plan, ctx)
+    assert [(s.start, s.end) for s in refined.segments] == [(s.start, s.end) for s in plan.segments]
