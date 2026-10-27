@@ -808,3 +808,14 @@ def test_source_quiet_at_ignores_a_spike_in_the_frame_straddling_an_off_grid_tok
     db[200] = -5.0  # frame 1.000-1.005 straddles the token start, so it is not the token's own audio
     assert quiet_at(1.2, 1.001, 1.4) is False
     assert quiet_at(1.2, 1.001, 1.001) is False  # a token spanning no whole frame is never quiet
+
+
+def test_source_quiet_at_accepts_a_valley_30_db_below_the_token_peak_even_above_quiet_db() -> None:
+    fs = 0.01
+    db = np.full(300, -15.0)  # token 1.0-1.4 s peaks at -15 dB; the valley before the 1.2 s cut end sits above QUIET_DB
+    db[110:120] = -15.0 - verify.QUIET_BELOW_PEAK_DB
+    assert -15.0 - verify.QUIET_BELOW_PEAK_DB > verify.QUIET_DB
+    quiet_at = verify.source_quiet_at(Envelope(db=db, zcr=np.zeros_like(db), frame_sec=fs, sample_rate=SR16))
+    assert quiet_at(1.2, 1.0, 1.4) is True
+    db[110:120] = -15.0 - verify.QUIET_BELOW_PEAK_DB + 0.5  # just under 30 dB below the peak is speech, not a valley
+    assert quiet_at(1.2, 1.0, 1.4) is False
