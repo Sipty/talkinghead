@@ -55,13 +55,13 @@ from .judge import (
     judge_model,
     preflight,
 )
-from .lock import audio_stream_md5, check_lock, read_lock, write_lock
+from .lock import LockMismatch, audio_stream_md5, check_lock, read_lock, write_lock
 from .pipeline import PipelineError, edge_context, run_pipeline, settings_fps
 from .profile import profile_dir, read_preferences
 from .prompts import system_prompt
 from .render import RenderSettings, render_audio_plan, render_picture, render_plan
 from .stages.polish import POLISH_SCHEMA
-from .store import DEFAULT_CACHE_DIR, Cache, atomic_write_text
+from .store import DEFAULT_CACHE_DIR, Cache, atomic_write_text, sha256_file
 from .timeline import Plan
 from .timemap import map_span, window_segments
 from .transcribe import (
@@ -555,6 +555,18 @@ def _checked_lock(plan: Plan, lock_arg: str, cfg: Config) -> Path:
     return check_lock(lock, plan, fps=render_settings_for(plan, cfg).fps, lock_path=lock_path)
 
 
+def _check_sources(plan: Plan) -> None:
+    """Prove every source file still holds the bytes the plan recorded, so footage swapped after the audio was
+    approved is never rendered under that approval."""
+    for source in plan.sources.values():
+        path = Path(source.path)
+        if not path.is_file():
+            raise LockMismatch(f"source {path} is missing; restore it, or re-cook the plan and re-lock it")
+        if sha256_file(path) != source.sha256:
+            raise LockMismatch(f"source {path} changed since the plan recorded it (sha256 differs), so the approved "
+                               f"audio no longer matches it; re-cook the plan and lock it again")
+
+
 def _parse_window(text: str) -> tuple[float, float]:
     """START:END in output seconds. Plain seconds only: `MM:SS` would be ambiguous beside the separator."""
     parts = text.split(":")
@@ -631,6 +643,7 @@ def _lock_cmd(args: argparse.Namespace) -> int:
     master = Path(args.audio)
     if not master.is_file():
         raise FileNotFoundError(f"audio master not found: {master}")
+    _check_sources(plan)
     settings = render_settings_for(plan, cfg)
     check = Path(f"{master}.check.m4a")
     try:
@@ -695,6 +708,7 @@ def _command(args: argparse.Namespace) -> int:
                                  "--audio-only or --refine-joins")
             start, end = _parse_window(args.window)
             _checked_lock(plan, args.lock, cfg)
+            _check_sources(plan)
             settings = render_settings_for(plan, cfg)
             excerpt = replace(plan, segments=window_segments(plan, start, end, fps=settings.fps))
             cmd = render_picture(excerpt, args.out, settings)
@@ -702,7 +716,7 @@ def _command(args: argparse.Namespace) -> int:
             print(cmd, file=sys.stderr)
             return 0
         if args.refine_joins:
-            plan = _refine_for_render(plan, cfg, Path(args.out), audio_only=args.audio_only)
+            plan = _refine_for_render(plan, cfg, Path(args.out), audio_only=bool(plan.provenance.get("audio_only")))
         settings = render_settings_for(plan, cfg)
         if args.audio_only:
             cmd = render_audio_plan(plan, args.out, settings)
@@ -715,6 +729,7 @@ def _command(args: argparse.Namespace) -> int:
                              f"`talkinghead render {args.plan} --out {args.out} --lock edit-lock.json`")
         else:
             audio = _checked_lock(plan, args.lock, cfg)
+            _check_sources(plan)
             cmd = render_plan(plan, args.out, settings, audio_file=str(audio))
         print(f"rendered {args.out}")
         print(cmd, file=sys.stderr)

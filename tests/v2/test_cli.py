@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from talkinghead.align import ANALYSIS_SR, AlignResult
 from talkinghead.cli import build_judge, build_parser, build_transcriber, main, parse_time
 from talkinghead.config import Config, load_config
 from talkinghead.judge import ClaudeCodeJudge, FallbackJudge, ShellJudge, judge_model, prompt_sha
+from talkinghead.store import sha256_file
 from talkinghead.timeline import Cut, Plan, SourceInfo
 from talkinghead.transcribe import ParakeetTranscriber, ScribeTranscriber, WhisperTranscriber
 
@@ -424,7 +426,7 @@ def _video_plan(tmp_path: Path, cuts: list[Cut], name: str = "plan.json") -> tup
             ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=6",
              "-f", "lavfi", "-i", "anoisesrc=d=6:r=48000:seed=3", "-c:v", "libx264", "-preset", "ultrafast",
              "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
-    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 6.0), cuts)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), sha256_file(src), 6.0), cuts)
     path = tmp_path / name
     path.write_text(plan.to_json())
     return plan, path
@@ -667,3 +669,55 @@ def test_window_refuses_a_missing_lock_audio_only_and_refine_joins_and_writes_no
     assert main(["render", str(plan_path), "--window", "9:10", "--lock", str(lock), "--out", str(out),
                  "--config", str(cfg)]) == 1
     assert not out.exists()
+
+
+def test_a_render_after_the_source_changed_since_the_lock_is_refused_and_writes_nothing(
+        tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    plan_path, cfg, lock = _lock_for(tmp_path, [Cut(1.0, 1.4, "silence")])
+    src = tmp_path / "in.mp4"
+    src.write_bytes(src.read_bytes() + b"swapped")
+    final, passage = tmp_path / "final.mp4", tmp_path / "passage.mp4"
+    for extra, out in ((["--lock", str(lock)], final),
+                       (["--lock", str(lock), "--window", "0.5:1.5"], passage)):
+        assert main(["render", str(plan_path), "--out", str(out), "--config", str(cfg), *extra]) == 1
+        err = capsys.readouterr().err
+        assert str(src) in err and "re-cook" in err
+        assert not out.exists()
+
+
+def test_lock_refuses_a_changed_source_and_writes_no_lock(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    _, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    cfg = _config(tmp_path)
+    master = tmp_path / "audio-master.m4a"
+    _master(plan_path, master, cfg)
+    src = tmp_path / "in.mp4"
+    src.write_bytes(src.read_bytes() + b"swapped")
+    assert main(["lock", str(plan_path), "--audio", str(master), "--config", str(cfg)]) == 1
+    assert str(src) in capsys.readouterr().err
+    assert not (tmp_path / "edit-lock.json").exists() and not Path(f"{master}.check.m4a").exists()
+
+
+def test_refine_joins_on_a_video_plan_uses_the_frame_grid_even_when_only_audio_is_rendered(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, plan_path = _video_plan(tmp_path, [Cut(1.0, 1.4, "silence")])
+    cfg = tmp_path / "talkinghead.toml"
+    cfg.write_text('fps = 30\ntranscriber = "whisper"\n')
+    seen: dict = {}
+    monkeypatch.setattr("talkinghead.cli.build_transcriber",
+                        lambda *a, **k: types.SimpleNamespace(name="fake", version="0"))
+
+    def fake_analyze(*args, **kwargs):
+        seen["analysis_audio_only"] = kwargs["audio_only"]
+        return object()
+
+    def fake_edge_context(ctx, cfg, *, fps):
+        seen["fps"] = fps
+        return object()
+
+    monkeypatch.setattr("talkinghead.cli.analyze_recording", fake_analyze)
+    monkeypatch.setattr("talkinghead.cli.edge_context", fake_edge_context)
+    monkeypatch.setattr("talkinghead.cli.refine_joins", lambda plan, ctx: (plan, []))
+    out = tmp_path / "preview.m4a"
+    assert main(["render", str(plan_path), "--audio-only", "--refine-joins", "--out", str(out),
+                 "--config", str(cfg)]) == 0
+    assert seen == {"analysis_audio_only": False, "fps": 30.0}
