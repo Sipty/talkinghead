@@ -8,6 +8,7 @@ identical trims and encodes, so the bytes are the ones a single pass owed.
 
 import json
 import subprocess
+import tempfile
 import wave
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from talkinghead.render import (
     _run_decoding,
     _timeout,
     build_commands,
+    frame_size,
     join_audio,
     render_audio_plan,
     render_picture,
@@ -34,6 +36,8 @@ from talkinghead.render import (
 )
 from talkinghead.timeline import Cut, Plan, Segment, SourceInfo
 from talkinghead.verify import _loudness, measure_lufs
+from talkinghead.visuals.render import Overlays, _even
+from talkinghead.visuals.schedule import Placement
 
 HLG = ColorProfile(primaries="bt2020", transfer="arib-std-b67", matrix="bt2020nc",
                    range="tv", pix_fmt="yuv420p10le", hdr=True)
@@ -709,3 +713,198 @@ def test_an_audio_render_to_an_unsupported_suffix_is_refused_before_any_work(tmp
     with pytest.raises(ValueError, match="m4a"):
         render_audio_plan(plan, str(tmp_path / "out.flac"), RenderSettings(fps=0))
     assert sorted(p.name for p in tmp_path.iterdir()) == ["src.wav"]
+
+
+# --- overlays composited inside the cut's one picture encode ---
+
+def _white_card(path: Path) -> Path:
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=white:s=100x60",
+                    "-vf", "format=rgb24", "-frames:v", "1", str(path)], check=True)
+    return path
+
+
+def _luma_block(path: Path, t: float, x: int, y: int, *, size: tuple[int, int] = (320, 240), half: int = 4) -> float:
+    """The mean 8-bit luma of a small block around (x, y) in the frame at `t`."""
+    w, h = size
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", str(path), "-frames:v", "1",
+                                   "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+    rows = [raw[(j * w + x - half):(j * w + x + half)] for j in range(y - half, y + half)]
+    return sum(sum(r) for r in rows) / sum(len(r) for r in rows)
+
+
+def _luma10(path: Path, t: float, x: int, y: int, width: int = 320) -> int:
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", str(path), "-frames:v", "1",
+                                   "-pix_fmt", "yuv420p10le", "-f", "rawvideo", "-"])
+    return int.from_bytes(raw[(y * width + x) * 2:(y * width + x) * 2 + 2], "little")
+
+
+def _card_overlays(card: Path, start: float = 0.2, end: float = 2.6, scale: float = 0.3) -> Overlays:
+    return Overlays((Placement("card", str(card), start, end, scale),))
+
+
+def test_a_card_lands_in_its_corner_inside_the_cut_and_leaves_the_rest_of_the_picture_alone_overlay_in_the_cut(
+        tmp_path: Path) -> None:
+    plan = _cut_plan(tmp_path)                                    # 4 s source, 0.7 s cut: 3.3 s out
+    settings = RenderSettings(crf=18, preset="ultrafast")
+    card = _white_card(tmp_path / "card.png")
+    bare, drawn, audio = tmp_path / "bare.mp4", tmp_path / "drawn.mp4", tmp_path / "master.m4a"
+    render_audio_plan(plan, str(audio), settings)
+    render_plan(plan, str(bare), settings, audio_file=str(audio))
+    render_plan(plan, str(drawn), settings, audio_file=str(audio), overlays=_card_overlays(card))
+
+    # 0.3 * 320 = 96 wide, top-right with margin 40: x 184..280, y 40..98. The window midpoint is 1.4 s.
+    assert _luma_block(drawn, 1.4, 230, 65) > 225
+    assert abs(_luma_block(drawn, 1.4, 60, 190) - _luma_block(bare, 1.4, 60, 190)) <= 8     # outside the card
+    assert abs(_luma_block(drawn, 3.0, 230, 65) - _luma_block(bare, 3.0, 230, 65)) <= 8     # outside the window
+
+
+def test_an_overlaid_render_runs_one_video_encode_and_keeps_the_frames_and_the_master_one_encode(
+        tmp_path: Path, monkeypatch) -> None:
+    import talkinghead.render as render
+
+    plan = _cut_plan(tmp_path)
+    settings = RenderSettings(crf=28, preset="ultrafast")
+    card = _white_card(tmp_path / "card.png")
+    master, bare, drawn = tmp_path / "master.m4a", tmp_path / "bare.mp4", tmp_path / "drawn.mp4"
+    render_audio_plan(plan, str(master), settings)
+    render_plan(plan, str(bare), settings, audio_file=str(master))
+    ran: list[list[str]] = []
+    real = render._tool
+    monkeypatch.setattr(render, "_tool", lambda cmd, timeout: (ran.append(list(cmd)), real(cmd, timeout))[1])
+    render_plan(plan, str(drawn), settings, audio_file=str(master), overlays=_card_overlays(card))
+
+    # The size probe decodes one frame of the source to measure it; it writes no part of the render.
+    ffmpegs = [c for c in ran if c[0] == "ffmpeg" and "ffv1" not in c]
+    assert len(ffmpegs) == 2
+    assert sum("-c:v" in c for c in ffmpegs) == 1
+    mux = next(c for c in ffmpegs if "-c:v" not in c)
+    assert mux[mux.index("-c") + 1] == "copy"
+    assert _video(drawn)["nb_frames"] == _video(bare)["nb_frames"]
+    assert _packet_md5(drawn) == _packet_md5(master)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bare.mp4", "card.png", "drawn.mp4", "master.m4a", "src.mp4"]
+
+
+def test_a_card_on_an_hlg_source_keeps_main_10_and_reads_at_graphics_white_hlg_overlay(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    try:
+        hdr_codec()
+    except RuntimeError:
+        pytest.skip("this ffmpeg has no 10-bit HEVC encoder")
+    src = tmp_path / "src.mp4"
+    _hlg_clip(src, 4.0)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 4.0), [Cut(3.5, 4.0, "silence")])
+    card = _white_card(tmp_path / "card.png")
+    out = tmp_path / "out.mp4"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    render_plan(plan, str(out), RenderSettings(fps=30, preset="ultrafast"), overlays=_card_overlays(card, 0.2, 2.6))
+    assert list(scratch.iterdir()) == []
+
+    video = _video(out)
+    assert video["pix_fmt"] == "yuv420p10le" and video["profile"] == "Main 10"
+    assert (video["color_primaries"], video["color_transfer"], video["color_space"]) == \
+        ("bt2020", "arib-std-b67", "bt2020nc")
+    assert abs(_luma10(out, 1.4, 230, 70) - 721) <= 25
+
+
+def test_an_hlg_overlay_render_that_fails_leaves_no_cube_directory(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    try:
+        hdr_codec()
+    except RuntimeError:
+        pytest.skip("this ffmpeg has no 10-bit HEVC encoder")
+    src = tmp_path / "src.mp4"
+    _hlg_clip(src, 4.0)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 4.0), [Cut(3.5, 4.0, "silence")])
+    card = _white_card(tmp_path / "card.png")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    import talkinghead.render as render
+    seen: list[list[Path]] = []
+
+    def boom(cmd: list[str], timeout: float) -> str:
+        seen.append(list(scratch.iterdir()))
+        raise RuntimeError("encode failed")
+
+    monkeypatch.setattr(render, "_run_decoding", boom)
+    with pytest.raises(RuntimeError, match="encode failed"):
+        render_picture(plan, str(tmp_path / "out.mp4"), RenderSettings(fps=30, preset="ultrafast"),
+                       overlays=_card_overlays(card, 0.2, 2.6))
+    assert len(seen) == 1 and len(seen[0]) == 1          # the cube directory existed during the encode
+    assert list(scratch.iterdir()) == []
+
+
+def test_frame_size_is_the_ffprobe_size_of_the_render_and_a_card_scales_with_it_scaled_overlay(
+        tmp_path: Path) -> None:
+    plan = _cut_plan(tmp_path)
+    card = _white_card(tmp_path / "card.png")
+    for scale, expected in ((None, (320, 240)), ("-2:120", (160, 120))):
+        out = tmp_path / "out.mp4"
+        settings = RenderSettings(crf=28, preset="ultrafast", scale=scale)
+        assert frame_size(plan, settings) == expected
+        render_picture(plan, str(out), settings)
+        video = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                         "stream=width,height", "-of", "csv=p=0", str(out)], text=True)
+        assert tuple(int(v) for v in video.strip().split(",")) == expected
+
+    settings = RenderSettings(crf=28, preset="ultrafast", scale="-2:120")
+    out = tmp_path / "scaled.mp4"
+    render_picture(plan, str(out), settings, overlays=_card_overlays(card, 0.2, 2.6, 0.5))
+    width = _even(0.5 * 160)                                      # 80 px, top-right, margin 40: x 40..120
+    assert _luma_block(out, 1.4, 80, 50, size=(160, 120), half=3) > 225
+    assert _luma_block(out, 1.4, 120 - 3 + 8, 50, size=(160, 120), half=3) < 225      # right of the card's edge
+    assert _luma_block(out, 1.4, 40 + 3, 50, size=(160, 120), half=3) > 225           # inside its left edge
+    assert width == 80
+
+
+def test_frame_size_follows_a_non_square_source_pixel_aspect_in_the_scale_expression(tmp_path: Path) -> None:
+    src = tmp_path / "sar.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=320x240:r=30:d=1",
+                    "-vf", "setsar=2", "-c:v", "libx264", "-preset", "ultrafast", str(src)], check=True)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 1.0), [Cut(0.8, 1.0, "silence")])
+    settings = RenderSettings(crf=28, preset="ultrafast", scale="iw*sar:ih")
+    out = tmp_path / "out.mp4"
+    render_picture(plan, str(out), settings)
+    probed = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                      "stream=width,height", "-of", "csv=p=0", str(out)], text=True)
+    assert frame_size(plan, settings) == tuple(int(v) for v in probed.strip().split(",")) == (640, 240)
+
+
+def test_frame_size_of_a_rotated_non_square_source_is_the_rendered_size(tmp_path: Path) -> None:
+    flat = tmp_path / "flat.mp4"
+    src = tmp_path / "rot.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=320x240:r=30:d=1",
+                    "-vf", "setsar=2", "-c:v", "libx264", "-preset", "ultrafast", str(flat)], check=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-display_rotation", "90", "-i", str(flat),
+                    "-c", "copy", str(src)], check=True)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 1.0), [Cut(0.8, 1.0, "silence")])
+    settings = RenderSettings(crf=28, preset="ultrafast", scale="iw*sar:ih")
+    out = tmp_path / "out.mp4"
+    render_picture(plan, str(out), settings)
+    probed = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                      "stream=width,height", "-of", "csv=p=0", str(out)], text=True)
+    assert frame_size(plan, settings) == tuple(int(v) for v in probed.strip().split(",")[:2])
+
+
+def test_no_overlays_and_an_empty_set_build_the_commands_the_render_always_had(tmp_path: Path) -> None:
+    plan = _cut_plan(tmp_path)
+    settings = RenderSettings(crf=28, preset="ultrafast")
+    base = build_commands(plan, str(tmp_path / "o.mp4"), settings, "m.m4a")
+    assert build_commands(plan, str(tmp_path / "o.mp4"), settings, "m.m4a", overlays=None) == base
+    assert build_commands(plan, str(tmp_path / "o.mp4"), settings, "m.m4a", overlays=Overlays(())) == base
+    assert "[vbase]" not in " ".join(base[0])
+
+
+def test_overlays_on_an_hdr_plan_without_a_cube_are_refused(tmp_path: Path) -> None:
+    try:
+        hdr_codec()
+    except RuntimeError:
+        pytest.skip("this ffmpeg has no 10-bit HEVC encoder")
+    src = tmp_path / "src.mp4"
+    _hlg_clip(src, 2.0)
+    plan = Plan.from_cuts(SourceInfo("main", str(src), "x", 2.0), [])
+    card = _white_card(tmp_path / "card.png")
+    with pytest.raises(ValueError, match="cube"):
+        build_commands(plan, str(tmp_path / "o.mp4"), RenderSettings(), "m.m4a", overlays=_card_overlays(card))

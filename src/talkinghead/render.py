@@ -16,15 +16,25 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
 from . import isolate
-from .color import HDR_PIX_FMT, ColorProfile, decode_args, encode_args, probe_color, without_hwaccel
+from .color import (
+    HDR_PIX_FMT,
+    ColorProfile,
+    decode_args,
+    encode_args,
+    probe_color,
+    without_hwaccel,
+    write_sdr_to_hdr_cube,
+)
 from .store import DEFAULT_CACHE_DIR
 from .timeline import Plan, Segment
+from .visuals.render import Overlays, overlay_graph, overlay_inputs
 
 # Bumped whenever this module's pixels or audio would differ for an identical
 # plan and settings. Version 4: the picture is one CFR decode per source run
@@ -152,7 +162,7 @@ def _run_inputs(segments: list[Segment], order: list[str], fps: int | None) -> l
 
 def _video_graph(segments: list[Segment], input_index: dict[str, int],
                  settings: RenderSettings, profile: ColorProfile,
-                 run_inputs: list[tuple[int, float]] | None = None) -> str:
+                 run_inputs: list[tuple[int, float]] | None = None, out: str = "[vout]") -> str:
     """Select kept CFR frames per source run, avoiding per-segment branch fan-out.
 
     `run_inputs` gives each run its (input index, input seek); by default a run reads its
@@ -191,7 +201,7 @@ def _video_graph(segments: list[Segment], input_index: dict[str, int],
     # p010le for HDR: the 10 bits are the point of the profile, and scale
     # above already carries them.
     vchain.append(f"format={HDR_PIX_FMT if profile.hdr else 'yuv420p'}")
-    parts.append(f"[vcat]{','.join(vchain)}[vout]")
+    parts.append(f"[vcat]{','.join(vchain)}{out}")
     return ";".join(parts)
 
 
@@ -436,8 +446,48 @@ def _mastering_command(settings: RenderSettings, pcm: str, codec: list[str], des
     ]
 
 
-def _picture_command(plan: Plan, dest: str, settings: RenderSettings) -> list[str]:
-    """The picture pass alone: the plan's frame-snapped cut, colour handling and encoder, no audio stream."""
+def _drawn(overlays: Overlays | None) -> bool:
+    """Whether `overlays` put anything on the picture; None and an empty set leave the commands as they were."""
+    return overlays is not None and bool(overlays.placements)
+
+
+def frame_size(plan: Plan, settings: RenderSettings) -> tuple[int, int]:
+    """The (width, height) of the picture render's frames, as ffmpeg computes them.
+
+    One real frame of the first source is decoded by ffmpeg (autorotate and sample aspect ratio included)
+    and run through the picture graph's own `scale`, then the written frame is probed. Nothing here
+    evaluates a scale expression or assumes a size, so an overlay's width and the head-clip check
+    measure the true frame.
+    """
+    if not plan.segments:
+        raise RuntimeError("nothing to render: the plan removes the whole video")
+    path = plan.sources[_source_order(plan)[0]].path
+    timeout = RENDER_MIN_TIMEOUT_SEC
+    with tempfile.TemporaryDirectory(prefix="talkinghead-size-") as work:
+        frame = str(Path(work) / "frame.mkv")
+        cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0", "-frames:v", "1"]
+        # The format and codec only make the frame writable; neither changes its size.
+        chain = [f"scale={settings.scale}"] if settings.scale else []
+        proc = _tool(cmd + ["-vf", ",".join([*chain, "format=yuv420p"]), "-c:v", "ffv1", frame], timeout)
+        if proc.returncode != 0 or not Path(frame).exists():
+            raise RuntimeError(f"ffmpeg cannot render one frame of {path} through scale {settings.scale!r}: "
+                               f"{(proc.stderr or '').strip()[-200:]}")
+        probed = _tool(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=width,height", "-of", "csv=p=0", frame], timeout)
+    fields = probed.stdout.strip().splitlines()[0].rstrip(",").split(",") if probed.stdout.strip() else []
+    if probed.returncode != 0 or len(fields) < 2:
+        raise RuntimeError(f"cannot read the frame size of {path}: {(probed.stderr or '').strip()[-200:]}")
+    return int(fields[0]), int(fields[1])
+
+
+def _picture_command(plan: Plan, dest: str, settings: RenderSettings, *,
+                     overlays: Overlays | None = None, cube: str | None = None) -> list[str]:
+    """The picture pass alone: the plan's frame-snapped cut, colour handling and encoder, no audio stream.
+
+    `overlays` are spliced after the cut's concat/scale/format chain, in the same graph and encode; their
+    times are output times, which is what `t` is once the cut's `setpts` has run. The stills are extra
+    inputs after the sources, so only the sources carry hardware-decode flags.
+    """
     if not plan.segments:
         raise RuntimeError("nothing to render: the plan removes the whole video")
     if settings.strategy != "concat":
@@ -453,22 +503,33 @@ def _picture_command(plan: Plan, dest: str, settings: RenderSettings) -> list[st
     for sid, seek in inputs:
         cmd = cmd + decode[sid] + (["-ss", f"{seek:.6f}"] if seek else []) + ["-i", plan.sources[sid].path]
     per_run = [(i, seek) for i, (_, seek) in enumerate(seeked)] if seeked is not None else None
+    graph = _video_graph(segments, input_index, settings, profile, per_run,
+                         out="[vbase]" if _drawn(overlays) else "[vout]")
+    if _drawn(overlays):
+        if not settings.fps:
+            raise ValueError("overlays need a frame rate: render with a fps above 0")
+        cmd += overlay_inputs(overlays, fps=settings.fps, duration=sum(s.length for s in segments))
+        graph += ";" + ";".join(overlay_graph(
+            overlays, base="[vbase]", first_input=len(inputs), width=frame_size(plan, settings)[0],
+            color=profile, cube=cube))
     return cmd + [
-        "-filter_complex", _video_graph(segments, input_index, settings, profile, per_run),
+        "-filter_complex", graph,
         "-map", "[vout]", "-an",
         *encode_args(profile, crf=settings.crf, preset=settings.preset),
         dest,
     ]
 
 
-def build_commands(plan: Plan, out_path: str, settings: RenderSettings, audio_file: str) -> list[list[str]]:
+def build_commands(plan: Plan, out_path: str, settings: RenderSettings, audio_file: str, *,
+                   overlays: Overlays | None = None, cube: str | None = None) -> list[list[str]]:
     """The picture pass and the stream-copy mux of `audio_file`'s first audio stream, in order.
 
     The audio is never encoded here: it is the master `render_audio_plan` wrote, so the video carries
-    those packets unchanged.
+    those packets unchanged. `overlays` (with `cube` for an HDR plan) go into the picture pass, the
+    only video encode.
     """
     picture, _, staged = _parts(out_path)
-    picture_cmd = _picture_command(plan, picture, settings)
+    picture_cmd = _picture_command(plan, picture, settings, overlays=overlays, cube=cube)
     mux_cmd = [
         "ffmpeg", "-y", "-v", "error", "-nostdin",
         "-i", picture, "-i", audio_file,
@@ -509,27 +570,40 @@ def _run_decoding(cmd: list[str], timeout: float) -> list[str]:
     return soft
 
 
-def render_picture(plan: Plan, out_path: str, settings: RenderSettings) -> str:
+def render_picture(plan: Plan, out_path: str, settings: RenderSettings, *, overlays: Overlays | None = None) -> str:
     """Render the picture alone (no audio stream) and return the command line.
 
     Any plan can be rendered this way, an excerpt included, without touching audio. The file is staged
     beside the output and replaced atomically, so `out_path` never holds a half-written picture.
+    `overlays` are composited inside this one encode; an HDR plan's SDR-to-HDR cube lives in a temp
+    dir that is gone when the call returns.
     """
     staged = f"{out_path}.staged.mp4"
-    cmd = _picture_command(plan, staged, settings)
+    work: tempfile.TemporaryDirectory | None = None
     try:
+        cube = None
+        if _drawn(overlays) and plan.segments:
+            profile = plan_color(plan, _source_order(plan))
+            if profile.hdr:
+                work = tempfile.TemporaryDirectory(prefix="talkinghead-overlays-")
+                cube = str(write_sdr_to_hdr_cube(Path(work.name) / "sdr_to_hdr.cube", profile))
+        cmd = _picture_command(plan, staged, settings, overlays=overlays, cube=cube)
         ran = _run_decoding(cmd, _timeout(plan))
         os.replace(staged, out_path)
     finally:
         Path(staged).unlink(missing_ok=True)
+        if work:
+            work.cleanup()
     return " ".join(str(c) for c in ran)
 
 
-def render_plan(plan: Plan, out_path: str, settings: RenderSettings, *, audio_file: str | None = None) -> str:
+def render_plan(plan: Plan, out_path: str, settings: RenderSettings, *, audio_file: str | None = None,
+                overlays: Overlays | None = None) -> str:
     """Render the picture and mux an audio master onto it by stream copy; return the command lines for the report.
 
     `audio_file` is the master to carry. Without it the master is rendered first by `render_audio_plan`
     (the one audio encoder), so a video's audio is always a standalone master whose packets the mux keeps.
+    `overlays` are drawn in the picture pass, so the video is still encoded once.
     """
     if not plan.segments:
         raise RuntimeError("nothing to render: the plan removes the whole video")
@@ -540,7 +614,7 @@ def render_plan(plan: Plan, out_path: str, settings: RenderSettings, *, audio_fi
         if audio_file is None:
             cmds.append(render_audio_plan(plan, audio_tmp, settings))
             audio_file = audio_tmp
-        cmds.append(render_picture(plan, picture, settings))
+        cmds.append(render_picture(plan, picture, settings, overlays=overlays))
         mux = build_commands(plan, out_path, settings, audio_file)[1]
         _run(mux, _timeout(plan))
         cmds.append(" ".join(str(c) for c in mux))
