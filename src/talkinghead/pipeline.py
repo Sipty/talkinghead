@@ -21,13 +21,13 @@ from .config import ISOLATE_KEYS, Config
 from .context import Context, NeedsDecision
 from .edges import WORD_CUT_REASONS, EdgeContext, finalize_cuts, is_intra_restart, refine_joins
 from .judge import Judge
-from .lock import audio_stream_md5
+from .lock import LockMismatch, audio_stream_md5, check_lock, read_lock, write_lock
 from .profile import snapshot_preferences
 from .render import RENDERER_VERSION, RenderSettings, render_audio_plan, render_plan
 from .report import build_report
 from .residual import same_occurrence
 from .stages import content, pauses, polish, restructure, retakes, structure
-from .store import Cache, RunDir, sha256_file, stable_key
+from .store import Cache, RunDir, atomic_write_text, sha256_file, stable_key
 from .timeline import Cut, Plan
 from .transcribe import Transcriber
 from .types import JUDGED_REASONS
@@ -71,6 +71,7 @@ class RunResult:
     notes: dict = field(default_factory=dict)
     final_visuals: Path | None = None
     audio_master: Path | None = None  # the audio master of a video cook; None for an audio-only cook
+    lock: Path | None = None  # the cook's edit-lock.json; None for audio-only cooks and cooks stopped before the gate
 
     @property
     def ok(self) -> bool:
@@ -193,6 +194,44 @@ def _audio_master(run: RunDir, plan: Plan, settings: RenderSettings, master: Pat
         run.write_json(kept_memo, {"cmd": cmd, "sha256": sha256_file(kept)})
     run.write_json(memo_path, {"key": key, "cmd": cmd, "sha256": sha256_file(master)})
     return cmd
+
+
+def _previous_plan_sha(lock_path: Path) -> str | None:
+    """The plan sha an unusable-or-stale lock recorded, for the report; None when the file says nothing."""
+    try:
+        recorded = json.loads(lock_path.read_text()).get("plan_sha")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return recorded if isinstance(recorded, str) else None
+
+
+def _hold_path(lock_path: Path) -> Path:
+    """The marker beside a lock that the owner is listening to: `edit-lock.json` -> `edit-lock.hold`."""
+    return lock_path.with_suffix(".hold")
+
+
+def _settle_lock(plan: Plan, master: Path, lock_path: Path, transcript_path: Path, transcript: dict, *, fps: float,
+                 stop_at_lock: bool) -> tuple[dict, Path, str | None]:
+    """The lock the picture renders against: (lock, locked audio path, plan sha it replaced).
+
+    A lock `check_lock` accepts stays byte for byte. A missing lock is written. A stale lock is replaced and its plan
+    sha recorded, unless it is HELD (a `--stop-at-lock` run left the hold file for the owner's listen): a held lock
+    binds, so only another `--stop-at-lock` run may replace it."""
+    relocked_from: str | None = None
+    try:
+        lock = read_lock(lock_path)
+        return lock, check_lock(lock, plan, fps=fps, lock_path=lock_path), None
+    except LockMismatch as e:
+        if lock_path.exists():
+            if _hold_path(lock_path).exists() and not stop_at_lock:
+                raise LockMismatch(
+                    f"the edit lock {lock_path} is held for listening (hold file {_hold_path(lock_path)}) and no "
+                    f"longer matches this cook ({e}); listen to the new audio master, then rerun with "
+                    "--stop-at-lock to re-lock it") from None
+            relocked_from = _previous_plan_sha(lock_path)
+    atomic_write_text(transcript_path, json.dumps(transcript, indent=2) + "\n")
+    lock = write_lock(lock_path, plan, master, fps=fps, transcript=transcript_path)
+    return lock, check_lock(lock, plan, fps=fps, lock_path=lock_path), relocked_from
 
 
 def make_clip(video: str, seconds: float, out: Path) -> Path:
@@ -445,6 +484,7 @@ def run_pipeline(
     preferences: str = "",
     refresh_preferences: bool = False,
     plan_only: bool = False,
+    stop_at_lock: bool = False,
 ) -> RunResult:
     # The pool's exit joins its worker on every path (return, DECISION NEEDED, PipelineError, any exception), so the
     # audio assessment never outlives the cook. No thread starts unless the cook submits the assessment.
@@ -454,7 +494,8 @@ def run_pipeline(
             guidelines=guidelines, topic=topic, demo_minutes=demo_minutes, decisions=decisions, audio=audio,
             fix_drift=fix_drift, allow_bad_align=allow_bad_align, allow_av_mismatch=allow_av_mismatch, fresh=fresh,
             assets_dir=assets_dir, audio_only=audio_only, verify_output_asr=verify_output_asr,
-            preferences=preferences, refresh_preferences=refresh_preferences, plan_only=plan_only)
+            preferences=preferences, refresh_preferences=refresh_preferences, plan_only=plan_only,
+            stop_at_lock=stop_at_lock)
 
 
 def _run_pipeline(
@@ -481,8 +522,12 @@ def _run_pipeline(
     preferences: str,
     refresh_preferences: bool,
     plan_only: bool,
+    stop_at_lock: bool,
 ) -> RunResult:
     """The cook itself; `run_pipeline` owns the worker pool this runs the audio assessment on."""
+    if stop_at_lock and (audio_only or plan_only):
+        raise PipelineError("--stop-at-lock stops a video cook after its audio master is locked: an audio-only cook "
+                            "writes no lock and a plan-only cook renders no audio")
     if audio_only and (audio is not None or demo_minutes is not None):
         raise PipelineError("an audio-only run has no picture to align an external recording onto or to clip "
                             "for a demo: drop --audio/--demo")
@@ -783,22 +828,43 @@ def _run_pipeline(
     run.write_json(facts_path, {k: v for k, v in facts.items() if k not in ("words",)})
     fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
 
-    # The audio table judged the master; a fatal check stops the cook here, before any picture is rendered. The
-    # picture is then rendered once, carrying the master, and only the picture's own facts are measured on it.
+    # The audio table judged the master; a fatal check stops the cook here, before any lock or picture. A passing
+    # master is locked with its transcript, and the picture is then rendered once, carrying the locked master, and
+    # only the picture's own facts are measured on it.
+    lock_path = run.root / f"{prefix}edit-lock.json"
+    lock: dict | None = None
+    stopped = False
     if not audio_only and not fatal:
-        picture_key = render_memo_key(plan, settings, audio_sha=sha256_file(master))
+        try:
+            lock, locked_audio, relocked_from = _settle_lock(
+                plan, master, lock_path, run.verify_dir / f"{prefix}locked-transcript.json",
+                facts["render_transcript"], fps=float(settings.fps), stop_at_lock=stop_at_lock)
+        except LockMismatch as e:
+            checks.append(CheckResult("edit_lock", "fatal", False, str(e)))
+            fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
+        else:
+            notes["lock"] = {"path": str(lock_path), "plan_sha": lock["plan_sha"],
+                             "audio_sha256": lock["audio"]["sha256"], "stream_md5": lock["audio"]["stream_md5"],
+                             "fps": lock["fps"], "duration": lock["output_duration"],
+                             **({"relocked_from": relocked_from} if relocked_from else {})}
+            stopped = stop_at_lock
+            if stopped:
+                atomic_write_text(_hold_path(lock_path), json.dumps({"plan_sha": lock["plan_sha"]}) + "\n")
+    if not audio_only and not fatal and not stopped:
+        picture_key = render_memo_key(plan, settings, audio_sha=lock["audio"]["sha256"])
         picture_memo = run.root / f"{prefix}render.json"
         stored = run.read_json(picture_memo, default={})
         if final.is_file() and stored.get("key") == picture_key and not fresh:
             picture_cmd = stored.get("cmd", "")
         else:
-            picture_cmd = render_plan(plan, str(final), settings, audio_file=str(master))
+            picture_cmd = render_plan(plan, str(final), settings, audio_file=str(locked_audio))
             run.write_json(picture_memo, {"key": picture_key, "cmd": picture_cmd})
         render_cmd = f"{render_cmd} && {picture_cmd}"
         facts["picture"] = collect_picture_facts(
             plan, str(final), source_path=plan.sources[plan.main].path, scale=settings.scale,
-            locked_audio_md5=audio_stream_md5(master), rendered_audio_md5=audio_stream_md5(final))
+            locked_audio_md5=lock["audio"]["stream_md5"], rendered_audio_md5=audio_stream_md5(final))
         checks += run_picture_checks(plan, facts["picture"])
+        _hold_path(lock_path).unlink(missing_ok=True)  # the held lock's picture is rendered: the hold is released
         run.write_json(facts_path, {k: v for k, v in facts.items() if k not in ("words",)})
         fatal = [c for c in checks if not c.ok and c.severity == "fatal"]
 
@@ -808,7 +874,7 @@ def _run_pipeline(
     final_visuals: Path | None = None
     if audio_only and config.visuals_enabled:
         notes["visuals"] = {"skipped": "audio-only run: there is no picture to overlay"}
-    if config.visuals_enabled and not fatal and not audio_only:
+    if config.visuals_enabled and not fatal and not audio_only and not stopped:
         vdir = run.root / f"{prefix}visuals"
         assets = Path(assets_dir) if assets_dir else Path(config.assets_dir)
         avatar = avatar_fingerprint(config.visuals_avatar)
@@ -861,11 +927,11 @@ def _run_pipeline(
                            "none: the transcript is the source words projected through the plan, "
                            "an expectation and NOT an independent measurement"),
         }
-    status = "FAILED" if fatal else "OK"
+    status = "FAILED" if fatal else "AUDIO LOCKED" if stopped else "OK"
     report_path.write_text(build_report(plan=plan, notes=notes, checks=checks, status=status, render_cmd=render_cmd,
                                         pacing=facts.get("pacing")))
     result = RunResult(plan_path, final, report_path, checks, facts, notes, final_visuals,
-                       None if audio_only else master)
+                       None if audio_only else master, lock_path if lock is not None and not fatal else None)
     if fatal:
         raise PipelineError("verification failed: " + "; ".join(c.line() for c in fatal) + f"\nreport: {report_path}")
     return result

@@ -194,6 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="stop after plan.json: no render, verification or visuals. Every stage memo must hit, "
                           "so no judge or transcriber call is made (a miss fails); the polish judge is the one "
                           "stage allowed to call out, since its memo is built on this rebuild")
+    run.add_argument("--stop-at-lock", action="store_true",
+                     help="stop once the audio master is locked (edit-lock.json): listen to audio-master.m4a, then "
+                          "rerun without this flag to render the picture. Also re-locks after an edit")
     run.add_argument("--config", default=None,
                      help="TOML file with overrides (default: $TALKINGHEAD_CONFIG)")
     run.add_argument("--guidelines", default=None, help="editorial guidelines markdown")
@@ -621,6 +624,9 @@ def _command(args: argparse.Namespace) -> int:
 
 def _run_cmd(args: argparse.Namespace) -> int:
     video = Path(args.video)
+    if args.stop_at_lock and (args.audio_only or args.plan_only):
+        raise ValueError("--stop-at-lock stops a video cook after its audio master is locked: it cannot be "
+                         "combined with --audio-only (no picture, no lock) or --plan-only (no audio rendered)")
     if not video.is_file():
         raise FileNotFoundError(f"{'audio' if args.audio_only else 'video'} not found: {video}")
     if args.audio_only and (args.audio or args.demo is not None):
@@ -705,7 +711,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
         assets_dir=str(assets),
         audio_only=args.audio_only, verify_output_asr=not args.no_output_asr,
         preferences=read_preferences(profile_dir(args.profile)),
-        refresh_preferences=args.refresh_preferences, plan_only=args.plan_only,
+        refresh_preferences=args.refresh_preferences, plan_only=args.plan_only, stop_at_lock=args.stop_at_lock,
     )
     if args.plan_only:
         print(f"plan: {result.plan_path}")
@@ -720,6 +726,10 @@ def _run_cmd(args: argparse.Namespace) -> int:
             if inv["judged_leaks"] or inv["clipped_words"] or inv["off_grid_edges"] or not inv["drift_ok"]:
                 print("plan-only: this plan would fail verify or drift in the render; fix before a full render")
                 return 1
+        return 0
+    if args.stop_at_lock:
+        print(f"audio master: {result.audio_master}\nedit lock: {result.lock}\nreport: {result.report}\n"
+              "audio locked: listen to the master, then rerun without --stop-at-lock to render the picture")
         return 0
     print(f"final: {result.final}\nreport: {result.report}")
     if result.final_visuals:

@@ -43,3 +43,15 @@ def test_the_output_pass_section_lists_rounds_skips_residuals_and_judged_keeps()
     assert "| 00:04.20 | I, | skipped: crosses a join |" in text
     assert "Residual in the final render, not judged keep (1):" in text and "| 00:12.00 | filler | uh |" in text
     assert "Judged keep, left in on purpose (1):" in text
+
+
+def test_report_renders_the_edit_lock_section_with_the_plan_sha_prefix() -> None:
+    plan = Plan.from_cuts(SourceInfo("main", "/v/in.mp4", "x", 6.0), [])
+    lock = {"path": "/run/edit-lock.json", "plan_sha": "ab" * 32, "audio_sha256": "cd" * 32,
+            "stream_md5": "ef" * 16, "fps": 30.0, "duration": 5.5, "relocked_from": "12" * 32}
+    text = build_report(plan=plan, notes={"lock": lock}, checks=[], status="AUDIO LOCKED", render_cmd=None)
+    assert "- status: **AUDIO LOCKED**" in text
+    assert "## Edit lock" in text and "plan sha: " + "ab" * 6 in text and "/run/edit-lock.json" in text
+    assert "replaced the lock for plan " + "12" * 6 in text
+    assert "lock: path=" not in text
+    assert "## Edit lock" not in build_report(plan=plan, notes={}, checks=[], status="OK", render_cmd=None)

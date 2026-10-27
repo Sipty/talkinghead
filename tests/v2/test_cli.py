@@ -526,3 +526,16 @@ def test_a_locked_render_refuses_refine_joins(tmp_path: Path, capsys: pytest.Cap
     assert main(["render", str(plan_path), "--out", str(out), "--lock", str(tmp_path / "edit-lock.json"),
                  "--refine-joins", "--config", str(_config(tmp_path))]) == 1
     assert "--refine-joins" in capsys.readouterr().err and not out.exists()
+
+
+def test_run_stop_at_lock_parses_and_is_refused_with_audio_only_or_plan_only(
+        tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert build_parser().parse_args(["run", "v.mp4"]).stop_at_lock is False
+    assert build_parser().parse_args(["run", "v.mp4", "--stop-at-lock"]).stop_at_lock is True
+    wav = tmp_path / "in.wav"
+    _tone_wav(wav)
+    monkeypatch.setattr("talkinghead.cli.preflight", lambda judge: pytest.fail("reached the judge"))
+    monkeypatch.setattr("talkinghead.cli.run_pipeline", lambda *a, **k: pytest.fail("cooked"))
+    for flag in ("--audio-only", "--plan-only"):
+        assert main(["run", str(wav), flag, "--stop-at-lock", "--judge", "shell:true"]) == 1
+        assert "--stop-at-lock" in capsys.readouterr().err

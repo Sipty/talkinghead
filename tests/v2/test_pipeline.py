@@ -761,3 +761,106 @@ def test_an_overwritten_audio_master_is_rendered_again_not_replayed(
     assert calls["audio"] == [str(master)]
     assert result.ok, [c.line() for c in result.checks if not c.ok]
     assert audio_stream_md5(result.final) == audio_stream_md5(master)
+
+
+def test_a_full_cook_locks_the_plan_and_the_master_it_rendered(clip: Path, tmp_path: Path) -> None:
+    from talkinghead.lock import audio_stream_md5, plan_digest
+    from talkinghead.store import sha256_file
+
+    result = _cook(clip, tmp_path)
+    out = tmp_path / "out"
+    lock = json.loads((out / "edit-lock.json").read_text())
+    assert result.lock == out / "edit-lock.json"
+    assert lock["plan_sha"] == plan_digest(Plan.from_json((out / "plan.json").read_text()))
+    assert lock["audio"]["sha256"] == sha256_file(out / "audio-master.m4a")
+    assert lock["audio"]["stream_md5"] == audio_stream_md5(result.final)
+    transcript = out / "verify" / "locked-transcript.json"
+    assert lock["transcript"]["sha256"] == sha256_file(transcript)
+    assert json.loads(transcript.read_text())["words"]
+    assert result.notes["lock"]["plan_sha"] == lock["plan_sha"]
+    assert "## Edit lock" in result.report.read_text()
+
+
+def test_stop_at_lock_leaves_the_master_and_the_lock_and_the_next_run_renders_only_the_picture(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "out"
+    cache = Cache(tmp_path / "cache")
+    calls = _counted(monkeypatch)
+    stopped = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                           judge=FakeJudge(_answers()), cache=cache, guidelines="G", stop_at_lock=True)
+    assert calls["picture"] == [] and calls["audio"]
+    assert (out / "audio-master.m4a").is_file() and (out / "verify" / "locked-transcript.json").is_file()
+    assert stopped.lock == out / "edit-lock.json" and stopped.lock.is_file()
+    assert not (out / "final.mp4").exists() and not stopped.final.exists()
+    report = stopped.report.read_text()
+    assert "**AUDIO LOCKED**" in report and "## Edit lock" in report and stopped.ok
+    lock_bytes = stopped.lock.read_bytes()
+
+    calls["audio"].clear()
+    done = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge([]),
+                        cache=cache, guidelines="G")
+    assert len(calls["picture"]) == 1 and calls["audio"] == []
+    assert done.final.is_file() and done.ok, [c.line() for c in done.checks if not c.ok]
+    assert done.lock.read_bytes() == lock_bytes
+    assert "**OK**" in done.report.read_text()
+
+
+def test_an_edit_after_the_lock_is_refused_only_while_the_lock_is_held(
+    clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from talkinghead.lock import plan_digest
+
+    out = tmp_path / "out"
+    cache = Cache(tmp_path / "cache")
+    calls = _counted(monkeypatch)
+
+    def run(**extra):
+        return run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                            judge=FakeJudge(_answers()), cache=cache, guidelines="G", **extra)
+
+    run(stop_at_lock=True)  # held for the owner's listen
+    lock_bytes = (out / "edit-lock.json").read_bytes()
+    old_sha = json.loads(lock_bytes)["plan_sha"]
+    assert (out / "edit-lock.hold").is_file()
+
+    with pytest.raises(PipelineError, match="--stop-at-lock") as err:
+        run(decisions={"cold_open": 3.0})
+    assert str(out / "edit-lock.json") in str(err.value) and "edit-lock.hold" in str(err.value)
+    assert calls["picture"] == [] and not (out / "final.mp4").exists()
+    assert (out / "edit-lock.json").read_bytes() == lock_bytes and (out / "edit-lock.hold").is_file()
+    assert "FAILED" in (out / "report.md").read_text()
+
+    relocked = run(decisions={"cold_open": 3.0}, stop_at_lock=True)
+    new = json.loads((out / "edit-lock.json").read_text())
+    assert new["plan_sha"] != old_sha and new["plan_sha"] == plan_digest(Plan.from_json(relocked.plan_path.read_text()))
+    assert relocked.notes["lock"]["relocked_from"] == old_sha
+    assert json.loads((out / "edit-lock.hold").read_text())["plan_sha"] == new["plan_sha"]
+    assert calls["picture"] == [] and not (out / "final.mp4").exists()
+
+
+def test_an_edit_after_the_lock_relocks_when_it_is_unheld_and_renders_the_picture(clip: Path, tmp_path: Path) -> None:
+    from talkinghead.lock import plan_digest
+
+    out = tmp_path / "out"
+    cache = Cache(tmp_path / "cache")
+    _cook(clip, tmp_path)
+    old_sha = json.loads((out / "edit-lock.json").read_text())["plan_sha"]
+    assert not (out / "edit-lock.hold").exists()
+    result = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out),
+                          judge=FakeJudge(_answers()), cache=cache, guidelines="G", decisions={"cold_open": 3.0})
+    new = json.loads((out / "edit-lock.json").read_text())
+    assert new["plan_sha"] != old_sha and new["plan_sha"] == plan_digest(Plan.from_json(result.plan_path.read_text()))
+    assert result.notes["lock"]["relocked_from"] == old_sha
+    assert result.final.is_file()
+
+
+def test_the_hold_released_after_the_full_run_renders_the_held_picture(clip: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    cache = Cache(tmp_path / "cache")
+    run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge(_answers()),
+                 cache=cache, guidelines="G", stop_at_lock=True)
+    assert (out / "edit-lock.hold").is_file()
+    done = run_pipeline(str(clip), out, _cfg(), transcriber=PlanAwareTranscriber(out), judge=FakeJudge([]),
+                        cache=cache, guidelines="G")
+    assert done.final.is_file() and not (out / "edit-lock.hold").exists()

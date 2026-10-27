@@ -299,6 +299,20 @@ def _blocks(plan: Plan) -> list[str]:
     return rows
 
 
+def _edit_lock(notes: dict) -> list[str]:
+    """The approved audio master the picture was (or will be) rendered against; absent before the audio gate."""
+    lock = notes.get("lock")
+    if not lock:
+        return []
+    rows = ["## Edit lock", "",
+            f"- lock: {lock['path']}",
+            f"- plan sha: {lock['plan_sha'][:12]}; fps {lock['fps']}; duration {lock['duration']:.2f}s",
+            f"- audio sha256: {lock['audio_sha256'][:12]}; packet md5: {lock['stream_md5'][:12]}"]
+    if lock.get("relocked_from"):
+        rows.append(f"- relocked: replaced the lock for plan {lock['relocked_from'][:12]}")
+    return rows + [""]
+
+
 def build_report(
     *, plan: Plan, notes: dict, checks: list[CheckResult], status: str, render_cmd: str | None,
     question: str | None = None, pacing: dict | None = None,
@@ -329,7 +343,7 @@ def build_report(
     rows.append("")
     rows += ["## Stage notes", ""]
     for stage, n in notes.items():
-        if stage in ("isolation", "audio_assessment"):
+        if stage in ("isolation", "audio_assessment", "lock"):
             continue
         rows.append(f"- {stage}: " + ", ".join(f"{k}={v}" for k, v in n.items() if k not in ("prompt_sha", "coherence_prompt_sha")))
     rows.append("")
@@ -344,6 +358,7 @@ def build_report(
     rows += _polish(plan, notes)
     rows += _isolation(plan)
     rows += _audio(plan, notes, checks)
+    rows += _edit_lock(notes)
     rows += ["## Cuts", "", "| start | end | dur | reason | votes | text |", "|---|---|---|---|---|---|"]
     for c in plan.cuts:
         votes = c.provenance.get("votes", "")
