@@ -36,6 +36,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..color import (
@@ -48,6 +49,7 @@ from ..color import (
     write_sdr_to_hdr_cube,
 )
 from ..config import OVERLAY_CORNERS
+from ..store import sha256_file
 from .schedule import Placement
 
 
@@ -77,7 +79,7 @@ def _even(x: float) -> int:
     return max(2, int(round(x / 2.0)) * 2)
 
 
-def _overlay_chain(i: int, p: Placement, width: int, fade: float,
+def _overlay_chain(i: int, input_index: int, p: Placement, width: int, fade: float,
                    color: ColorProfile, cube: str | None) -> str:
     """One still, scaled, (colour-converted,) faded and dropped at `p.start`."""
     w = _even(p.scale * width)
@@ -100,7 +102,92 @@ def _overlay_chain(i: int, p: Placement, width: int, fade: float,
         f"fade=t=out:st={hold - fin:.3f}:d={fin:.3f}:alpha=1",
         f"setpts=PTS+{p.start:.6f}/TB",
     ]
-    return f"[{i + 1}:v]{','.join(steps)}[ov{i}]"
+    return f"[{input_index}:v]{','.join(steps)}[ov{i}]"
+
+
+@dataclass(frozen=True)
+class Overlays:
+    """Everything that decides what the overlays look like, apart from the picture they land on.
+
+    One value so a picture pass, a bake and a render memo all read the same
+    placements, margin, fade and corner instead of passing four loose arguments.
+    """
+
+    placements: tuple[Placement, ...]
+    margin: int = 40
+    fade: float = 0.4
+    corner: str = "top-right"
+
+    def __post_init__(self) -> None:
+        if self.corner not in OVERLAY_CORNERS:
+            raise ValueError(f"unknown overlay corner {self.corner!r}")
+
+    def identity(self) -> dict:
+        """What a render memo keys on: the asset BYTES, not where they live.
+
+        Hashing the file means an asset rewritten at the same path invalidates
+        the memo, and moving the asset directory does not.
+        """
+        placements = []
+        for p in self.placements:
+            entry = asdict(p)
+            del entry["path"]
+            entry["sha256"] = sha256_file(p.path)
+            placements.append(entry)
+        return {"placements": placements, "margin": self.margin, "fade": self.fade, "corner": self.corner}
+
+
+def overlay_inputs(overlays: Overlays, *, fps: int, duration: float | None) -> list[str]:
+    """The bounded still inputs, one per placement, in placement order."""
+    args: list[str] = []
+    for p in overlays.placements:
+        # Only this still's own window, not from t=0 to it. Six decimals
+        # because -t rounded UP to 20.067 on a 20.066667 s base once put an
+        # extra frame on the end.
+        span = p.end - p.start + 0.5
+        if duration is not None:
+            span = min(span, duration)
+        args += ["-loop", "1", "-framerate", str(fps), "-t", f"{span:.6f}", "-i", p.path]
+    return args
+
+
+def overlay_graph(overlays: Overlays, *, base: str, first_input: int, width: int,
+                  color: ColorProfile, cube: str | None, out: str = "[vout]") -> list[str]:
+    """The filter parts that composite every placement over the stream labelled `base`.
+
+    Still `i` is read from input `first_input + i`, so any picture pass can
+    splice the overlays into its own graph. HDR without `cube` raises:
+    composing SDR assets into HDR frames without the conversion would be the
+    relabel this pass exists to avoid.
+    """
+    placements = overlays.placements
+    if not placements:
+        raise ValueError("no overlay placements: there is no graph to build")
+    if color.hdr and not cube:
+        raise ValueError("HDR base: overlays need the SDR->HDR cube from write_sdr_to_hdr_cube")
+    x_expr, y_expr = (e.format(m=overlays.margin) for e in OVERLAY_CORNERS[overlays.corner])
+    parts: list[str] = []
+    first = base
+    if color.hdr:
+        parts.append(f"{base}format=p010le[base]")
+        first = "[base]"
+    for i, p in enumerate(placements):
+        # Fades are relative to the still's own clip, then setpts drops the
+        # clip onto the output timeline at `start`.
+        parts.append(_overlay_chain(i, first_input + i, p, width, overlays.fade, color, cube))
+    last = first
+    # The overlay filter otherwise negotiates an 8-bit intermediate, even for HDR.
+    overlay_format = "format=yuv420p10:" if color.hdr else ""
+    for i, p in enumerate(placements):
+        nxt = f"[t{i}]" if i < len(placements) - 1 else out
+        # eof_action=pass: before a still's stream starts and after it ends,
+        # the main video passes straight through.
+        parts.append(
+            f"{last}[ov{i}]overlay=x={x_expr}:y={y_expr}:"
+            f"{overlay_format}enable='between(t,{p.start:.3f},{p.end:.3f})':eof_action=pass{nxt}"
+        )
+        last = nxt
+    return parts
 
 
 def build_overlay_command(
@@ -115,55 +202,23 @@ def build_overlay_command(
     An HDR base without `cube` raises: composing SDR assets into HDR frames
     without the conversion would be the relabel this pass exists to avoid.
     """
-    if corner not in OVERLAY_CORNERS:
-        raise ValueError(f"unknown overlay corner {corner!r}")
-    x_expr, y_expr = (e.format(m=margin) for e in OVERLAY_CORNERS[corner])
+    overlays = Overlays(tuple(placements), margin=margin, fade=fade, corner=corner)
     profile = color or ColorProfile()
     if not placements:
         # Nothing to draw: a stream copy, so the deliverable still exists and
         # is byte-identical to the cut (and so is its colour).
         return ["ffmpeg", "-y", "-v", "error", "-nostdin", "-i", base, "-c", "copy",
                 "-movflags", "+faststart", out]
-    if profile.hdr and not cube:
-        raise ValueError("HDR base: overlays need the SDR->HDR cube from write_sdr_to_hdr_cube")
+    graph = overlay_graph(overlays, base="[0:v]", first_input=1, width=width, color=profile, cube=cube)
     # Only the base is decoded on the hardware; the stills are PNGs.
-    cmd = ["ffmpeg", "-y", "-v", "error", "-nostdin", *decode_args(profile.pix_fmt), "-i", base]
-    for p in placements:
-        # Only this still's own window, not from t=0 to it. Six decimals
-        # because -t rounded UP to 20.067 on a 20.066667 s base once put an
-        # extra frame on the end.
-        span = p.end - p.start + 0.5
-        if base_duration is not None:
-            span = min(span, base_duration)
-        cmd += ["-loop", "1", "-framerate", str(fps), "-t", f"{span:.6f}", "-i", p.path]
-    parts: list[str] = []
-    first = "[0:v]"
-    if profile.hdr:
-        parts.append("[0:v]format=p010le[base]")
-        first = "[base]"
-    for i, p in enumerate(placements):
-        # Fades are relative to the still's own clip, then setpts drops the
-        # clip onto the output timeline at `start`.
-        parts.append(_overlay_chain(i, p, width, fade, profile, cube))
-    last = first
-    # The overlay filter otherwise negotiates an 8-bit intermediate, even for HDR.
-    overlay_format = "format=yuv420p10:" if profile.hdr else ""
-    for i, p in enumerate(placements):
-        nxt = f"[t{i}]" if i < len(placements) - 1 else "[vout]"
-        # eof_action=pass: before a still's stream starts and after it ends,
-        # the main video passes straight through.
-        parts.append(
-            f"{last}[ov{i}]overlay=x={x_expr}:y={y_expr}:"
-            f"{overlay_format}enable='between(t,{p.start:.3f},{p.end:.3f})':eof_action=pass{nxt}"
-        )
-        last = nxt
-    cmd += [
-        "-filter_complex", ";".join(parts),
+    return [
+        "ffmpeg", "-y", "-v", "error", "-nostdin", *decode_args(profile.pix_fmt), "-i", base,
+        *overlay_inputs(overlays, fps=fps, duration=base_duration),
+        "-filter_complex", ";".join(graph),
         "-map", "[vout]", "-map", "0:a",
         *encode_args(profile, crf=18, preset="medium", codec=hdr_codec, bitrate=hdr_bitrate),
         "-c:a", "copy", "-movflags", "+faststart", out,
     ]
-    return cmd
 
 
 def render_visuals(base: str, placements: list[Placement], out: str, *,
