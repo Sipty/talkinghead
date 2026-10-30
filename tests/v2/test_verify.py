@@ -789,6 +789,16 @@ def test_collect_facts_quiet_at_reads_the_source_envelope_for_stutter_cuts(tmp_p
     assert clipped(1.7) == ["on-only"]  # ends in tone
 
 
+def test_plan_invariants_reads_the_valley_rule_like_verify_does() -> None:
+    # A plan-only build must not fail on a stutter clip the render's verify accepts: the valley rule reads the source
+    # envelope, so plan_invariants takes the same quiet_at probe. Numbers from IMG_8748's `on-only`.
+    plan = Plan.from_cuts(SourceInfo("main", "/x.wav", "x", 2000.0), [Cut(1641.75, 1641.96, "silence")])
+    words = [Word("on-only", 1641.65, 1642.27, 1.0)]
+    assert verify.plan_invariants(plan, words, [], [], (), None)["clipped_words"] == 1
+    valley = lambda t, a, b: abs(t - 1641.96) < 1e-6  # noqa: E731
+    assert verify.plan_invariants(plan, words, [], [], (), None, quiet_at=valley)["clipped_words"] == 0
+
+
 def test_source_quiet_at_ignores_a_loud_neighbour_outside_the_token() -> None:
     fs = 0.01
     db = np.full(300, -25.0)  # token 1.0-1.4 s at -25 dB, probe before the 1.2 s cut end at -40 dB

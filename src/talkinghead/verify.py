@@ -324,11 +324,13 @@ def clipped_words(plan: Plan, words: Sequence,
 
 def plan_invariants(plan: Plan, words: Sequence, judged: Sequence[tuple[float, float, str]],
                     removing: Sequence[tuple[float, float, str]], given_back: Collection[tuple[float, float]],
-                    fps: float | None) -> dict:
+                    fps: float | None, quiet_at: Callable[[float, float, float], bool] | None = None) -> dict:
     """The edge-pass invariants of a plan as the render's verify measures them.
     `off_grid_edges` counts cut and segment edges off the frame grid: a settled plan has none (the source's own start
     and end are exempt). `snap_drift_ms` is the worst shift the render's snap puts on the output timeline;
-    source_timing fails past SOURCE_TIMING_TOL. A plan-only build reports these, so a bad plan fails first."""
+    source_timing fails past SOURCE_TIMING_TOL. A plan-only build reports these, so a bad plan fails first.
+    Pass `source_quiet_at(env)` exactly as verify does: the valley rule that spares a stutter token's kept word reads
+    the source envelope, so without it a plan-only build reports clips the render's verify would accept."""
     cut_plan = _word_cuts(plan)
     off = 0
     drift = worst = 0.0
@@ -342,7 +344,7 @@ def plan_invariants(plan: Plan, words: Sequence, judged: Sequence[tuple[float, f
             drift += (b - a if b > a else 0.0) - (s.end - s.start)
             worst = max(worst, abs(drift))
     return {"judged_leaks": len(judged_leaks(plan, words, judged, given_back)),
-            "clipped_words": len(clipped_words(cut_plan, words, removing)),
+            "clipped_words": len(clipped_words(cut_plan, words, removing, quiet_at=quiet_at)),
             "fragments": len(cut_word_fragments(cut_plan, words, removing)["partial"]),
             "off_grid_edges": off, "snap_drift_ms": round(worst * 1000, 1),
             "drift_ok": worst <= SOURCE_TIMING_TOL}

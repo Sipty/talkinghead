@@ -40,6 +40,7 @@ from .verify import (
     residual_findings,
     run_checks,
     run_picture_checks,
+    source_quiet_at,
 )
 from .visuals.cards import avatar_fingerprint
 from .visuals.headclip import check_head_clip_plan
@@ -817,7 +818,8 @@ def _run_pipeline(
         # and transcriber that refuse to be called, so a memo miss fails rather than recomputing. The edge invariants
         # the render's verify and snap depend on are measured on this plan, so a plan that would fail is caught here.
         notes["invariants"] = plan_invariants(plan, ctx.words, judged, removing, set(edge_ctx.given_back),
-                                              None if audio_only else float(settings.fps))
+                                              None if audio_only else float(settings.fps),
+                                              quiet_at=source_quiet_at(ctx.env))
         return RunResult(plan_path, final, report_path, notes=notes)
     if config.polish:
         # The judged-keep findings of every round, all judged on renders the final check may still see.
