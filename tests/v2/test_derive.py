@@ -224,7 +224,7 @@ def test_vad_trailing_speech_preserved_even_if_whisper_ended_early() -> None:
     # Regression: whisper dropped a quiet trailing utterance ("yeah"), so its
     # last word ends at 1.0. VAD proves audio continues to 3.0 -> no trailing cut.
     ws = words(("hello", 0.0, 1.0))
-    cuts = derive_cuts(3.0, ws, silences=[(1.2, 1.9)], pad=0.04)
+    cuts = derive_cuts(3.0, ws, silences=[(1.2, 1.9)], pad=0.04, pause=Config(min_pause_cut=0.0))
     silence = [c for c in cuts if c.reason == "silence"]
     assert len(silence) == 1
     # 0.7 s raw keeps 0.30 + 0.25 * (0.7 - 0.35) = 0.3875 s, centred.
@@ -266,18 +266,21 @@ def test_glued_filler_silence_below_max_filler_gap_is_kept() -> None:
 
 # --- Interior pause policy: kept length by raw length and boundary ---
 
-def _kept(text: str, raw: float, *, end: float = 1.0) -> float:
+def _kept(text: str, raw: float, *, end: float = 1.0, cfg: Config | None = None) -> float:
     """Kept pause length for a VAD silence of `raw` seconds after `text`."""
     ws = words((text, 0.0, end), ("next", 1.0 + raw, 2.0 + raw))
-    cuts = derive_cuts(3.0 + raw, ws, silences=[(1.0, 1.0 + raw)], pad=0.0)
+    cuts = derive_cuts(3.0 + raw, ws, silences=[(1.0, 1.0 + raw)], pad=0.0, pause=cfg)
     silence = [c for c in cuts if c.reason == "silence"]
     return raw if not silence else raw - (silence[0].end - silence[0].start)
 
 
 def test_kept_pause_grows_with_raw_length_until_the_cap() -> None:
-    kept = [round(_kept("and", raw), 6) for raw in (0.4, 0.5, 0.6, 1.2, 2.0)]
+    kept = [round(_kept("and", raw, cfg=Config(min_pause_cut=0.0)), 6) for raw in (0.4, 0.5, 0.6, 1.2, 2.0)]
     assert kept == sorted(kept)
     assert kept[0] < kept[1] < kept[2] < kept[3] == kept[-1] == pytest.approx(0.40)
+    # A trim of min_pause_cut seconds or less is not made: a 1.0 s pause (0.60 s trim) stays whole.
+    assert _kept("and", 1.0) == 1.0
+    assert _kept("and", 1.1) == pytest.approx(0.40)
 
 
 def test_kept_pause_per_boundary() -> None:
@@ -289,7 +292,7 @@ def test_kept_pause_per_boundary() -> None:
 
 def test_kept_pause_never_exceeds_raw_minus_margin() -> None:
     ws = words(("done.", 0.0, 1.0), ("next", 1.25, 2.0))
-    cuts = derive_cuts(3.0, ws, silences=[(1.0, 1.25)], pause_above=0.2, pad=0.0)
+    cuts = derive_cuts(3.0, ws, silences=[(1.0, 1.25)], pause_above=0.2, pad=0.0, pause=Config(min_pause_cut=0.0))
     assert 0.25 - (cuts[0].end - cuts[0].start) == pytest.approx(0.23)
 
 

@@ -175,6 +175,8 @@ class EdgeContext:
     # A cut shorter than this buys nothing and costs a join; it is dropped
     # whatever its reason (leaving a 60 ms filler in is the accepted error).
     min_cut: float = 0.08
+    # A kept segment shorter than this is repaired by enforce_min_segments; 0 disables the pass. See Config.
+    min_segment: float = 0.0
     # Video frame rate: cut edges snap to the frame grid (start later, end
     # earlier) so every kept segment is a whole number of frames and the
     # render cannot drift between audio and video. None = no snapping.
@@ -187,6 +189,8 @@ class EdgeContext:
     dropped_fillers: int = 0
     # Set by finalize_cuts: mechanical cuts shrunk or dropped to spare another speaker's words.
     spared_other_speaker: int = 0
+    # Set by enforce_min_segments: slivers absorbed or restored, and any no repair could take.
+    min_segment_fixes: dict = field(default_factory=dict)
     # Set by take_removed_whole: fragments settled per outcome, and the removed words given back whole.
     fragments: dict = field(default_factory=dict)
     given_back: list = field(default_factory=list)
@@ -1639,6 +1643,106 @@ def _clip_conflicts(decided: set[int], ctx: EdgeContext) -> list[RefinedWord]:
         out += found
 
 
+# Pause-only cuts: restoring one returns silence and no word, so it can reopen a sliver's neighbour.
+PAUSE_ONLY_REASONS = frozenset({"silence", "gap"})
+
+
+def _kept_between(cuts: list[Cut], duration: float) -> list[tuple[float, float]]:
+    """The kept spans between sorted, non-overlapping cuts. Spans of MIN_CUT or less are not plan segments."""
+    spans: list[tuple[float, float]] = []
+    cursor = 0.0
+    for c in cuts:
+        if c.start - cursor > MIN_CUT:
+            spans.append((cursor, c.start))
+        cursor = max(cursor, c.end)
+    if duration - cursor > MIN_CUT:
+        spans.append((cursor, duration))
+    return spans
+
+
+def _holds_word(a: float, b: float, words: list[RefinedWord]) -> bool:
+    return any(a <= (w.start + w.end) / 2 <= b for w in words)
+
+
+def _automatic(cuts: list[Cut], k: int | None) -> bool:
+    return k is not None and not is_hand_cut(cuts[k])
+
+
+def _restorable(c: Cut, ctx: EdgeContext) -> bool:
+    return not is_hand_cut(c) and c.reason in PAUSE_ONLY_REASONS and not removed_words(c, ctx.words)
+
+
+def _resized(c: Cut, start: float, end: float) -> Cut:
+    return Cut(start, end, c.reason, c.text, dict(c.provenance))
+
+
+def enforce_min_segments(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
+    """Repair every kept segment shorter than ctx.min_segment: a flash between two cuts on picture.
+
+    A sliver with no kept word in it is absorbed: an automatic neighbouring cut grows across it, which removes
+    only room tone. A sliver holding a kept word gets an adjacent pause-only cut restored, so the word joins the
+    kept material beyond that pause; a word-removing cut is never reopened. Hand cuts are never changed. A sliver
+    no legal repair can take stays, and is listed in ctx.min_segment_fixes["unfixed"] for verify to FAIL.
+    """
+    fixes: dict = {"absorbed": 0, "restored": 0, "unfixed": []}
+    ctx.min_segment_fixes = fixes
+    if ctx.min_segment <= 0:
+        return cuts
+    cuts = sorted(cuts, key=lambda c: (c.start, c.end))
+    stuck: set[tuple[float, float]] = set()
+    while True:
+        short = [s for s in _kept_between(cuts, ctx.duration)
+                 if s[1] - s[0] < ctx.min_segment - 1e-9 and s not in stuck]
+        if not short:
+            break
+        a, b = short[0]
+        left = next((k for k, c in enumerate(cuts) if abs(c.end - a) < 1e-9), None)
+        right = next((k for k, c in enumerate(cuts) if abs(c.start - b) < 1e-9), None)
+        if not _holds_word(a, b, ctx.words):
+            if _automatic(cuts, left) and (right is None or not is_hand_cut(cuts[right])):
+                cuts[left] = _resized(cuts[left], cuts[left].start, b)
+                fixes["absorbed"] += 1
+            elif _automatic(cuts, right) and (left is None or not is_hand_cut(cuts[left])):
+                cuts[right] = _resized(cuts[right], a, cuts[right].end)
+                fixes["absorbed"] += 1
+            else:
+                stuck.add((a, b))
+            continue
+        pauses = [k for k in (left, right) if k is not None and _restorable(cuts[k], ctx)]
+        if pauses:
+            del cuts[min(pauses, key=lambda k: cuts[k].length)]
+            fixes["restored"] += 1
+        else:
+            stuck.add((a, b))
+    cuts = merge_cuts(cuts, ctx.duration)
+    fixes["unfixed"] = [[round(a, 3), round(b, 3)] for a, b in _kept_between(cuts, ctx.duration)
+                        if b - a < ctx.min_segment - 1e-9]
+    return cuts
+
+
+def trim_opening(plan: Plan, ctx: EdgeContext) -> Plan:
+    """Leading silence goes outright, as the source's own leading silence does. The silence kept before the output's
+    first word is cut back to ctx.pad, so the output (a cold open, or a reordered block that now opens the cut) starts
+    on its word. A pause the pause policy keeps whole would otherwise survive at the head. Skipped where it would take
+    voiced audio or laughter. The trimmed span is recorded in plan.cuts, so cuts and segments still agree."""
+    if not plan.segments or plan.segments[0].source != plan.main:
+        return plan
+    first = plan.segments[0]
+    heads = sorted(w.start for w in ctx.words if first.start <= (w.start + w.end) / 2 < first.end)
+    if not heads:
+        return plan
+    lead_end = heads[0] - ctx.pad
+    if lead_end - first.start <= ctx.min_cut:
+        return plan
+    if any(s < lead_end and e > first.start for s, e in list(ctx.voices) + list(ctx.protected_spans)):
+        return plan
+    head = Cut(first.start, lead_end, "silence", "", {"head": True})
+    segments = [Segment(first.source, lead_end, first.end), *plan.segments[1:]]
+    return replace(plan, segments=segments, cuts=merge_cuts([*plan.cuts, head], ctx.duration))
+
+
+
+
 def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
     ctx.given_back = []
     ctx.decisions = []
@@ -1684,7 +1788,8 @@ def finalize_cuts(cuts: list[Cut], ctx: EdgeContext) -> list[Cut]:
         # Last edge step: the render snaps every edge to the frame grid, so the cut edges must already be on it.
         out, given_grid = settle_grid(out, ctx, decided, judged_in)
     ctx.given_back = [(round(w.start, 6), round(w.end, 6)) for w in conflicts + given_grid] + ctx.given_back
-    return _yield_to_hand(merge_cuts(out, ctx.duration), hand, ctx.duration)
+    out = _yield_to_hand(merge_cuts(out, ctx.duration), hand, ctx.duration)
+    return enforce_min_segments(out, ctx)
 
 
 REFINED_JOINS = "refined_joins"
@@ -1758,8 +1863,11 @@ def refine_joins(plan: Plan, ctx: EdgeContext, margin: float = JOIN_MOVE_MARGIN,
         c = Cut(prev.end, seg.start, source_cut.reason, source_cut.text, dict(source_cut.provenance))
         removed = removed_words(c, _near(c, ctx))
         left, right = _kept_bounds(c, ctx)
-        left = max(left, prev.start + ctx.min_cut)
-        right = min(right, seg.end - ctx.min_cut)
+        # Neither neighbouring segment may shrink below min_segment; one already shorter keeps its length.
+        left = max(left, prev.start + ctx.min_cut,
+                   prev.start + ctx.min_segment if prev.length >= ctx.min_segment else prev.end)
+        right = min(right, seg.end - ctx.min_cut,
+                    seg.end - ctx.min_segment if seg.length >= ctx.min_segment else seg.start)
         hi_start, lo_end = _inward_limits(c, removed, ctx)
         here = _join_cost(ctx, _edge_terms(ctx, c.start, "start"), _edge_terms(ctx, c.end, "end"))
         pairs = _pairs(ctx, c, _grid_points(ctx, c.start, left, hi_start, window),

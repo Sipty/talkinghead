@@ -44,6 +44,15 @@ class Config:
     pause_cap_topic: float = 0.80
     # A raw pause at least this long after a sentence end counts as a topic change.
     pause_topic_above: float = 1.5
+    # Pause-only cuts (no word removed): a silence the policy would remove is made only when the removal is longer
+    # than this. A pause this short or shorter, or one whose trim would take no more than this, stays whole; longer
+    # dead air is still trimmed to its boundary cap. 0 makes every trim the policy asks for. Applies to the pauses
+    # stage and to gap tightening (polish). A single-camera cut is a visible jump, so 0.6 s is the default.
+    min_pause_cut: float = 0.6
+    # No kept segment shorter than this survives the edge pass: a kept sliver with no word is absorbed into a
+    # neighbouring cut, and one holding a word has its adjacent pause restored (a word-removing cut is never
+    # reopened). verify FAILs a plan that still has one. 0 disables the pass.
+    min_segment_sec: float = 0.5
     # Waveform arbitration: a silence/noise cut may not land inside, or swallow,
     # voiced speech-level audio no transcript word covers.
     voice_guard: bool = True
@@ -253,6 +262,8 @@ class Config:
                    self.splice_quiet_sentence, self.splice_quiet_clause, self.splice_lead_in)
         if any(v < 0 for v in lengths):
             raise ValueError("splice_* lengths cannot be negative")
+        if self.min_pause_cut < 0 or self.min_segment_sec < 0:
+            raise ValueError("min_pause_cut and min_segment_sec cannot be negative")
         if self.speech_probe_max < 0:
             raise ValueError("speech_probe_max cannot be negative")
         if self.visuals_corner not in OVERLAY_CORNERS:

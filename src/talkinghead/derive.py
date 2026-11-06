@@ -309,7 +309,8 @@ def _silence_cuts_from_vad(
     longer than pause_above are trimmed, centred in the silence, to
     min(raw - 0.02, cap(boundary), pause_keep + pause_keep_ratio * (raw - pause_above)):
     longer pauses keep a little more, up to the cap of the boundary they sit
-    on. Shorter interior pauses are left untouched. The boundary word is the
+    on. Shorter interior pauses are left untouched, and so is a trim that would remove min_pause_cut seconds or less
+    (a pause-only cut that reads as a jump on picture). The boundary word is the
     last word that STARTS before the silence: ASR stamps often end late,
     inside the silence, so ends are not trusted.
     """
@@ -338,6 +339,9 @@ def _silence_cuts_from_vad(
                 cfg.pause_keep + cfg.pause_keep_ratio * (dur - pause_above),
             )
             mid = (s + e) / 2
+            if dur - keep <= cfg.min_pause_cut + 1e-9:
+                # Too short to cut without a visible jump: the natural pause stays whole.
+                continue
             cuts.append(CutSpan(mid - (dur - keep) / 2, mid + (dur - keep) / 2, "silence"))
     return cuts
 

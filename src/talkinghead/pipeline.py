@@ -19,7 +19,7 @@ from .align import AlignResult, align
 from .analysis import analyze
 from .config import ISOLATE_KEYS, Config
 from .context import Context, NeedsDecision
-from .edges import WORD_CUT_REASONS, EdgeContext, finalize_cuts, is_intra_restart, refine_joins
+from .edges import WORD_CUT_REASONS, EdgeContext, finalize_cuts, is_intra_restart, refine_joins, trim_opening
 from .judge import Judge
 from .lock import LockMismatch, audio_stream_md5, check_lock, locked_transcript, read_lock, write_lock
 from .profile import snapshot_preferences
@@ -94,6 +94,7 @@ def edge_context(ctx: Context, config: Config, *, fps: float | None) -> EdgeCont
         splice_lead_in=config.splice_lead_in,
         quiet_above_floor_db=config.quiet_above_floor_db, filler_keep_voiced_max=config.filler_keep_voiced_max,
         flow_min_kept=config.flow_min_kept, min_cut=config.min_cut_sec,
+        min_segment=config.min_segment_sec,
         fps=fps, protected_spans=ctx.protected_spans,
     )
 
@@ -350,12 +351,12 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...] | None] = {
     "content": _JUDGE_KEYS + ("content_enabled", "content_max_cut_sec", "content_max_fraction",
                               "sentence_split_pause"),
     "pauses": ("pause_above", "pause_keep", "pause_keep_ratio", "pause_cap_mid", "pause_cap_clause",
-               "pause_cap_sentence", "pause_cap_topic", "pause_topic_above", "min_filler_dur"),
+               "pause_cap_sentence", "pause_cap_topic", "pause_topic_above", "min_filler_dur", "min_pause_cut"),
     "restructure": ("restructure_brief", "restructure_window_sec", "restructure_context_sec",
                     "restructure_votes", "restructure_front", "sentence_split_pause"),
     "polish": ("polish_gap_block", "polish_gap_speaker", "polish_gap_sentence", "polish_gap_within",
                "polish_window_sec", "polish_context_sec", "polish_votes", "polish_agree", "polish_max_sec",
-               "min_cut_sec", "sentence_split_pause"),
+               "min_cut_sec", "sentence_split_pause", "min_pause_cut"),
     "polish_output": ("polish_votes", "polish_agree", "min_cut_sec"),
 }
 
@@ -366,9 +367,11 @@ def _stage_config(ctx: Context, stage: str) -> dict:
     if keys is None:
         # The polish knobs (and the output pass's round count) change no other stage's output, so they stay out of
         # every other stage's key: turning polish on or tuning it re-keys only the polish stages and their plan.
-        # The isolation knobs likewise: they change the rendered audio, which only the plan's record carries.
+        # The isolation knobs likewise: they change the rendered audio, which only the plan's record carries. The pacing
+        # knobs change which cuts exist, and the plan itself carries that into every stage that reads the plan.
         full = {k: v for k, v in cfg.to_dict().items()
-                if k != "polish" and not k.startswith("polish_") and k not in ISOLATE_KEYS}
+                if k != "polish" and not k.startswith("polish_") and k not in ISOLATE_KEYS
+                and k not in ("min_pause_cut", "min_segment_sec")}
         return {"config": full}
     return {"config": {k: getattr(cfg, k) for k in keys}}
 
@@ -675,10 +678,12 @@ def _run_pipeline(
         plan, joins = refine_joins(plan, edge_ctx)
         if config.restructure:
             plan = restructure.reorder(plan, blocks, edge_ctx, kept_sents)
+        plan = trim_opening(plan, edge_ctx)
         plan.decisions = decided
         restructured = plan.provenance.get("blocks")
         plan.provenance = {**ctx.provenance, "raw_cuts": len(cur), "final_cuts": len(cuts), "demo": demo_minutes,
                            **({"audio_only": True} if audio_only else {}),
+                           "min_segment": dict(edge_ctx.min_segment_fixes),
                            **({"blocks": restructured} if restructured is not None else {})}
         # Source time of the cold open. Under restructure's reordering the output opens on an opener, so this is
         # a source instant only; it does not name where the hook sits in the cut.

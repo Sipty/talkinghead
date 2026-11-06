@@ -90,7 +90,8 @@ def test_run_produces_plan_render_and_report(clip: Path, tmp_path: Path) -> None
     assert result.final.is_file() and result.plan_path.is_file() and result.report.is_file()
     plan = Plan.from_json(result.plan_path.read_text())
     reasons = {c.reason for c in plan.cuts}
-    assert {"cold-open", "outro", "silence"} <= reasons
+    # Pauses the policy keeps whole (each trim 0.60 s or less) are no longer cut, so 'silence' is not expected here.
+    assert {"cold-open", "outro"} <= reasons
     assert plan.decisions["cold_open"]["chosen"] == "S0001"
     assert plan.output_duration == pytest.approx(result.facts["duration"], abs=0.3)
     report = result.report.read_text()
@@ -1120,8 +1121,8 @@ def test_hand_cut_survives_settling_when_it_overlaps_an_automatic_cut_on_the_sam
     plan = Plan.from_json(second.plan_path.read_text())
     cuts = [c for c in plan.cuts if c.start <= 3.25 < c.end]
     # The hand span (3.06-3.44 rounded to the 30 fps grid) stays removed inside one fused record with the automatic
-    # cut's parts outside it (finalize_cuts' edges, 2.433-3.8; the first run's refine_joins nudged them to 2.467-3.767,
-    # but a join touching a hand cut is never refined).
-    assert [(c.start, c.end) for c in cuts] == [pytest.approx((2.433, 3.8), abs=1e-3)]
+    # cut's parts outside it. The 0.53 s silence before "Third." is a pause-only trim of 0.60 s or less, so it stays
+    # whole (min_pause_cut) and the automatic cut starts at the word (2.967-3.6), not at the silence (was 2.433-3.8).
+    assert [(c.start, c.end) for c in cuts] == [pytest.approx((2.967, 3.6), abs=1e-3)]
     assert cuts[0].start <= 92 / 30 and cuts[0].end >= 103 / 30
     assert cuts[0].provenance["hand"]

@@ -390,8 +390,8 @@ def residual_dead_air(plan: Plan, silences: list[tuple[float, float]], min_gap: 
 
 def quiet_silence_min(config: Config) -> float:
     """Shortest quiet run in the render that counts as dead air: a pause the
-    policy keeps on purpose (up to the topic cap, plus slack) never does."""
-    return max(QUIET_SILENCE_MIN, config.pause_cap_topic + DEAD_AIR_SLACK)
+    policy keeps on purpose (up to the topic cap plus min_pause_cut, plus slack) never does."""
+    return max(QUIET_SILENCE_MIN, config.pause_cap_topic + config.min_pause_cut + DEAD_AIR_SLACK)
 
 
 def dead_air_excess(
@@ -403,7 +403,8 @@ def dead_air_excess(
     `runs` and `words` are on the output timeline (words: the render's own
     transcript). The run is classified by the last word that STARTS before it,
     as the pause policy does, and only the length beyond that boundary's cap
-    plus DEAD_AIR_SLACK is `excess`: dead air the cut failed to remove.
+    plus min_pause_cut and DEAD_AIR_SLACK is `excess`: dead air the cut failed to remove. A pause the policy keeps
+    whole is at most that long.
     `raw` is each run's untrimmed source pause: a topic pause trimmed to its
     cap is a topic pause however short the kept run. Default: the run itself.
     """
@@ -414,8 +415,23 @@ def dead_air_excess(
         boundary = pause_boundary(words[i].text if i >= 0 else "", raw[k] if raw else b - a, config)
         cap = pause_cap(boundary, config)
         out.append({"start": round(a, 3), "end": round(b, 3), "boundary": boundary, "cap": cap,
-                    "excess": round(max(0.0, (b - a) - (cap + DEAD_AIR_SLACK)), 3)})
+                    "excess": round(max(0.0, (b - a) - (cap + config.min_pause_cut + DEAD_AIR_SLACK)), 3)})
     return out
+
+
+def _min_segment(plan: Plan, f: dict) -> CheckResult:
+    """No kept segment shorter than min_segment_sec: a shorter one is a flash between two jump cuts. The edge pass
+    absorbs or restores such slivers; this reports any it could not."""
+    limit = f.get("min_segment_sec", Config().min_segment_sec)
+    short = [s for s in plan.segments if s.length < limit - 1e-3]
+    if not short:
+        shortest = min((s.length for s in plan.segments), default=0.0)
+        return CheckResult("min_segment", "fatal", True,
+                           f"no kept segment under {limit:.2f}s (shortest {shortest:.2f}s)")
+    worst = ", ".join(f"{s.source} {s.start:.2f}-{s.end:.2f}s ({s.length:.2f}s)" for s in short[:5])
+    return CheckResult("min_segment", "fatal", False,
+                       f"{len(short)} kept segment(s) under {limit:.2f}s: {worst}")
+
 
 
 def _judged_removals(plan: Plan, f: dict) -> CheckResult:
@@ -716,7 +732,7 @@ def run_picture_checks(plan: Plan, facts: dict) -> list[CheckResult]:
 
 CHECKS: list[Callable[[Plan, dict], CheckResult]] = [
     _audio_stream, _duration, _loudness, _cold_open, _judged_removals, _clipped_words, _cut_word_fragments,
-    _residual_gaps, _residual_disfluencies,
+    _residual_gaps, _residual_disfluencies, _min_segment,
     _render_silence, _joins, _join_edges, _source_timing, _source_similarity, _unclassified_voice,
 ]
 
@@ -1138,6 +1154,7 @@ def collect_facts(
         "gap_budget": max(1.0, float(os.environ.get("TALKINGHEAD_GAP_BUDGET_FRACTION", 0.005)) * source_duration),
         "dead_air": dead_air_excess([(a, b) for a, b, _ in runs], words, config, raw=[r for _, _, r in runs]),
         "quiet_silence_min": quiet_silence_min(config),
+        "min_segment_sec": config.min_segment_sec,
         "render_silences": render_silences(wav, quiet_silence_min(config)),
         "render_transcript": transcript.to_dict(),
         # The isolated render's own word count, when the judged transcript came from another audio (isolation).

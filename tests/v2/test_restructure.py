@@ -330,14 +330,14 @@ def test_restructure_config_is_validated() -> None:
 # code existed. A change here means existing prompts, memo keys or plans would stop replaying.
 BASE_DIGESTS = {
     "cold_open_prompt": "ba262e3b38eb2895cb744166",
-    "config_full": "7f75077128cf4bbecd3b69626c641b322acf8f3330b8286425ad7f34562169ab",
+    "config_full": "e7fb96a31fbed1cfe2441374a0b47abb89d10aef8ce24626cb4c47e6144c2b95",
     "content_prompt": "58e067ef91e916e3ca06680b",
     "memo_content": "85861a8145656ff10240b8bf",
-    "memo_pauses": "5fd662422a0aa7b81242f84f",
+    "memo_pauses": "b5a4eec4e73f4b80ef0a852c",
     "memo_retakes": "666065350fa02f44600575af",
     "memo_structure": "e948824683c9030cb80d6d82",
     "plan_json": "c8352e6d19ec5c72b599402dbaf7768d33b9e07679f30498edde3ce9dac954b1",
-    "retake_prompt": "d62a725f56ad4dbf3e5265a6",
+    "retake_prompt": "068812e1b44c2d8cef7188aa",
     "sentences": "90070d97a16d3a75cec664be2a6a4b004ebd95574b2b6154272f062a87b8ed19",
 }
 

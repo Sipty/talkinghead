@@ -227,7 +227,7 @@ def _extent(w) -> tuple[float, float]:
 
 
 def gap_cuts(ctx: Context, cuts: list[Cut], blocks: list[Block]) -> list[Cut]:
-    """Silence cuts for every kept gap longer than its cap.
+    """Silence cuts for every kept gap longer than its cap, unless the cut would remove min_pause_cut seconds or less.
 
     `cuts` are the raw cuts plus the disfluency cuts. A gap is the silence between consecutive word extents, and
     both words are kept. No word-removing cut touches it, and no voiced or protected audio lies in the cut. The
@@ -259,12 +259,12 @@ def gap_cuts(ctx: Context, cuts: list[Cut], blocks: list[Block]) -> list[Cut]:
         speaker_change = (words[p].speaker is not None and words[q].speaker is not None
                           and words[p].speaker != words[q].speaker)
         cap, boundary = _cap(cfg, at_block, speaker_change, p in sentence_ends)
-        if not pieces or total - cap < cfg.min_cut_sec:
+        if not pieces or total - cap <= cfg.min_pause_cut + 1e-9:
             continue
         a = max(_kept_at(pieces, cap / 2), lo + GAP_PAD_AFTER)
         b = min(_kept_at(pieces, total - cap / 2), hi - GAP_PAD_BEFORE)
         for x, y in blocked.subtract(a, b):
-            if y - x >= cfg.min_cut_sec:
+            if y - x > cfg.min_pause_cut + 1e-9 and y - x >= cfg.min_cut_sec:
                 out.append(Cut(x, y, GAP_REASON, "", {"cap": cap, "boundary": boundary, "words": [p, q]}))
     return out
 

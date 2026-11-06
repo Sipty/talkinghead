@@ -57,7 +57,7 @@ def test_each_gap_is_capped_by_the_boundary_it_sits_on() -> None:
     cuts = polish.gap_cuts(_ctx(GAP_WORDS), [], [])
     sentence = _gap_cut(cuts, "sentence")
     assert (sentence.start, sentence.end) == pytest.approx((0.75, 1.65))     # 0.30 kept: 0.15 each side
-    assert _gap_cut(cuts, "within").length == pytest.approx(0.15)            # 0.30 gap, cap 0.15
+    assert not [c for c in cuts if c.reason == "gap" and c.provenance["boundary"] == "within"]  # 0.15 trim: kept whole
     assert _gap_cut(cuts, "speaker").length == pytest.approx(1.00)           # 1.20 gap, cap 0.20
 
 
@@ -78,7 +78,7 @@ def test_a_gap_already_within_its_cap_is_left_alone() -> None:
 def test_protected_events_inside_a_gap_are_kept_whole() -> None:
     cuts = polish.gap_cuts(_ctx(GAP_WORDS, protected=[(1.0, 1.2)]), [], [])
     sentence_gap = sorted((c.start, c.end) for c in cuts if c.reason == "gap" and c.start < 1.65 and c.end > 0.75)
-    assert [(round(a, 6), round(b, 6)) for a, b in sentence_gap] == [(0.75, 1.0), (1.2, 1.65)]
+    assert sentence_gap == []   # the laugh splits the 0.90 s trim into 0.25 s and 0.45 s, neither a cut over 0.60 s
     assert not [c for c in cuts if c.start < 1.2 and c.end > 1.0]
 
 
@@ -96,9 +96,9 @@ def test_a_word_removing_cut_over_the_gap_leaves_the_gap_alone() -> None:
 
 
 def test_kept_audio_left_in_the_gap_is_the_cap_when_a_mechanical_cut_already_took_some() -> None:
-    # The pauses stage already took 0.9-1.5 s out: kept audio in the gap is 0.3 + 0.3 s. Capping it at 0.30 s
-    # cuts 0.30 s of kept audio, so the cut spans the silence and 0.15 s stays on each side.
-    cuts = polish.gap_cuts(_ctx(GAP_WORDS), [Cut(0.9, 1.5, "silence")], [])
+    # The pauses stage already took 0.2 s out: kept audio in the gap is 0.3 + 0.7 s. Capping it at 0.30 s
+    # removes 0.70 s, so the cut spans the silence and 0.15 s stays on each side.
+    cuts = polish.gap_cuts(_ctx(GAP_WORDS), [Cut(0.9, 1.1, "silence")], [])
     sentence = _gap_cut(cuts, "sentence")
     assert (sentence.start, sentence.end) == pytest.approx((0.75, 1.65))
     assert (sentence.start - 0.60) + (1.80 - sentence.end) == pytest.approx(0.30)

@@ -94,7 +94,7 @@ def test_loudness_window_and_cold_open_invariant() -> None:
 
 
 def test_residual_gap_budget_is_fatal_and_join_flags_are_recorded() -> None:
-    gappy = _facts(dead_air=_excess([(3.0, 5.0)]), gap_budget=1.0)
+    gappy = _facts(dead_air=_excess([(3.0, 6.0)]), gap_budget=1.0)
     results = {r.name: r for r in run_checks(_plan(), gappy)}
     assert not results["residual_gaps"].ok and results["residual_gaps"].severity == "fatal"
     flagged = _facts(join_grades=[{"t": 40.0, "grade": "CLIPPED: voiced audio within 30ms of join"}])
@@ -127,8 +127,8 @@ def _excess(runs, words=None) -> list[dict]:
 
 
 def test_residual_gap_check_counts_only_the_excess_over_the_boundary_cap() -> None:
-    results = {r.name: r for r in run_checks(_plan(), _facts(dead_air=_excess([(20.0, 20.8), (25.5, 26.5)]), gap_budget=0.5))}
-    # mid-sentence cap 0.40 + 0.10 slack: 0.3 s and 0.5 s of it are dead air.
+    results = {r.name: r for r in run_checks(_plan(), _facts(dead_air=_excess([(20.0, 21.5), (25.5, 27.0)]), gap_budget=0.5))}
+    # mid-sentence cap 0.40 + min_pause_cut 0.60 + 0.10 slack: 0.4 s of each run is dead air.
     assert not results["residual_gaps"].ok and "0.80s" in results["residual_gaps"].detail
     assert results["residual_gaps"].detail.count("mid") == 2
     results = {r.name: r for r in run_checks(_plan(), _facts(dead_air=[], gap_budget=1.0))}
@@ -148,22 +148,22 @@ def test_intended_pauses_are_not_dead_air_but_a_long_mid_sentence_gap_is() -> No
     assert (topic["boundary"], sentence["boundary"], mid["boundary"]) == ("topic", "sentence", "mid")
     # 0.80 s kept out of a 2.5 s topic pause: inside the topic cap.
     assert topic["end"] - topic["start"] == pytest.approx(0.8) and topic["excess"] == 0.0
-    # 0.70 s after a sentence: 0.05 s beyond cap 0.55 + 0.10 slack, far inside the budget.
-    assert sentence["excess"] == pytest.approx(0.05, abs=1e-3)
-    # 1.5 s untouched mid-sentence: 1.0 s beyond cap 0.40 + 0.10.
-    assert mid["excess"] == pytest.approx(1.0, abs=1e-3)
+    # 0.70 s after a sentence: inside cap 0.55 + min_pause_cut 0.60 + slack 0.10, so a pause kept whole is not dead air.
+    assert sentence["excess"] == 0.0
+    # 1.5 s untouched mid-sentence: 0.4 s beyond cap 0.40 + 0.60 + 0.10.
+    assert mid["excess"] == pytest.approx(0.4, abs=1e-3)
     results = {r.name: r for r in run_checks(_plan(), _facts(dead_air=[topic, sentence]))}
     assert results["residual_gaps"].ok
-    assert "1 of 2" in results["residual_gaps"].detail
-    results = {r.name: r for r in run_checks(_plan(), _facts(dead_air=[topic, sentence, mid], gap_budget=0.9))}
+    assert "0 of 2" in results["residual_gaps"].detail
+    results = {r.name: r for r in run_checks(_plan(), _facts(dead_air=[topic, sentence, mid], gap_budget=0.3))}
     assert not results["residual_gaps"].ok and results["residual_gaps"].severity == "fatal"
 
 
 def test_a_pause_kept_beyond_its_cap_is_counted_by_the_excess() -> None:
     words = [Word("done.", 5.0, 5.4, 1.0)]
-    (run,) = verify.dead_air_excess([(5.4, 6.7)], words, Config(), raw=[1.8])  # topic cap 0.80 + 0.10
+    (run,) = verify.dead_air_excess([(5.4, 7.3)], words, Config(), raw=[1.8])  # topic cap 0.80 + 0.60 + 0.10
     assert run["boundary"] == "topic" and run["excess"] == pytest.approx(0.4, abs=1e-3)
-    (run,) = verify.dead_air_excess([(5.4, 6.7)], words, Config())  # same run, raw 1.3 s: sentence
+    (run,) = verify.dead_air_excess([(5.4, 7.3)], words, Config(), raw=[1.3])  # same run, raw 1.3 s: sentence
     assert run["boundary"] == "sentence" and run["excess"] == pytest.approx(0.65, abs=1e-3)
 
 

@@ -191,4 +191,5 @@ def test_pauses_stage_cuts_silences_and_fillers_mechanically() -> None:
     # (sentence end) keeps its 0.55 s cap, centred.
     lead = [c for c in cuts if c.reason == "silence" and 0.6 <= c.start <= 1.0]
     assert lead and (lead[0].start, lead[0].end) == pytest.approx((0.875, 1.725))
-    assert notes["pauses"]["silence"] >= 4
+    # The 0.7 s, 0.6 s, 0.4 s and 1.0 s pauses would each trim 0.60 s or less, so they stay whole (min_pause_cut).
+    assert notes["pauses"]["silence"] == 2

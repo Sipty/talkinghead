@@ -159,6 +159,12 @@ def retake_prompt(table: str, topic: str | None) -> str:
         "reverse the claim, or duplicate connecting words. If a clean deletion cannot preserve "
         "the intended meaning, keep the passage. Do not list pauses, fillers, or content you "
         "merely find weak; those are other tasks. Empty list when there are none.\n\n"
+        "Where the abandoned attempt starts: a restart re-does a point he has already begun, so the abandoned "
+        "attempt starts at the first sentence he gave for that point, even when that sentence is complete. When "
+        "the restart repeats the substance of the sentence before it (\"And then you should have presentations.\" "
+        "followed by \"And ideally, what else you would do here is...\"), that whole sentence belongs to the abandoned "
+        "attempt: the range starts at its first word, not at the restart. Never start a range inside a sentence the "
+        "restart re-introduces.\n\n"
         f"--- TRANSCRIPT (word ids in brackets) ---\n{table}\n"
     )
 

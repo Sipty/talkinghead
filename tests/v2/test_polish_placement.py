@@ -16,13 +16,13 @@ from .test_polish import GAP_WORDS, W, _ctx
 def test_a_gap_cut_keeps_clear_of_a_word_whose_asr_stamps_run_past_its_refined_bounds() -> None:
     # Restaurant noise shortens the refined bounds of "OpenLlama" to 0.5-0.7 s; the ASR stamps still say 0.5-1.6 s.
     words = [W("a.", 0.0, 0.3, "S0"), RefinedWord("OpenLlama", 0.5, 0.7, 0.5, 1.6, 1.0, speaker="S0"),
-             W("b.", 2.4, 2.6, "S0")]
+             W("b.", 2.9, 3.1, "S0")]
     cuts = polish.gap_cuts(_ctx(words), [], [])
     assert len(cuts) == 1
     cut = cuts[0]
     assert all(not (cut.start < w.asr_end and cut.end > w.asr_start) for w in words)
     assert cut.start >= 1.6 + polish.GAP_PAD_AFTER - 1e-9
-    assert cut.end <= 2.4 - polish.GAP_PAD_BEFORE + 1e-9
+    assert cut.end <= 2.9 - polish.GAP_PAD_BEFORE + 1e-9
 
 
 def test_agreed_extents_remove_only_words_enough_samples_name() -> None:
