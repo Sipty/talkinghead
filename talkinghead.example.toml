@@ -51,6 +51,13 @@
 # Interior pauses longer than this many seconds are trimmed.
 # pause_above = 0.35
 
+# A silence-only cut is made only when it removes more than this many seconds; shorter pauses stay whole. 0 restores
+# every trim. See README "Pacing".
+# min_pause_cut = 0.6
+
+# Kept segments shorter than this are repaired by the edge pass; verify FAILs one it cannot repair. 0 disables it.
+# min_segment_sec = 0.5
+
 # Content cuts: passages the judge finds that do not earn their runtime. false turns them off.
 # content_enabled = true
 

@@ -182,6 +182,11 @@ pause of at least `pause_topic_above` (1.5 s) counts as a topic change, 0.80 s. 
 sit near the speaker's own p75-p90 natural pauses, so a topic change keeps a longer beat
 than a hesitation.
 
+A silence-only cut must remove more than `min_pause_cut` (0.6 s) to be made. A trim that small would read as a visible jump on picture,
+so the pause stays whole; longer dead air is still trimmed to its boundary cap. The dead-air check (`verify.dead_air_excess`)
+allows a pause up to its cap plus `min_pause_cut` plus `DEAD_AIR_SLACK`, and the render-silence check counts runs from
+`pause_cap_topic + min_pause_cut + DEAD_AIR_SLACK` upward. `min_pause_cut` is in the pauses and polish memo keys.
+
 ### 6b. Restructure (judge, opt-in)
 
 `stages/restructure.py`, enabled by `restructure = true`. The kept transcript (sentences no earlier cut
@@ -213,7 +218,8 @@ the block cuts). Two source-side parts, both returning cuts that the edge pass p
   it sits on, most specific first: block boundary (`polish_gap_block`, 0.45 s), speaker change (`polish_gap_speaker`,
   0.20 s), sentence end (`polish_gap_sentence`, 0.30 s), inside a sentence (`polish_gap_within`, 0.15 s). The cut leaves
   half the cap on each side. A gap is tightened only when both words are kept and no word-removing cut lies in it, and
-  protected events inside it are kept whole. The gap cut has reason `gap`: it removes no words.
+  protected events inside it are kept whole. A gap cut must remove more than `min_pause_cut` (0.6 s), so a gap is trimmed only
+  when the trim would be longer than that; a protected event that splits a gap can leave both halves uncut. The gap cut has reason `gap`: it removes no words.
 - **Disfluency judge**. Kept sentences are judged in windows of `polish_window_sec` with `polish_context_sec` of
   read-only context. The judge names word spans to remove (repeats, false starts, self-corrections, fillers, fragments,
   clutter exchanges, interrupting backchannels). Each window is sampled `polish_votes` times and a span is cut only when
@@ -291,6 +297,15 @@ Natural continuous-speech pauses are not shortened solely to force an 80 ms edit
 predicate verify's `join_edges` uses: when enabled, a micro-filler glued into running speech is kept
 because the tight splice its removal makes can be more noticeable than the filler.
 Retake, content and join cuts stay even with a voiced edge, since they remove real words.
+
+`enforce_min_segments` runs last in `finalize_cuts`. A kept segment shorter than `min_segment_sec` (0.5 s) is repaired: a sliver
+with no kept word is absorbed by growing an automatic neighbouring cut over it, and a sliver holding a kept word gets an
+adjacent pause-only cut (reason `silence` or `gap`, no word inside) restored, so the word joins the kept material beyond it.
+Hand cuts are never changed, and a word-removing cut is never reopened. A sliver with no legal repair stays and is listed in
+`plan.provenance["min_segment"]["unfixed"]`; verify's `min_segment` check FAILs the plan. `refine_joins` does not move a join
+so that a neighbouring segment shrinks below the minimum.
+
+`trim_opening` runs after `restructure.reorder` on the plan's first segment: silence kept before the output's first word is cut back to `pad`, as leading silence always was, so a cold open or a reordered block that now leads starts on its word. The trimmed span is added to `plan.cuts`, and the trim is skipped where it would take voiced audio, laughter or a hand cut.
 
 `protect_words` guards two kinds of kept audio, and the difference matters. Words are
 always protected, and so are `Context.voices`: the voiced spans no word covers. That

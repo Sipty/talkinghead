@@ -333,6 +333,24 @@ Two config keys bring back a gentler policy:
 `min_filler_dur` is part of the pauses stage's memo key, so rerunning a cook made under the old default recomputes that mechanical stage.
 No judge call runs again, and the replaced memo is kept as `stages/pauses.superseded.json`.
 
+### Pacing: no jump cut that removes only silence
+
+On single-camera video every cut is a visible jump, so a cut that removes only silence reads as a glitch.
+Two defaults keep the cut crisp without that:
+
+| key | default | effect |
+|---|---|---|
+| `min_pause_cut` | `0.6` | a silence-only cut (the pauses stage and gap tightening) is made only when it removes more than this many seconds. A shorter trim keeps the natural pause whole. Longer dead air is still trimmed down to its boundary cap. `0` restores every trim the policy asks for |
+| `min_segment_sec` | `0.5` | no kept segment shorter than this survives the edge pass. A sliver with no word is absorbed into a neighbouring cut. A sliver holding a word gets its adjacent pause restored, and a word-removing cut is never reopened. `verify` FAILs a plan that still has such a sliver. `0` disables the repair |
+
+Audio-only cooks (`--audio-only`) take the same defaults. A cook that wants the old tighter pacing sets both keys to `0` in its own TOML.
+
+Re-keying: `min_pause_cut` is in the pauses and polish memo keys, so an older cook re-derives those two mechanical stages on its next run. No judge call runs again for them, since the disfluency prompts are unchanged and replay from `llm/`; the replaced memos are kept as `stages/<stage>.superseded.json`.
+The retake prompt also changed (an abandoned attempt starts at the first sentence its restart repeats), so the retake stage re-judges on its next run and its memo is superseded.
+`min_segment_sec` is in no memo key: the edge pass runs on every run, and the render follows the plan.
+The output opens on its first word: silence kept before it is cut back to the edge pad (0.15 s), as leading silence always was. The pause policy alone would keep a head pause whole, which the cold-open check then fails.
+
+
 ### Overlay assets
 
 `editorial/assets/` is a small library of diagrams made for this project (MIT, see `editorial/assets/CREDITS.md`).
