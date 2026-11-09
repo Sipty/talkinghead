@@ -293,7 +293,10 @@ def _join_gain_db(out_src: np.ndarray, out_end: int, in_src: np.ndarray, in_star
 
     Each side is read 20-200 ms from the join, as the join grader reads it. The
     gain is zero unless both sides are voiced above the local room tone, so
-    quiet joins keep unity gain.
+    quiet joins keep unity gain. A boost never lifts the incoming side's peak
+    (over the ramp) above the outgoing side's peak: a loud onset right after the
+    join, such as a shouted plosive, would otherwise become the program's true
+    peak and pull the whole master's fixed gain down.
     """
     rate = AUDIO_RATE
     room_n = round(GAIN_ROOM_WINDOW_SEC * rate)
@@ -308,7 +311,19 @@ def _join_gain_db(out_src: np.ndarray, out_end: int, in_src: np.ndarray, in_star
     pre_db, post_db = float(pre.mean()), float(post.mean())
     if min(pre_db, post_db) <= room + GAIN_VOICED_ABOVE_ROOM_DB:
         return 0.0
-    return float(np.clip(pre_db - post_db, -GAIN_MATCH_CAP_DB, GAIN_MATCH_CAP_DB))
+    gain = float(np.clip(pre_db - post_db, -GAIN_MATCH_CAP_DB, GAIN_MATCH_CAP_DB))
+    if gain > 0:
+        out_peak = _peak(out_src, out_end - round(0.2 * rate), out_end)
+        in_peak = _peak(in_src, in_start, in_start + round(GAIN_RAMP_SEC * rate))
+        if in_peak > 0 and out_peak > 0:
+            gain = min(gain, max(0.0, 20 * float(np.log10(out_peak / in_peak))))
+    return gain
+
+
+def _peak(src: np.ndarray, start: int, end: int) -> float:
+    """Largest absolute sample over all channels of the real source in [start, end)."""
+    lo, hi = max(0, start), min(len(src), end)
+    return float(np.abs(src[lo:hi]).max()) if hi > lo else 0.0
 
 
 def join_audio(sources: dict[str, np.ndarray], segments: list[Segment], crossfade_sec: float) -> np.ndarray:

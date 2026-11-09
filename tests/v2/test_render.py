@@ -619,6 +619,20 @@ def test_a_voiced_join_gain_matches_the_incoming_side_then_eases_back_to_unity()
     assert _rms_db(settled) == pytest.approx(post, abs=0.5)    # unity again after the ramp
 
 
+def test_a_join_boost_never_lifts_a_loud_incoming_onset_above_the_source_peak() -> None:
+    # Steady 0.3 sine out; the incoming side opens on a 0.9 burst (a shouted plosive) and then runs quiet,
+    # so its mean level asks for a boost that would push the burst past every sample in the source.
+    rate = AUDIO_RATE
+    x = np.zeros((2 * rate, 1), dtype=np.float32)
+    tt = np.arange(rate // 2) / rate
+    x[int(0.4 * rate):int(0.9 * rate), 0] = 0.3 * np.sin(2 * np.pi * 440 * tt)
+    x[int(1.1 * rate):int(1.6 * rate), 0] = 0.05 * np.sin(2 * np.pi * 440 * tt)
+    burst = slice(int(1.13 * rate), int(1.15 * rate))
+    x[burst, 0] = 0.9 * np.sin(2 * np.pi * 440 * np.arange(burst.stop - burst.start) / rate)
+    out = join_audio({"a": x}, [Segment("a", 0.4, 0.9), Segment("a", 1.1, 1.6)], 0.020)
+    assert float(np.abs(out).max()) <= float(np.abs(x).max()) + 1e-4
+
+
 def test_a_join_between_two_room_tone_sides_keeps_unity_gain() -> None:
     rng = np.random.default_rng(0)
     x = (0.001 * rng.standard_normal((AUDIO_RATE, 1))).astype(np.float32)
