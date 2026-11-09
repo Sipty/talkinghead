@@ -337,7 +337,8 @@ def plan_invariants(plan: Plan, words: Sequence, judged: Sequence[tuple[float, f
     if fps:
         end = plan.sources[plan.main].duration
         edges = [x for c in plan.cuts for x in (c.start, c.end)]
-        edges += [x for s in plan.segments for x in (s.start, s.end) if x not in (0.0, end)]
+        edges += [x for s in plan.segments for x in (s.start, s.end)]
+        edges = [x for x in edges if x not in (0.0, end)]
         off = sum(1 for x in edges if abs(x * fps - round(x * fps)) > 0.02)
         for s in plan.segments:
             a, b = round(s.start * fps) / fps, round(s.end * fps) / fps
