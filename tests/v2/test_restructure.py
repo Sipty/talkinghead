@@ -344,8 +344,9 @@ BASE_DIGESTS = {
 
 def test_a_speakerless_cook_with_restructure_off_keeps_its_prompts_keys_and_plan() -> None:
     import hashlib
+    from types import SimpleNamespace
 
-    from talkinghead.pipeline import STAGE_CONFIG_KEYS
+    from talkinghead.pipeline import _stage_config
     from talkinghead.store import stable_key
 
     words = [Word("Hold", 0.00, 0.30, 1.0), Word("on.", 0.30, 0.60, 1.0),
@@ -367,8 +368,9 @@ def test_a_speakerless_cook_with_restructure_off_keeps_its_prompts_keys_and_plan
         "config_full": h(cfg.to_dict()),
     }
     for stage in ("structure", "retakes", "content", "pauses"):
-        keys = STAGE_CONFIG_KEYS[stage]
-        got[f"memo_{stage}"] = stable_key({"audio": "a", "config": {k: getattr(cfg, k) for k in keys}, "judge": "j"}, 2)
+        # Through the pipeline's own key builder, so a key it adds to a stage's memo shows up here.
+        got[f"memo_{stage}"] = stable_key({"audio": "a", **_stage_config(SimpleNamespace(config=cfg), stage),
+                                           "judge": "j"}, 2)
     plan = Plan.from_cuts(SourceInfo("main", "/v/in.mp4", "sha", 9.0),
                           [Cut(0.0, 2.0, "cold-open"), Cut(4.0, 4.5, "filler"), Cut(8.5, 9.0, "outro")])
     got["plan_json"] = h(plan.to_json())

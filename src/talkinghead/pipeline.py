@@ -17,7 +17,7 @@ from pathlib import Path
 from . import audio_assess, isolate, prompts
 from .align import AlignResult, align
 from .analysis import analyze
-from .config import ISOLATE_KEYS, Config
+from .config import ISOLATE_KEYS, STAGE_VOTE_KEYS, Config
 from .context import Context, NeedsDecision
 from .edges import WORD_CUT_REASONS, EdgeContext, finalize_cuts, is_intra_restart, refine_joins, trim_opening
 from .judge import Judge
@@ -55,6 +55,8 @@ from .visuals.verify import verify_visuals
 STAGE_VERSION = 2
 STAGE_VERSION_OVERRIDES = {"content": 3}
 VISUALS_STAGE_VERSION = 6
+# The cook's own copy of the brief its content judge reads.
+BRIEF_FILE = "brief.md"
 ALIGN_STAGE_VERSION = 2
 
 
@@ -346,10 +348,12 @@ def _align_source(run: RunDir, video: str, audio: str, config: Config, *, fix_dr
 # indirectly, through Context.sentences()).
 _JUDGE_KEYS = ("votes", "agree")
 STAGE_CONFIG_KEYS: dict[str, tuple[str, ...] | None] = {
-    "structure": _JUDGE_KEYS + ("cold_open_window_sec", "outro_window_sec", "sentence_split_pause"),
-    "retakes": _JUDGE_KEYS + ("marker_votes", "marker_agree", "retake_max_sec", "sentence_split_pause"),
-    "content": _JUDGE_KEYS + ("content_enabled", "content_max_cut_sec", "content_max_fraction",
+    "structure": _JUDGE_KEYS + ("structure_votes", "structure_agree", "cold_open_window_sec", "outro_window_sec",
+                                "sentence_split_pause"),
+    "retakes": _JUDGE_KEYS + ("retake_votes", "retake_agree", "marker_votes", "marker_agree", "retake_max_sec",
                               "sentence_split_pause"),
+    "content": _JUDGE_KEYS + ("content_votes", "content_agree", "content_enabled", "content_max_cut_sec",
+                              "content_max_fraction", "sentence_split_pause"),
     "pauses": ("pause_above", "pause_keep", "pause_keep_ratio", "pause_cap_mid", "pause_cap_clause",
                "pause_cap_sentence", "pause_cap_topic", "pause_topic_above", "min_filler_dur", "min_pause_cut"),
     "restructure": ("restructure_brief", "restructure_window_sec", "restructure_context_sec",
@@ -371,9 +375,26 @@ def _stage_config(ctx: Context, stage: str) -> dict:
         # knobs change which cuts exist, and the plan itself carries that into every stage that reads the plan.
         full = {k: v for k, v in cfg.to_dict().items()
                 if k != "polish" and not k.startswith("polish_") and k not in ISOLATE_KEYS
-                and k not in ("min_pause_cut", "min_segment_sec")}
+                and k not in ("min_pause_cut", "min_segment_sec") and k not in STAGE_VOTE_KEYS}
         return {"config": full}
-    return {"config": {k: getattr(cfg, k) for k in keys}}
+    # An unset per-stage vote count is left out, so a cook that never set one keeps its memo keys.
+    return {"config": {k: getattr(cfg, k) for k in keys
+                       if not (k in STAGE_VOTE_KEYS and getattr(cfg, k) is None)}}
+
+
+def _cook_brief(run: RunDir, given: str) -> str:
+    """The brief this cook's content judge reads.
+
+    A brief passed in becomes the cook's copy, and later runs read the copy: a resume that forgets the flag
+    must not judge the content again without it.
+    """
+    path = run.root / BRIEF_FILE
+    given = given.strip()
+    if given:
+        if not path.is_file() or path.read_text().strip() != given:
+            atomic_write_text(path, given + "\n")
+        return given
+    return path.read_text().strip() if path.is_file() else ""
 
 
 def _digest(value) -> str:
@@ -497,6 +518,7 @@ def run_pipeline(
     refresh_preferences: bool = False,
     plan_only: bool = False,
     stop_at_lock: bool = False,
+    brief: str = "",
 ) -> RunResult:
     # The pool's exit joins its worker on every path (return, DECISION NEEDED, PipelineError, any exception), so the
     # audio assessment never outlives the cook. No thread starts unless the cook submits the assessment.
@@ -507,7 +529,7 @@ def run_pipeline(
             fix_drift=fix_drift, allow_bad_align=allow_bad_align, allow_av_mismatch=allow_av_mismatch, fresh=fresh,
             assets_dir=assets_dir, audio_only=audio_only, verify_output_asr=verify_output_asr,
             preferences=preferences, refresh_preferences=refresh_preferences, plan_only=plan_only,
-            stop_at_lock=stop_at_lock)
+            stop_at_lock=stop_at_lock, brief=brief)
 
 
 def _run_pipeline(
@@ -535,6 +557,7 @@ def _run_pipeline(
     refresh_preferences: bool,
     plan_only: bool,
     stop_at_lock: bool,
+    brief: str,
 ) -> RunResult:
     """The cook itself; `run_pipeline` owns the worker pool this runs the audio assessment on."""
     if stop_at_lock and (audio_only or plan_only):
@@ -574,8 +597,9 @@ def _run_pipeline(
         stored.update(decisions)
         run.write_json(run.decisions, stored)
 
+    brief = _cook_brief(run, brief)
     ctx = analyze(video, run.root, config, transcriber, judge, cache=cache, guidelines=guidelines,
-                  topic=topic, preferences=preferences, allow_av_mismatch=allow_av_mismatch,
+                  topic=topic, preferences=preferences, brief=brief, allow_av_mismatch=allow_av_mismatch,
                   audio_only=audio_only)
     plan_path = run.root / f"{prefix}plan.json"
     final = run.root / f"{prefix}final.{'wav' if audio_only else 'mp4'}"
@@ -628,7 +652,9 @@ def _run_pipeline(
     notes["structure"] = {k: {"chosen": v.get("chosen", v.get("value")), "source": v["source"]} for k, v in decided.items()}
     retake_cuts, n = memo_cuts("retakes", lambda: retakes.run(ctx), {"retake_policy": _retake_policy()})
     notes.update(n)
-    content_cuts, n = memo_cuts("content", lambda: content.run(ctx, existing=structural + retake_cuts))
+    # The brief reshapes only the content judge's prompt, so only the content memo keys on it; absent when empty.
+    content_cuts, n = memo_cuts("content", lambda: content.run(ctx, existing=structural + retake_cuts),
+                                {"brief": _digest(brief)} if brief else None)
     notes.update(n)
     # With isolation the pauses stage reads silence from the isolated track, so its memo keys on that silence. Only
     # the pauses memo (and the polish stages that build on its cuts) re-key; transcription, retakes and content do not.

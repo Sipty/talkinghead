@@ -1,6 +1,10 @@
 """Content cuts: whole sentences the judge says do not earn their runtime,
 voted per sentence, capped, then checked by a coherence pass that may veto
-or extend a cut (both by supermajority)."""
+or extend a cut (both by supermajority).
+
+Only a passage that clears the vote and both caps is cut. Every other passage a
+sample named is kept as a proposal in the stage notes, with its vote count and
+the reason it was not applied, for the editor to decide."""
 
 from __future__ import annotations
 
@@ -23,12 +27,13 @@ def _runs(indices: list[int]) -> list[tuple[int, int]]:
     return out
 
 
-def _limit(cuts: list[Cut], ctx: Context, notes: dict) -> list[Cut]:
-    """Drop cuts over the per-cut cap, then the weakest over the content budget."""
+def _limit(cuts: list[Cut], ctx: Context, notes: dict, dropped: list[tuple[Cut, str]]) -> list[Cut]:
+    """Drop cuts over the per-cut cap, then the weakest over the content budget; `dropped` collects each with why."""
     kept: list[Cut] = []
     for c in cuts:
         if c.length > ctx.config.content_max_cut_sec:
             notes["content"]["dropped_overlong"] += 1
+            dropped.append((c, "overlong"))
         else:
             kept.append(c)
     # The budget is a share of the video for content cuts alone: structural
@@ -41,19 +46,28 @@ def _limit(cuts: list[Cut], ctx: Context, notes: dict) -> list[Cut]:
         kept.remove(weakest)
         total -= weakest.length
         notes["content"]["dropped_over_budget"] += 1
+        dropped.append((weakest, "over_budget"))
     return kept
+
+
+def _proposal(c: Cut, status: str, asked: int) -> dict:
+    """One judged passage as the editor reads it: where it is, how many samples named it, and what became of it."""
+    return {"sentences": c.provenance["sentences"], "start": round(c.start, 3), "end": round(c.end, 3),
+            "seconds": round(c.length, 2), "votes": c.provenance["votes"], "of": asked,
+            "reason": c.provenance["reason"], "status": status, "text": " ".join(c.text.split())[:240]}
 
 
 def run(ctx: Context, existing: list[Cut]) -> tuple[list[Cut], dict]:
     notes: dict = {"content": {"cuts": 0, "vetoed": 0, "extended": 0, "dropped_overlong": 0,
-                               "dropped_over_budget": 0, "enabled": ctx.config.content_enabled}}
+                               "dropped_over_budget": 0, "enabled": ctx.config.content_enabled, "proposals": []}}
     if not ctx.config.content_enabled:
         return [], notes
+    asked, agree = ctx.config.stage_votes("content")
     sents = ctx.sentences()
     by_sid = {s.sid: i for i, s in enumerate(sents)}
-    prompt = with_preferences(with_conversation(content_prompt(sents, ctx.topic), ctx.conversation), ctx.preferences)
-    result = vote(ctx.judge, prompt, CONTENT_SCHEMA,
-                  k=ctx.config.votes, cache=ctx.llm_cache)
+    prompt = with_preferences(with_conversation(content_prompt(sents, ctx.topic, ctx.brief), ctx.conversation),
+                              ctx.preferences)
+    result = vote(ctx.judge, prompt, CONTENT_SCHEMA, k=asked, cache=ctx.llm_cache)
     coverage: Counter[int] = Counter()
     reasons: dict[int, Counter] = {}
     for resp in result.responses:
@@ -65,31 +79,34 @@ def run(ctx: Context, existing: list[Cut]) -> tuple[list[Cut], dict]:
                     seen.add(i)
                     reasons.setdefault(i, Counter())[entry.get("reason", "no-value")] += 1
         coverage.update(seen)
-    removed = sorted(i for i, c in coverage.items() if c >= ctx.config.agree)
 
-    cuts: list[Cut] = []
-    for a, b in _runs(removed):
-        start, end = sents[a].start, sents[b].end
+    def passage(a: int, b: int, votes: int) -> Cut:
         reason = Counter()
         for i in range(a, b + 1):
             reason.update(reasons.get(i, {}))
-        cuts.append(Cut(start, end, "content", " ".join(s.text for s in sents[a:b + 1]), provenance={
+        return Cut(sents[a].start, sents[b].end, "content", " ".join(s.text for s in sents[a:b + 1]), provenance={
             "sentences": [sents[a].sid, sents[b].sid],
             "reason": reason.most_common(1)[0][0] if reason else "no-value",
-            "votes": min(coverage[i] for i in range(a, b + 1)),
-        }))
-    cuts = _limit(cuts, ctx, notes)
+            "votes": votes,
+        })
+
+    # A passage is cut on its weakest sentence's count; one below the bar is reported on its strongest.
+    cuts = [passage(a, b, min(coverage[i] for i in range(a, b + 1)))
+            for a, b in _runs(sorted(i for i, c in coverage.items() if c >= agree))]
+    unapplied: list[tuple[Cut, str]] = [
+        (passage(a, b, max(coverage[i] for i in range(a, b + 1))), "below_agree")
+        for a, b in _runs(sorted(i for i, c in coverage.items() if 0 < c < agree))]
+    cuts = _limit(cuts, ctx, notes, unapplied)
 
     # Coherence: does the script still read with these passages gone?
     if cuts:
         prompt = build_coherence_prompt(sents, cuts, ctx.topic or "")
         prompt = prompt.replace("Respond with JSON only:", "TASK: COHERENCE\nRespond with JSON only:")
         coh_prompt = with_preferences(with_conversation(prompt, ctx.conversation), ctx.preferences)
-        coh = vote(ctx.judge, coh_prompt, COHERENCE_SCHEMA,
-                   k=ctx.config.votes, cache=ctx.llm_cache)
+        coh = vote(ctx.judge, coh_prompt, COHERENCE_SCHEMA, k=asked, cache=ctx.llm_cache)
         vetoes = vote_items(
             [{"v": [{"id": str(e["id"]), "x": "veto"} for e in r.get("vetoes", [])]} for r in coh.responses],
-            items_key="v", id_key="id", value_key="x", agree=ctx.config.agree,
+            items_key="v", id_key="id", value_key="x", agree=agree,
         )
         vetoed = {int(i) for i, t in vetoes.items() if t.winner == "veto" and i.isdigit()}
         # extends: a sentence is added when a supermajority adds it to some cut
@@ -97,11 +114,12 @@ def run(ctx: Context, existing: list[Cut]) -> tuple[list[Cut], dict]:
         for r in coh.responses:
             seen = {str(sid) for e in r.get("extends", []) for sid in e.get("add_ids", [])}
             adds.update(seen)
-        extend_sids = {sid for sid, c in adds.items() if c >= ctx.config.agree and sid in by_sid}
+        extend_sids = {sid for sid, c in adds.items() if c >= agree and sid in by_sid}
         kept: list[Cut] = []
         for i, c in enumerate(cuts):
             if i in vetoed:
                 notes["content"]["vetoed"] += 1
+                unapplied.append((c, "vetoed"))
                 continue
             kept.append(c)
         for sid in sorted(extend_sids):
@@ -109,9 +127,12 @@ def run(ctx: Context, existing: list[Cut]) -> tuple[list[Cut], dict]:
             kept.append(Cut(s.start, s.end, "content", s.text, provenance={"sentences": [sid, sid], "reason": "coherence-extend", "votes": adds[sid]}))
         # Extended sentences can exceed the caps the passages above respected,
         # so the final list is checked again.
-        cuts = _limit(sorted(kept, key=lambda c: c.start), ctx, notes)
+        cuts = _limit(sorted(kept, key=lambda c: c.start), ctx, notes, unapplied)
         notes["content"]["extended"] = sum(c.provenance["reason"] == "coherence-extend" for c in cuts)
         notes["content"]["coherence_prompt_sha"] = coh.prompt_sha
     notes["content"]["cuts"] = len(cuts)
     notes["content"]["prompt_sha"] = result.prompt_sha
+    notes["content"]["proposals"] = sorted(
+        [_proposal(c, "applied", asked) for c in cuts] + [_proposal(c, why, asked) for c, why in unapplied],
+        key=lambda p: (p["start"], p["end"]))
     return cuts, notes

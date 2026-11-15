@@ -44,6 +44,9 @@ class Context:
     provenance: dict = field(default_factory=dict)
     # Approved owner preferences from this cook's snapshot; empty means none.
     preferences: str = ""
+    # What the video promises, the points that deliver it, its feel and what is protected; the content judge
+    # reads it. Empty means the judge has only the topic line.
+    brief: str = ""
     noise_cuts: list = field(default_factory=list)
     # Voiced, speech-level spans no refined word covers (a word the ASR
     # dropped). The waveform's own word list: the edge guard and the

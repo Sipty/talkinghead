@@ -193,7 +193,17 @@ RETAKE_SCHEMA = {
 CONTENT_REASONS = ["redundant", "false-start", "self-talk", "digression", "no-value", "warmup"]
 
 
-def content_prompt(sents: list[Sentence], topic: str | None) -> str:
+def content_prompt(sents: list[Sentence], topic: str | None, brief: str = "") -> str:
+    """The content judge's task. No brief leaves the prompt byte-identical, so earlier answers replay."""
+    against = ""
+    if brief.strip():
+        against = (
+            "The brief below says what this video promises, the points that deliver it, how it should feel, "
+            "and what is protected. Judge every passage against it. A passage stays when it delivers the "
+            "promise, sets up or backs one of the points, or carries the feel. A passage that does none of "
+            "these is a digression: list it, however long it is. Never list anything the brief protects.\n\n"
+            f"--- BRIEF ---\n{brief.strip()}\n--- END BRIEF ---\n\n"
+        )
     return (
         _topic_line(topic)
         + "TASK: CONTENT\n"
@@ -201,7 +211,8 @@ def content_prompt(sents: list[Sentence], topic: str | None) -> str:
         "sentences (by id) that do not earn their runtime, grouped into passages, each with a reason "
         f"from {CONTENT_REASONS} and a one-line why. Cut whole sentences only. When unsure, do not "
         "list it. Empty list when everything earns its place.\n\n"
-        f"--- TRANSCRIPT ---\n{sentence_table(sents)}\n"
+        + against
+        + f"--- TRANSCRIPT ---\n{sentence_table(sents)}\n"
     )
 
 

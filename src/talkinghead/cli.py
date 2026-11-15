@@ -3,12 +3,14 @@
     talkinghead run VIDEO [--audio RECORDING] [--demo MINUTES] [--topic ...] [--cold-open S] [--outro S]
                     [--audio-only] [--judge SPEC] [--transcriber scribe|parakeet|whisper]
                     [--scribe-response JSON --scribe-audio WAV] [--no-output-asr]
-                    [--profile DIR] [--refresh-preferences]
+                    [--profile DIR] [--refresh-preferences] [--brief FILE]
     talkinghead align VIDEO AUDIO [-o OUT] [--json] [--fix-drift] [--yes]
     talkinghead render PLAN.json --out OUT.mp4 --lock LOCK | OUT.m4a | OUT.wav --audio-only
     talkinghead lock PLAN.json --audio MASTER.m4a [--out LOCK]
     talkinghead render PLAN.json --lock LOCK --window START:END --out PASSAGE.mp4   (picture only, for companions)
     talkinghead timings PLAN.json --lock LOCK --anchors ANCHORS.json [--out TIMINGS.json]
+    talkinghead repeats PLAN.json [--votes N] [--words JSON] [--out-dir DIR]      (proposals only)
+    talkinghead coldread PLAN.json --title TITLE [--judge SPEC] [--votes N]       (proposals only)
     talkinghead inspect OUT_DIR
     talkinghead board RUN_DIR [--spec JSON] [--out MP4]                 (experimental)
     talkinghead board-page RUN_DIR [--spec JSON] [--port N] [--no-open] (experimental)
@@ -38,7 +40,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from . import __version__, isolate
+from . import __version__, isolate, reads
 from .align import AlignResult, align, analyze
 from .analysis import analyze as analyze_recording
 from .color import hdr_codec, probe_color
@@ -50,6 +52,7 @@ from .judge import (
     FallbackJudge,
     Judge,
     JudgeUnavailable,
+    LLMCache,
     PanelJudge,
     ShellJudge,
     judge_model,
@@ -57,7 +60,7 @@ from .judge import (
 )
 from .lock import LockMismatch, audio_stream_md5, check_lock, read_lock, write_lock
 from .pipeline import PipelineError, edge_context, run_pipeline, settings_fps
-from .profile import profile_dir, read_preferences
+from .profile import SNAPSHOT, profile_dir, read_preferences
 from .prompts import system_prompt
 from .render import RenderSettings, render_audio_plan, render_picture, render_plan
 from .stages.polish import POLISH_SCHEMA
@@ -230,6 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="editing profile directory (default: $TALKINGHEAD_PROFILE)")
     run.add_argument("--refresh-preferences", action="store_true",
                      help="re-take this cook's preferences snapshot from the current profile")
+    run.add_argument("--brief", default=None, metavar="FILE",
+                     help="what the video promises, the points that deliver it, how it should feel and what is "
+                          "protected; the content judge reads every passage against it. Copied to brief.md in "
+                          "the run directory, which later runs read on their own")
 
     al = sub.add_parser("align", help="align an external recording onto a video and remux the master")
     al.add_argument("video", help="video master (its picture is copied; only a display rotation is re-encoded)")
@@ -311,6 +318,22 @@ def build_parser() -> argparse.ArgumentParser:
     les.add_argument("--text", default=None, help="with accept: the rule as it should be saved, reworded")
     les.add_argument("--profile", default=None, metavar="DIR",
                      help="editing profile directory (default: $TALKINGHEAD_PROFILE)")
+
+    for name, what in (("repeats", "list kept passages that restate an earlier kept passage"),
+                       ("coldread", "have a viewer who knows only the title mark where they would stop watching")):
+        rd = sub.add_parser(name, help=f"{what}; writes proposals beside the plan and cuts nothing")
+        rd.add_argument("plan")
+        rd.add_argument("--words", default=None, metavar="JSON",
+                        help="the cook's source words (default: audio/source-words.json beside the plan)")
+        rd.add_argument("--out-dir", default=None, help="where the proposals go (default: editorial/ beside the plan)")
+        rd.add_argument("--judge", default=None, metavar="SPEC", help="default: TALKINGHEAD_JUDGE")
+        rd.add_argument("--config", default=None, help="TOML file with overrides (default: $TALKINGHEAD_CONFIG)")
+        if name == "repeats":
+            rd.add_argument("--votes", type=int, default=3,
+                            help="samples asked; each proposal reports how many named it (default: 3)")
+        else:
+            rd.add_argument("--title", required=True, help="the title the viewer clicked")
+            rd.add_argument("--votes", type=int, default=1, help="independent reads (default: 1)")
     return p
 
 
@@ -661,6 +684,67 @@ def _lock_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _guidelines_text(cfg: Config) -> str:
+    """The editorial guidelines the config names; a relative path is read from the source checkout."""
+    path = Path(cfg.guidelines)
+    if not path.is_absolute():
+        path = _repo_file(cfg.guidelines)
+    if not path.is_file():
+        raise FileNotFoundError(f"guidelines not found: {path}. Bundled files come from the source "
+                                "checkout: run talkinghead from a clone (`uv sync` in the checkout), or pass "
+                                "--guidelines with a path of your own.")
+    return path.read_text()
+
+
+def _viewer_judge(spec: str, *, model: str | None, effort: str | None, timeout: float) -> Judge:
+    """The cold read's judge: the same adapters, but without the editor's role or guidelines, which a viewer lacks."""
+    if spec == "claude":
+        return ClaudeCodeJudge(model=model, effort=effort)
+    if spec.startswith("shell:"):
+        return ShellJudge(spec[len("shell:"):], model=model, timeout=timeout)
+    raise ValueError(f"unknown judge {spec!r}: use 'claude' or 'shell:<command>'")
+
+
+def _read_cmd(args: argparse.Namespace) -> int:
+    """`repeats` and `coldread`: read the plan's kept words and write proposals beside the plan. Nothing is cut."""
+    if args.votes < 1:
+        raise ValueError("--votes must be at least 1")
+    cfg = load_config(_config_file(args.config), judge=args.judge)
+    if cfg.judge is None:
+        raise ValueError(NO_JUDGE)
+    plan_path = Path(args.plan).resolve()
+    plan = Plan.from_json(plan_path.read_text())
+    root = plan_path.parent
+    words_path = Path(args.words) if args.words else root / "audio" / "source-words.json"
+    if not words_path.is_file():
+        raise FileNotFoundError(f"source words not found: {words_path}. A cook writes audio/source-words.json in "
+                                "its run directory; pass --words when the plan sits elsewhere")
+    lines = reads.kept_lines(plan, reads.load_words(words_path, plan))
+    if not lines:
+        raise ValueError(f"{args.plan} keeps none of the words in {words_path}")
+    out_dir = Path(args.out_dir) if args.out_dir else root / "editorial"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (root / "llm").mkdir(exist_ok=True)
+    cache = LLMCache(root / "llm")
+    model = judge_model(cfg.judge, cfg.model)
+    if args.cmd == "repeats":
+        judge = build_judge(cfg.judge, model=model, guidelines=_guidelines_text(cfg), effort=cfg.effort,
+                            timeout=cfg.judge_timeout, fallback_command=cfg.fallback_command)
+        # The cook's own preferences snapshot, so this read follows the rules the cut was judged with.
+        snapshot = root / SNAPSHOT
+        rows = reads.repeats(lines, judge, votes=args.votes, cache=cache,
+                             preferences=snapshot.read_text().strip() if snapshot.is_file() else "")
+        payload, text, stem = {"judge": judge.name, "repeats": rows}, reads.repeats_markdown(rows), "repeats"
+    else:
+        judge = _viewer_judge(cfg.judge, model=model, effort=cfg.effort, timeout=cfg.judge_timeout)
+        payload = reads.cold_read(lines, judge, args.title, votes=args.votes, cache=cache)
+        text, stem = reads.cold_markdown(payload), "cold-read"
+    atomic_write_text(out_dir / f"{stem}.json", json.dumps(payload, indent=1) + "\n")
+    atomic_write_text(out_dir / f"{stem}.md", text)
+    print(out_dir / f"{stem}.md")
+    return 0
+
+
 def _command(args: argparse.Namespace) -> int:
     if args.cmd == "align":
         return _align_cmd(args)
@@ -734,6 +818,8 @@ def _command(args: argparse.Namespace) -> int:
         print(f"rendered {args.out}")
         print(cmd, file=sys.stderr)
         return 0
+    if args.cmd in ("repeats", "coldread"):
+        return _read_cmd(args)
     return _run_cmd(args)
 
 
@@ -787,14 +873,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
     if not args.audio_only:
         _check_hdr_encoder(video)
     cfg = replace(cfg, model=judge_model(cfg.judge, cfg.model))
-    guidelines_path = Path(cfg.guidelines)
-    if not guidelines_path.is_absolute():
-        guidelines_path = _repo_file(cfg.guidelines)
-    if not guidelines_path.is_file():
-        raise FileNotFoundError(f"guidelines not found: {guidelines_path}. Bundled files come from the source "
-                                "checkout: run talkinghead from a clone (`uv sync` in the checkout), or pass "
-                                "--guidelines with a path of your own.")
-    guidelines = guidelines_path.read_text()
+    guidelines = _guidelines_text(cfg)
     assets = Path(args.assets_dir or cfg.assets_dir)
     if args.assets_dir is None and not assets.is_absolute():
         assets = _repo_file(cfg.assets_dir)
@@ -827,6 +906,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
         audio_only=args.audio_only, verify_output_asr=not args.no_output_asr,
         preferences=read_preferences(profile_dir(args.profile)),
         refresh_preferences=args.refresh_preferences, plan_only=args.plan_only, stop_at_lock=args.stop_at_lock,
+        brief=Path(args.brief).read_text() if args.brief else "",
     )
     if args.plan_only:
         print(f"plan: {result.plan_path}")

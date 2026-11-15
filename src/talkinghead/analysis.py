@@ -204,6 +204,7 @@ def analyze(
     guidelines: str,
     topic: str | None = None,
     preferences: str = "",
+    brief: str = "",
     allow_av_mismatch: bool = False,
     audio_only: bool = False,
 ) -> Context:
@@ -302,6 +303,7 @@ def analyze(
     ctx = Context(
         config=config, source=source, words=words, env=env, floor=floor, silences=pause_silences, moans=moans,
         judge=judge, llm_cache=LLMCache(run.llm_dir), guidelines=guidelines, topic=topic, preferences=preferences,
+        brief=brief,
         decisions=run.read_json(run.decisions, default={}),
         noise_cuts=noise_cuts, voices=voices, speech_probes=speech_probes, protected_spans=protected,
         provenance={

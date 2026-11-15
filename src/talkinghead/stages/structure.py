@@ -30,10 +30,10 @@ def _decide(ctx: Context, key: str, flag: str, prompt: str, schema: dict, answer
     if user is not None:
         return None, {"source": "user", "value": user}
     text = with_preferences(with_conversation(prompt, ctx.conversation), ctx.preferences)
-    result = vote(ctx.judge, text, schema, k=ctx.config.votes,
-                  cache=ctx.llm_cache)
+    asked, agree = ctx.config.stage_votes("structure")
+    result = vote(ctx.judge, text, schema, k=asked, cache=ctx.llm_cache)
     valid = [r for r in result.responses if str(r.get(answer_key)) in options]
-    tally = vote_scalar(valid, answer_key, agree=ctx.config.agree)
+    tally = vote_scalar(valid, answer_key, agree=agree)
     record = {
         "source": "vote", "chosen": tally.winner, "votes": tally.counts,
         "candidates": options, "prompt_sha": result.prompt_sha,
@@ -44,7 +44,7 @@ def _decide(ctx: Context, key: str, flag: str, prompt: str, schema: dict, answer
                  if tally.counts.get(o, 0)]
         raise NeedsDecision(
             key, flag,
-            f"{key.replace('_', ' ')}: no supermajority ({ctx.config.agree}/{ctx.config.votes}). "
+            f"{key.replace('_', ' ')}: no supermajority ({agree}/{asked}). "
             f"Votes:\n" + "\n".join(lines) + f"\nRerun with {flag} SECONDS to decide; the answer is persisted.",
             [{"id": o, "votes": tally.counts.get(o, 0), "text": labels.get(o, "")} for o in options],
         )

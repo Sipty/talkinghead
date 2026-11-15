@@ -53,11 +53,14 @@ def _quote(words: list, a: int, b: int, pad: int = 0) -> str:
 
 
 def _pass_a(ctx: Context, table: str) -> tuple[list[Span], dict]:
-    """Global sweep; span-level voting, intersection-leaning boundaries."""
+    """Global sweep; span-level voting, intersection-leaning boundaries.
+
+    A cluster too few samples named is not cut, but it is kept in the notes as `maybe`: the editor's retake
+    audit starts from those instead of finding them again by reading."""
     n = len(ctx.words)
+    asked, agree = ctx.config.stage_votes("retake")
     prompt = with_preferences(with_conversation(retake_prompt(table, ctx.topic), ctx.conversation), ctx.preferences)
-    result = vote(ctx.judge, prompt, RETAKE_SCHEMA,
-                  k=ctx.config.votes, cache=ctx.llm_cache)
+    result = vote(ctx.judge, prompt, RETAKE_SCHEMA, k=asked, cache=ctx.llm_cache)
     per_response: list[list[tuple[int, int]]] = []
     dropped_bad = dropped_overlong = proposed = 0
     for resp in result.responses:
@@ -73,10 +76,14 @@ def _pass_a(ctx: Context, table: str) -> tuple[list[Span], dict]:
                 continue
             spans.append((a, b))
         per_response.append(spans)
-    kept = cluster_spans(per_response, agree=ctx.config.agree, mode="narrow")
+    kept = cluster_spans(per_response, agree=agree, mode="narrow")
+    # The same clusters at their widest; the ones under the bar are exactly those the line above dropped.
+    maybe = [{"words": [s.a, s.b], "votes": s.votes, "of": asked, "time": round(ctx.words[s.a].start, 2),
+              "quote": _quote(ctx.words, s.a, s.b)}
+             for s in cluster_spans(per_response, agree=1, mode="wide") if s.votes < agree]
     notes = {"proposed": proposed, "dropped_bad_ids": dropped_bad,
              "dropped_overlong": dropped_overlong, "spans": len(kept),
-             "prompt_sha": result.prompt_sha}
+             "maybe": maybe, "prompt_sha": result.prompt_sha}
     return kept, notes
 
 

@@ -169,6 +169,7 @@ uv run talkinghead run ~/Movies/talk.mov --audio ~/Movies/mic.wav --topic "one l
 `--audio` is optional.
 Use it when a separate microphone recording exists (see [Two inputs](#two-inputs)).
 `--topic` is one line about the video. It goes into every judgment prompt, and it is the cheapest way to improve the judge's answers.
+`--brief FILE` goes further for the content judge: a short file saying what the video promises, the points that deliver it, how it should feel, and what must stay. The judge then reads every passage against it instead of against a general standard. The file is copied to `brief.md` in the run directory, and later runs read that copy on their own.
 
 The run directory is `talk.talkinghead/`, next to `talk.mov`.
 
@@ -251,6 +252,9 @@ Unknown keys are an error, so a typo stops the run instead of being ignored.
 A `talkinghead.toml` in the repository root is not loaded automatically.
 
 The settings most people change first are `votes` and `agree` (the vote size), `content_enabled`, `visuals_enabled`, `visuals_research`, `visuals_corner`, `crf` and `preset` (final quality), and `judge_timeout`.
+
+Three stages can carry their own vote size, falling back to `votes` and `agree` when unset: `structure_votes`/`structure_agree` (cold open and outro), `retake_votes`/`retake_agree` (the retake sweep) and `content_votes`/`content_agree` (content and its coherence check).
+A judged passage that is not cut is not lost. The content memo (`stages/content.json`, `notes.content.proposals`) lists every passage a sample named, with its vote count and a status: `applied`, `below_agree`, `overlong`, `over_budget` or `vetoed`. The retakes memo lists retake clusters under the bar as `notes.retakes.pass_a.maybe`. Read both before a hand edit.
 
 #### Voice isolation (macOS only, opt-in)
 
@@ -405,6 +409,8 @@ The measurement is written to `align.json` in the run directory:
 | `talkinghead render PLAN.json --out OUT.mp4 --lock LOCK` | re-render a finished plan's picture exactly, with no judgment. A video render requires `--lock`, a lock that matches the plan and the master (see [Audio first, then the picture](#audio-first-then-the-picture)). `--audio-only --out OUT.m4a` renders the AAC audio master on the picture's frame grid, and `--audio-only --out OUT.wav` renders an audio-only plan. `--window START:END` (with `--lock`) renders only that stretch of the picture. `--refine-joins` works only on the audio preview (`--audio-only`), never with `--lock`: refine there, then lock and render the refined plan. It first refines the joins against the recording's cached analysis (no new ASR call) and writes `OUT.plan.json` and `OUT.joins.json` (the moves) beside the output; without it the plan is rendered as written. Joins already refined are recorded in the plan's `provenance.refined_joins` and skipped on a rerun, so re-running on the refined plan moves nothing; only a join whose edge pair was edited since is refined again |
 | `talkinghead lock PLAN.json --audio MASTER.m4a [--out LOCK]` | approve an audio master: writes the lock that binds the plan to the master's audio bytes. The lock defaults to `edit-lock.json` beside the plan |
 | `talkinghead timings PLAN.json --lock LOCK --anchors ANCHORS.json [--out TIMINGS]` | map source-time anchors to output time on a locked plan, for companion animations. It writes `timings.json` beside the lock unless `--out` says otherwise |
+| `talkinghead repeats PLAN.json [--votes N] [--words JSON] [--out-dir DIR]` | read the plan's kept words in output order and list passages that restate an earlier kept passage, each with the number of samples that named it. Writes `editorial/repeats.md` and `.json` beside the plan. It proposes; nothing is cut |
+| `talkinghead coldread PLAN.json --title TITLE [--judge SPEC] [--votes N]` | a reader who gets only the title and the kept words marks where a viewer would stop watching, and why. The reader gets no editorial guidelines. Point `--judge` at a different model than the one that made the cut, so it does not share that model's blind spots. Writes `editorial/cold-read.md` and `.json`. It proposes; nothing is cut |
 | `talkinghead inspect RUN_DIR` | print a run's `report.md` |
 | `talkinghead feedback RUN_DIR "note" [--at TIME] [--kind video\|preference\|defect] [--lesson TEXT]` | record feedback on a cut; see [Editing profile](#editing-profile). `--kind defect --at TIME` also turns what you heard into a fixture and a test stub under the clone's `tests/` |
 | `talkinghead lessons [list\|accept ID [--text TEXT]\|reject ID]` | review proposed lessons and promote approved ones to `preferences.md` |

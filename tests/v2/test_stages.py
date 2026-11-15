@@ -193,3 +193,82 @@ def test_pauses_stage_cuts_silences_and_fillers_mechanically() -> None:
     assert lead and (lead[0].start, lead[0].end) == pytest.approx((0.875, 1.725))
     # The 0.7 s, 0.6 s, 0.4 s and 1.0 s pauses would each trim 0.60 s or less, so they stay whole (min_pause_cut).
     assert notes["pauses"]["silence"] == 2
+
+
+# ------------------------------------------------- per-stage votes, proposals
+
+def test_a_stage_with_its_own_vote_count_asks_and_requires_that_many() -> None:
+    # Start and end are decided on one sample each; the shared 5-of-4 default still governs the other stages.
+    cfg = Config(votes=5, agree=4, structure_votes=1, structure_agree=1)
+    judge = FakeJudge([{"true_start": "S0001", "why": ""}, {"last_sentence": "S0005", "why": ""}])
+    cuts, decisions = structure.run(_ctx(judge, cfg=cfg))
+    assert judge.calls == 2
+    assert decisions["cold_open"]["chosen"] == "S0001" and decisions["outro"]["chosen"] == "S0005"
+
+
+def test_per_stage_votes_rekey_only_their_own_stage_and_leave_no_trace_when_unset() -> None:
+    from types import SimpleNamespace
+
+    from talkinghead.config import STAGE_VOTE_KEYS
+    from talkinghead.pipeline import STAGE_CONFIG_KEYS, _stage_config
+
+    base, tuned = Config(), Config(content_votes=3, content_agree=2)
+    assert not set(STAGE_VOTE_KEYS) & set(base.to_dict())
+    for stage in [*STAGE_CONFIG_KEYS, "visuals"]:
+        plain = _stage_config(SimpleNamespace(config=base), stage)
+        assert not set(STAGE_VOTE_KEYS) & set(plain["config"]), stage
+        assert (plain != _stage_config(SimpleNamespace(config=tuned), stage)) == (stage == "content"), stage
+
+
+def test_a_stage_vote_count_that_cannot_be_met_is_refused() -> None:
+    # Three samples can never produce the default four that must agree.
+    with pytest.raises(ValueError, match="content_agree"):
+        Config(content_votes=3).validate()
+
+
+def test_retake_clusters_under_the_bar_are_kept_as_a_maybe_list() -> None:
+    cfg = Config(retake_votes=3, retake_agree=2, marker_votes=1, marker_agree=1)
+    both = {"retakes": [{"from_word": "w0002", "to_word": "w0004", "why": "first take"}]}
+    lone = {"retakes": [{"from_word": "w0002", "to_word": "w0004", "why": ""},
+                        {"from_word": "w0010", "to_word": "w0012", "why": "one sample only"}]}
+    answers = [both, lone, {"retakes": []}] + [{"verdict": "keep", "why": "trademark greeting"}]
+    cuts, notes = retakes.run(_ctx(FakeJudge(answers), cfg=cfg))
+    assert [(c.start, c.end) for c in cuts] == [(2.0, 2.9)]
+    assert notes["retakes"]["pass_a"]["maybe"] == [
+        {"words": [10, 12], "votes": 1, "of": 3, "time": 6.0, "quote": "Second point here."}]
+
+
+def test_content_reports_every_judged_passage_with_its_score_and_fate() -> None:
+    # S0004 (1.0 s) is named by all three samples but is over the 0.8 s cap; "Um" (S0002) is named by two and is
+    # cut; "Hold on." (S0000) is named by one, under the bar. None of the three is lost to the editor.
+    cfg = Config(content_votes=3, content_agree=2, content_max_cut_sec=0.8)
+
+    def cut(*ids: str) -> dict:
+        return {"cuts": [{"ids": [sid], "reason": "digression", "why": ""} for sid in ids]}
+
+    answers = [cut("S0004", "S0002", "S0000"), cut("S0004", "S0002"), cut("S0004")]
+    answers += [{"vetoes": [], "extends": []}] * 3
+    cuts, notes = content.run(_ctx(FakeJudge(answers), cfg=cfg), existing=[])
+    assert [(c.start, c.end) for c in cuts] == [(3.6, 3.9)]
+    assert {p["sentences"][0]: (p["status"], p["votes"], p["of"]) for p in notes["content"]["proposals"]} == {
+        "S0000": ("below_agree", 1, 3), "S0002": ("applied", 2, 3), "S0004": ("overlong", 3, 3)}
+
+
+def test_the_content_judge_reads_the_brief_and_an_empty_brief_changes_nothing() -> None:
+    from talkinghead.prompts import content_prompt
+
+    prompts: list[str] = []
+
+    class Spy(FakeJudge):
+        def decide(self, prompt: str, schema: dict) -> dict:
+            prompts.append(prompt)
+            return super().decide(prompt, schema)
+
+    ctx = _ctx(Spy([{"cuts": []}] * 5))
+    ctx.brief = "PROMISE: tests pay for themselves"
+    content.run(ctx, existing=[])
+    assert "--- BRIEF ---\nPROMISE: tests pay for themselves\n--- END BRIEF ---" in prompts[0]
+    # Without a brief the prompt is the one earlier cooks were judged on, so their cached answers replay.
+    sents = ctx.sentences()
+    assert content_prompt(sents, "testing", "  ") == content_prompt(sents, "testing")
+    assert "BRIEF" not in content_prompt(sents, "testing")

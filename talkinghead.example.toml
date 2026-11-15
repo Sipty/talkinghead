@@ -45,6 +45,14 @@
 # votes = 5
 # agree = 4
 
+# Vote sizes for single stages; unset uses votes/agree above. Set both keys of a pair.
+# structure_votes = 5      # cold open and outro
+# structure_agree = 4
+# retake_votes = 5         # the whole-transcript retake sweep
+# retake_agree = 4
+# content_votes = 5        # content cuts and their coherence check
+# content_agree = 4
+
 # Seconds one judge answer may take before it is abandoned and retried.
 # judge_timeout = 3600.0
 

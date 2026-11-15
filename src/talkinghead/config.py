@@ -17,6 +17,10 @@ ENV_CONFIG = "TALKINGHEAD_CONFIG"
 
 # The voice-isolation knobs: they shape only the rendered audio, so no editorial stage's memo keys on them.
 ISOLATE_KEYS = ("isolate_voice", "isolate_mix")
+# Stages that may carry their own vote count, and the keys that hold it. An unset key is absent from every
+# memo key and config digest, so a cook that never set one keeps the keys it always had.
+VOTE_STAGES = ("structure", "retake", "content")
+STAGE_VOTE_KEYS = tuple(f"{stage}_{part}" for stage in VOTE_STAGES for part in ("votes", "agree"))
 
 # Corner name -> ffmpeg overlay expressions for (x, y), with `{m}` the margin.
 OVERLAY_CORNERS: dict[str, tuple[str, str]] = {
@@ -105,6 +109,14 @@ class Config:
     # Voting
     votes: int = 5
     agree: int = 4
+    # Per-stage vote counts: the start/end decision, the retake sweep, and the content judge with its
+    # coherence check. None uses votes/agree above.
+    structure_votes: int | None = None
+    structure_agree: int | None = None
+    retake_votes: int | None = None
+    retake_agree: int | None = None
+    content_votes: int | None = None
+    content_agree: int | None = None
     # Per-sample wall clock for the shell judge; a hung model answer must not
     # kill a long cook, but sol occasionally needs well over 30 min on big
     # whole-transcript prompts before it streams a schema reply.
@@ -245,12 +257,22 @@ class Config:
     # Wet fraction of the isolated track: 1 is fully isolated, 0 is the original microphone audio.
     isolate_mix: float = 1.0
 
+    def stage_votes(self, stage: str) -> tuple[int, int]:
+        """(samples asked, samples that must agree) for one of VOTE_STAGES: its own setting, else votes/agree."""
+        k, agree = getattr(self, f"{stage}_votes"), getattr(self, f"{stage}_agree")
+        return (self.votes if k is None else k, self.agree if agree is None else agree)
+
     def validate(self) -> "Config":
         if self.agree > self.votes:
             raise ValueError(f"agree ({self.agree}) cannot exceed votes ({self.votes})")
         if self.marker_agree > self.marker_votes:
             raise ValueError(
                 f"marker_agree ({self.marker_agree}) cannot exceed marker_votes ({self.marker_votes})")
+        for stage in VOTE_STAGES:
+            k, agree = self.stage_votes(stage)
+            if not 1 <= agree <= k:
+                raise ValueError(f"{stage}_agree ({agree}) must be between 1 and {stage}_votes ({k}); "
+                                 f"a stage that sets one of the two usually needs both")
         if self.pause_keep >= self.pause_above:
             raise ValueError("pause_keep must be shorter than pause_above")
         if not 0.0 <= self.pause_keep_ratio <= 1.0:
@@ -313,6 +335,10 @@ class Config:
         if not self.isolate_voice:
             # Isolation off leaves plan provenance as it was; the mix means nothing without it.
             for k in ISOLATE_KEYS:
+                del d[k]
+        for k in STAGE_VOTE_KEYS:
+            # Unset per-stage votes leave no trace, like every opt-in above.
+            if d[k] is None:
                 del d[k]
         return d
 
